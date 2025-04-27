@@ -10,6 +10,13 @@ A high-velocity, self-sufficient Python AI agent framework that leverages the Op
   </a>
 </p>
 
+## 🧠 Start
+```
+git clone https://github.com/machinegpt/agent.git
+
+python machine.py
+```
+
 ## ✨ Contributions
 
 Contributions, suggestions, bug reports and fixes are welcome!
