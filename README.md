@@ -10,9 +10,22 @@ A high-velocity, self-sufficient Python AI agent framework that leverages the Op
   </a>
 </p>
 
+
+## 🔧 Environment Setup
+This project requires an OpenAI API key to function. To provide it, create a .env file in the root directory with the following content:
+```
+OPENAI_API_KEY=
+```
+Alternatively, you can copy the provided .env.example file and update the key:
+```
+cp .env.example .env
+```
+
 ## 🧠 Start
+To start the agent, simply run:
 ```
 git clone https://github.com/machinegpt/agent.git
+cd agent
 
 python machine.py
 ```
