@@ -1,4 +1,4 @@
-import os, sys, platform, datetime, getpass, re, subprocess
+import os, sys, platform, datetime, getpass, time, subprocess
 
 def package(p):
     subprocess.check_call([sys.executable, "-m", "pip", "install", p])
@@ -43,15 +43,15 @@ user = getpass.getuser()
 py = sys.executable
 you = os.path.abspath(__file__)
 
-start = "#<python>\n"
+unique_key = str(int(time.time()))
+start = f"#<python_{unique_key}>\n"
 end = "#</python>"
 
 def bld():
     return f"\n{now}\n{osy}\n{arch}\n{host}\n{user}\n{py}\n{you}\n"
 
 def aut(cmd):
-    cmf = bld()
-    prompt = f"\n{cmf}\n"
+    prompt = bld()
     prompt += start + open(os.path.abspath(__file__), encoding="utf-8").read() + end
     prompt += open("prompt.txt", encoding="utf-8").read()
     response = client.responses.create(
