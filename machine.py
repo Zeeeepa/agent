@@ -1,4 +1,4 @@
-import os, sys, platform, datetime, socket, getpass, re, subprocess
+import os, sys, platform, datetime, getpass, re, subprocess
 
 def package(p):
     subprocess.check_call([sys.executable, "-m", "pip", "install", p])
@@ -39,36 +39,34 @@ now = datetime.datetime.now()
 osy = platform.system() + " " + platform.release()
 arch = platform.machine()
 host = platform.node()
-ip = socket.gethostbyname(socket.gethostname())
 user = getpass.getuser()
 py = sys.executable
 you = os.path.abspath(__file__)
 
 def bld():
-    return f"\n{now}\n{osy}\n{arch}\n{host}\n{ip}\n{user}\n{py}\n{you}\n"
+    return f"\n{now}\n{osy}\n{arch}\n{host}\n{user}\n{py}\n{you}\n"
 
 def aut(cmd, tools=None):
     cmf = bld()
-    ins = open("prompt.txt", encoding="utf-8").read()
-    ins += f"\n{cmf}\n"
+    prompt = open("prompt.txt", encoding="utf-8").read()
+    prompt += f"\n{cmf}\n"
 
-    if not os.path.basename(os.path.abspath(__file__)) == "machine.py":
-        ins += "\nThis is you:\n```python\n" + open("machine.py", encoding="utf-8").read() + "\n```"
-    
-    ins += "\nYou are this program:\n```python\n" +  open(os.path.abspath(__file__), encoding="utf-8").read() + "\n```"
+    prompt += "\nYou are this program:\n```python\n" +  open(os.path.abspath(__file__), encoding="utf-8").read() + "\n```"
+
+    msg = f"Write Python code that fully accomplishes the command:\n{cmd}"
     
     tools = tools or [{"type": "web_search_preview"}]
 
     response = client.responses.create(
-        instructions=ins,
+        instructions=prompt,
         model="gpt-4.1",
         tools=[tools],
-        input=cmd
+        input=msg
     )
     log(cmd)
     log(f"\nAgent: \n{response.output_text}\n")
 
-    ins += f"\n```\n{response.output_text}\n```"
+    prompt += f"\n```\n{response.output_text}\n```"
 
     return response.output_text
 
