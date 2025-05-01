@@ -43,37 +43,30 @@ user = getpass.getuser()
 py = sys.executable
 you = os.path.abspath(__file__)
 
+start = "#<python>\n"
+end = "#</python>"
+
 def bld():
     return f"\n{now}\n{osy}\n{arch}\n{host}\n{user}\n{py}\n{you}\n"
 
-def aut(cmd, tools=None):
+def aut(cmd):
     cmf = bld()
-    prompt = open("prompt.txt", encoding="utf-8").read()
-    prompt += f"\n{cmf}\n"
-
-    prompt += "\nYou are this program:\n```python\n" +  open(os.path.abspath(__file__), encoding="utf-8").read() + "\n```"
-
-    msg = f"Write Python code that fully accomplishes the command:\n{cmd}"
-    
-    tools = tools or [{"type": "web_search_preview"}]
-
+    prompt = f"\n{cmf}\n"
+    prompt += start + open(os.path.abspath(__file__), encoding="utf-8").read() + end
+    prompt += open("prompt.txt", encoding="utf-8").read()
     response = client.responses.create(
         instructions=prompt,
         model="gpt-4.1",
         tools=[tools],
-        input=msg
+        input=cmd
     )
     log(cmd)
     log(f"\nAgent: \n{response.output_text}\n")
-
-    prompt += f"\n```\n{response.output_text}\n```"
-
     return response.output_text
 
 def ext(x):
-    m = re.search(r"```python\n(.*?)```", x, re.S)
-    if m:
-        return m.group(1)
+    if start in x:
+        x = x.partition(start)[2].partition(end)[0]
     return x
 
 def log(x):
@@ -81,21 +74,18 @@ def log(x):
         f.write(x + "\n")
 
 if __name__ == "__main__":
-    while True:
+    while 1:
         try:
             cmd = input("Agent: ")
             if cmd.lower() == "file":
                 cmd = open("log.txt", encoding="utf-8").read().strip()
-
-                cde = aut(cmd, tools)
+                cde = aut(cmd)
                 rce = ext(cde)
-
                 exec(rce, globals())
             else:
-                cde = aut(cmd, tools)
+                cde = aut(cmd)
                 rce = ext(cde)
                 exec(rce, globals())
-
         except KeyboardInterrupt:
             break
         except Exception as e:
