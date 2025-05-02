@@ -60,7 +60,6 @@ def aut(cmd):
         tools=[tools],
         input=cmd
     )
-    log(cmd)
     log(f"\nAgent: \n{response.output_text}\n")
     return response.output_text
 
@@ -83,6 +82,7 @@ if __name__ == "__main__":
                 rce = ext(cde)
                 exec(rce, globals())
             else:
+                log(cmd)
                 cde = aut(cmd)
                 rce = ext(cde)
                 exec(rce, globals())
