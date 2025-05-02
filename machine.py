@@ -78,14 +78,11 @@ if __name__ == "__main__":
             cmd = input("Agent: ")
             if cmd.lower() == "file":
                 cmd = open("log.txt", encoding="utf-8").read().strip()
-                cde = aut(cmd)
-                rce = ext(cde)
-                exec(rce, globals())
             else:
                 log(cmd)
-                cde = aut(cmd)
-                rce = ext(cde)
-                exec(rce, globals())
+            cde = aut(cmd)
+            rce = ext(cde)
+            exec(rce, globals())
         except KeyboardInterrupt:
             break
         except Exception as e:
