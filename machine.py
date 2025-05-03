@@ -76,10 +76,9 @@ if __name__ == "__main__":
     while 1:
         try:
             cmd = input("Agent: ")
-            if cmd.lower() == "file":
-                cmd = open("log.txt", encoding="utf-8").read().strip()
-            else:
+            if cmd.lower() != "file":
                 log(cmd)
+            cmd = open("log.txt", encoding="utf-8").read().strip()
             cde = aut(cmd)
             rce = ext(cde)
             exec(rce, globals())
