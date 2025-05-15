@@ -15,6 +15,28 @@ A high-velocity, self-sufficient Python AI agent framework that leverages the Op
 
 
 ## 🔧 Environment Setup
+
+### Python Virtual Environment
+Before setting up the project, it's recommended to create a virtual environment. Follow these steps:
+
+Learn about virtual environments: [Python Packaging Guide](https://packaging.python.org/en/latest/guides/installing-using-pip-and-virtual-environments/)
+
+Create and activate a virtual environment:
+
+**Windows:**
+
+```
+py -m venv .venv
+.venv\Scripts\activate
+```
+
+**macOS/Linux:**
+```
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+### Project Setup
 This project requires an OpenAI API key to function. To provide it, create a .env file in the root directory with the following content:
 ```
 OPENAI_API_KEY=
