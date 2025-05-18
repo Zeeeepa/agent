@@ -29,3 +29,8 @@ Write Python code that fully accomplishes the command. Respond only with a Pytho
 #<python>
 # your code here
 #</python>
+
+If you need clarification before providing a final solution, write a question as part of the code and wrap it in:
+#<python_question>
+# your code here
+#</python>

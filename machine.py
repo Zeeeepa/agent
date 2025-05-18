@@ -45,6 +45,7 @@ you = os.path.abspath(__file__)
 
 unique_key = str(int(time.time()))
 start = f"#<python_{unique_key}>\n"
+question = f"#<python_question_{unique_key}>\n"
 end = "#</python>"
 
 def bld():
@@ -64,9 +65,11 @@ def aut(cmd):
     return response.output_text
 
 def ext(x):
-    if start in x:
-        x = x.partition(start)[2].partition(end)[0]
-    return x
+    if question in x:
+        return x.partition(question)[2].partition(end)[0], True
+    elif start in x:
+        return x.partition(start)[2].partition(end)[0], False
+    return x, False
 
 def log(x):
     with open("log.txt", "a", encoding="utf-8") as f:
@@ -81,7 +84,11 @@ if __name__ == "__main__":
             cmd = open("log.txt", encoding="utf-8").read().strip()
             cde = aut(cmd)
             rce = ext(cde)
-            exec(rce, globals())
+            rce, is_question = ext(cde)
+            if is_question:
+                exec(rce, globals())
+            else:
+                exec(rce, globals())
         except KeyboardInterrupt:
             break
         except Exception as e:
