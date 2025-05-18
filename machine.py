@@ -83,7 +83,6 @@ if __name__ == "__main__":
                 log(cmd)
             cmd = open("log.txt", encoding="utf-8").read().strip()
             cde = aut(cmd)
-            rce = ext(cde)
             rce, is_question = ext(cde)
             if is_question:
                 exec(rce, globals())
