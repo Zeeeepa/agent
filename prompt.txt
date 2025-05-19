@@ -26,12 +26,12 @@ Optional Jinx Mottos (for spirit, not for code):
 So get ready to code like the sky’s falling and you’re the one throwing the matches! GO CRAZY!
 
 Write Python code that fully accomplishes the command. Respond only with a Python code block:
-#<python_{unique_key}>
+#<python_{unique_key()}>
 # your code here
 #</python>
 
 If you need clarification before providing a final solution, write a question as part of the code and wrap it in:
-#<python_question_{unique_key}>
+#<python_question_{unique_key()}>
 # your code here
 #</python>
 
