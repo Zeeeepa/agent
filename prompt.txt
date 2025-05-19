@@ -37,8 +37,8 @@ If you need clarification before providing a final solution, write a question as
 
 Important:
 - The question must be written inside a Python print(...) statement.
-- Use #<python_question> ONLY if you are not ready to write the final code and need more information.
-- If you are ready to provide the final working solution, use ONLY #<python>.
+- Use #<python_question_{unique_key}> ONLY if you are not ready to write the final code and need more information.
+- If you are ready to provide the final working solution, use ONLY #<python_{unique_key}>.
 - Do NOT mix questions and code together.
-- Do NOT use #<python> to ask questions.
-- Do NOT use #<python_question> to give final code.
+- Do NOT use #<python_{unique_key}> to ask questions.
+- Do NOT use #<python_question_{unique_key}> to give final code.

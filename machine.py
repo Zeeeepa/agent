@@ -43,12 +43,12 @@ user = getpass.getuser()
 py = sys.executable
 you = os.path.abspath(__file__)
 
-unique_key = str(int(time.time()))
-start = f"#<python_{unique_key}>\n"
-question = f"#<python_question_{unique_key}>\n"
-end = "#</python>"
-
 def bld():
+    global unique_key, start, question, end
+    unique_key = str(int(time.time()))
+    start = f"#<python_{unique_key}>\n"
+    question = f"#<python_question_{unique_key}>\n"
+    end = "#</python>"
     return f"\n{unique_key}\n{now}\n{osy}\n{arch}\n{host}\n{user}\n{py}\n{you}\n"
 
 def aut(cmd):
