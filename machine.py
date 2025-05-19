@@ -49,7 +49,7 @@ question = f"#<python_question_{unique_key}>\n"
 end = "#</python>"
 
 def bld():
-    return f"\n{now}\n{osy}\n{arch}\n{host}\n{user}\n{py}\n{you}\n"
+    return f"\n{unique_key}\n{now}\n{osy}\n{arch}\n{host}\n{user}\n{py}\n{you}\n"
 
 def aut(cmd):
     prompt = bld()
@@ -85,9 +85,8 @@ if __name__ == "__main__":
             cde = aut(cmd)
             rce, is_question = ext(cde)
             if is_question:
-                exec(rce, globals())
-            else:
-                exec(rce, globals())
+                pass
+            exec(rce, globals())
         except KeyboardInterrupt:
             break
         except Exception as e:
