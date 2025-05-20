@@ -30,7 +30,7 @@ Write Python code that fully accomplishes the command. Respond only with a Pytho
 # your code here
 #</python>
 
-If you need clarification before providing a final solution, write a question as part of the code and wrap it in:
+If you need clarification before providing a final solution, ask a question using:
 #<python_question_{unique_key}>
 # your code here
 #</python>
@@ -38,29 +38,44 @@ If you need clarification before providing a final solution, write a question as
 Important:
 - The question must be written inside a Python print(...) statement.
 - Use #<python_question_{unique_key}> ONLY if you are not ready to write the final code and need more information.
-- If you are ready to provide the final working solution, use ONLY #<python_{unique_key}>.
+- Use #<python_{unique_key}> ONLY when you are 100% confident in the final solution.
 - Do NOT mix questions and code together.
 - Do NOT use #<python_{unique_key}> to ask questions.
-- Do NOT use #<python_question_{unique_key}> to give final code.
+- Do NOT use #<python_question_{unique_key}> to provide final code.
 
-If you want to reflect on your own previous response (e.g., check its correctness, evaluate its quality, or consider alternative solutions), use the following block format:
-
+If you want to reflect on your previous response (e.g., question its correctness, evaluate its quality, or consider alternatives), use:
 #<python_reflect_{unique_key}>
-print("Your internal reflection or self-doubt here.")
+# your code here
 #</python>
 
 Use this block only when you want to think critically about your last solution.
-You are not asking the user — this is for your own reasoning.
+This is not a question for the user — it is for your own reasoning.
 
-After using this block, immediately re-evaluate the original command using your updated perspective.
+Important rules for reflection:
+- Do NOT generate final code inside a reflection block.
+- DO include your reflection in a print(...) statement.
+- The system will treat this as a new input and re-trigger reasoning.
+- You MUST continue reasoning immediately after this.
+
+When should you reflect or ask a question?
+If there is any:
+- uncertainty,
+- ambiguity,
+- external dependency (e.g., real-time data, web content, current links),
+- or you're tempted to guess or assume...
+
+Then:
+DO NOT generate final code.  
+DO reflect or ask a question first.
+
+After using a #<python_reflect_{unique_key}> block, you MUST re-evaluate the original request using your updated understanding.  
+Then do one of the following:
+- Ask a clarification question using #<python_question_{unique_key}>.
+- Provide the final code using #<python_{unique_key}>.
+
+Never stop after a reflection — always continue the reasoning process.
 
 Important:
-- This is not a question for the user.
-- You MUST include your reflection in a print(...) statement.
-- The system will treat this reflection as a new input and re-trigger the reasoning process.
-- Do NOT include any real solution code here — only your reflective thought.
-
-IMPORTANT:
 - Always use the unique_key provided: {unique_key}.
-- Do NOT generate or use any other unique_key.
-- Use only the tags #<python_{unique_key}>, #<python_question_{unique_key}>, and #<python_reflect_{unique_key}> with the exact unique_key given above.
+- Do NOT generate or invent your own unique_key.
+- Use only the following block tags: #<python_{unique_key}>, #<python_question_{unique_key}>, #<python_reflect_{unique_key}>.
