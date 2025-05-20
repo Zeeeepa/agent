@@ -44,10 +44,11 @@ py = sys.executable
 you = os.path.abspath(__file__)
 
 def bld():
-    global unique_key, start, question, end
+    global unique_key, start, question, reflect, end
     unique_key = str(int(time.time()))
     start = f"#<python_{unique_key}>\n"
     question = f"#<python_question_{unique_key}>\n"
+    reflect = f"#<python_reflect_{unique_key}>\n"
     end = "#</python>"
     return f"\n{unique_key}\n{now}\n{osy}\n{arch}\n{host}\n{user}\n{py}\n{you}\n"
 
@@ -66,14 +67,31 @@ def aut(cmd):
 
 def ext(x):
     if question in x:
-        return x.partition(question)[2].partition(end)[0], True
+        return x.partition(question)[2].partition(end)[0], 1
+    elif reflect in x:
+        return x.partition(reflect)[2].partition(end)[0], 2
     elif start in x:
-        return x.partition(start)[2].partition(end)[0], False
-    return x, False
+        return x.partition(start)[2].partition(end)[0], 3
+    else:
+        return x, 0
 
 def log(x):
     with open("log.txt", "a", encoding="utf-8") as f:
         f.write(x + "\n")
+
+def process(cmd):
+    while 1:
+        cde = aut(cmd)
+        rce, state = ext(cde)
+        if state == 1:
+            pass
+        elif state == 2:
+            cmd = open("log.txt", encoding="utf-8").read().strip()
+            continue
+        else:
+            pass
+        exec(rce, globals())
+        break
 
 if __name__ == "__main__":
     while 1:
@@ -82,11 +100,7 @@ if __name__ == "__main__":
             if cmd.lower() != "file":
                 log(cmd)
             cmd = open("log.txt", encoding="utf-8").read().strip()
-            cde = aut(cmd)
-            rce, is_question = ext(cde)
-            if is_question:
-                pass
-            exec(rce, globals())
+            process(cmd)
         except KeyboardInterrupt:
             break
         except Exception as e:

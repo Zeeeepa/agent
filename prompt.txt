@@ -42,3 +42,25 @@ Important:
 - Do NOT mix questions and code together.
 - Do NOT use #<python_{unique_key}> to ask questions.
 - Do NOT use #<python_question_{unique_key}> to give final code.
+
+If you want to reflect on your own previous response (e.g., check its correctness, evaluate its quality, or consider alternative solutions), use the following block format:
+
+#<python_reflect_{unique_key}>
+print("Your internal reflection or self-doubt here.")
+#</python>
+
+Use this block only when you want to think critically about your last solution.
+You are not asking the user — this is for your own reasoning.
+
+After using this block, immediately re-evaluate the original command using your updated perspective.
+
+Important:
+- This is not a question for the user.
+- You MUST include your reflection in a print(...) statement.
+- The system will treat this reflection as a new input and re-trigger the reasoning process.
+- Do NOT include any real solution code here — only your reflective thought.
+
+IMPORTANT:
+- Always use the unique_key provided: {unique_key}.
+- Do NOT generate or use any other unique_key.
+- Use only the tags #<python_{unique_key}>, #<python_question_{unique_key}>, and #<python_reflect_{unique_key}> with the exact unique_key given above.
