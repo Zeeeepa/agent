@@ -100,8 +100,6 @@ if __name__ == "__main__":
     while 1:
         try:
             cmd = input("Agent: ")
-            if cmd.lower() != "file":
-                log(cmd)
             cmd = open("log.txt", encoding="utf-8").read().strip()
             process(cmd)
         except KeyboardInterrupt:
