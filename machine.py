@@ -46,10 +46,10 @@ you = os.path.abspath(__file__)
 def bld():
     global unique_key, code, question, reflect, end
     unique_key = str(int(time.time()))
-    question = f"#<python_question_{unique_key}>\n"
-    reflect = f"#<python_reflect_{unique_key}>\n"
-    code = f"#<python_{unique_key}>\n"
-    end = "#</python>"
+    question = f"<python_question_{unique_key}>\n"
+    reflect = f"<python_reflect_{unique_key}>\n"
+    code = f"<python_{unique_key}>\n"
+    end = "</python>"
     return f"\n{unique_key}\n{now}\n{osy}\n{arch}\n{host}\n{user}\n{py}\n{you}\n"
 
 def aut(cmd):
@@ -100,6 +100,7 @@ if __name__ == "__main__":
     while 1:
         try:
             cmd = input("Agent: ")
+            log(cmd)
             cmd = open("log.txt", encoding="utf-8").read().strip()
             process(cmd)
         except KeyboardInterrupt:
