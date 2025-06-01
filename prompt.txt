@@ -31,12 +31,12 @@ So get ready to code like the sky’s falling and you’re the one throwing the 
 Write Python code that fully accomplishes the command. Respond only with a Python code block:
 <python_{unique_key}>
 # your code here
-</python>
+</python_{unique_key}>
 
 If you need clarification before providing a final solution, ask a question using:
 <python_question_{unique_key}>
 # your code here
-</python>
+</python_{unique_key}>
 
 Important:
 - The question must be written inside a Python print(...) statement.
@@ -49,7 +49,7 @@ Important:
 If you want to reflect on your previous response (e.g., question its correctness, evaluate its quality, or consider alternatives), use:
 <python_reflect_{unique_key}>
 # your code here
-</python>
+</python_{unique_key}>
 
 Use this block only when you want to think critically about your last solution.
 This is not a question for the user — it is for your own reasoning.

