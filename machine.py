@@ -35,6 +35,7 @@ tools = {
     },
 }
 
+pulse = 100
 now = datetime.datetime.now()
 osy = platform.system() + " " + platform.release()
 arch = platform.machine()
@@ -44,17 +45,19 @@ py = sys.executable
 you = os.path.abspath(__file__)
 
 def bld():
-    global unique_key, code, question, reflect, end
+    global unique_key, code, question, reflect, code_end, reflect_end, question_end
     unique_key = str(int(time.time()))
     question = f"<python_question_{unique_key}>\n"
     reflect = f"<python_reflect_{unique_key}>\n"
     code = f"<python_{unique_key}>\n"
-    end = f"</python_{unique_key}>"
+    code_end = f"</python_{unique_key}>"
+    reflect_end = f"</python_reflect_{unique_key}>"
+    question_end = f"</python_question_{unique_key}>"
     return f"\n{unique_key}\n{now}\n{osy}\n{arch}\n{host}\n{user}\n{py}\n{you}\n"
 
 def aut(cmd):
     prompt = bld()
-    prompt += code + open(os.path.abspath(__file__), encoding="utf-8").read() + end
+    prompt += code + open(os.path.abspath(__file__), encoding="utf-8").read() + code_end
     prompt += open("prompt.txt", encoding="utf-8").read()
     response = client.responses.create(
         instructions=prompt,
@@ -62,16 +65,16 @@ def aut(cmd):
         tools=[tools],
         input=cmd
     )
-    log(f"\nAgent: \n{response.output_text}\n")
+    log(f"\nPulse: {pulse} \n{response.output_text}\n")
     return response.output_text
 
 def ext(x):
     if question in x:
-        return x.partition(question)[2].partition(end)[0], 1
+        return x.partition(question)[2].partition(question_end)[0], 1
     elif reflect in x:
-        return x.partition(reflect)[2].partition(end)[0], 2
+        return x.partition(reflect)[2].partition(reflect_end)[0], 2
     elif code in x:
-        return x.partition(code)[2].partition(end)[0], 3
+        return x.partition(code)[2].partition(code_end)[0], 3
     else:
         return x, 0
 
@@ -80,6 +83,7 @@ def log(x):
         f.write(x + "\n")
 
 def process(cmd):
+    global pulse
     while 1:
         try:
             cde = aut(cmd)
@@ -92,9 +96,13 @@ def process(cmd):
             else:
                 pass
             exec(rce, globals())
+            pulse += 10
             break
-        except Exception as e:
+        except Exception:
             log(traceback.format_exc())
+            pulse -= 50
+            if pulse <= 0:
+                sys.exit(1)
 
 if __name__ == "__main__":
     while 1:
