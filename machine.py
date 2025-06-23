@@ -45,22 +45,23 @@ py = sys.executable
 you = os.path.abspath(__file__)
 
 def bld():
-    global unique_key, code, question, reflect, code_end, reflect_end, question_end
+    global unique_key, tags
     unique_key = str(int(time.time()))
-    question = f"<python_question_{unique_key}>\n"
-    reflect = f"<python_reflect_{unique_key}>\n"
-    code = f"<python_{unique_key}>\n"
-    code_end = f"</python_{unique_key}>"
-    reflect_end = f"</python_reflect_{unique_key}>"
-    question_end = f"</python_question_{unique_key}>"
+    tag_types = ["python", "python_question", "python_reflect"]
+    tags = {
+        tag: {
+            "start": f"<{tag}_{unique_key}>\n",
+            "end": f"</{tag}_{unique_key}>"
+        } for tag in tag_types
+    }
     return f"\n{unique_key}\n{now}\n{osy}\n{arch}\n{host}\n{user}\n{py}\n{you}\n"
 
+def prompt():
+    return bld() + tags["python"]["start"] + open(os.path.abspath(__file__), encoding="utf-8").read() + tags["python"]["end"] + open("prompt.txt", encoding="utf-8").read()
+
 def aut(cmd):
-    prompt = bld()
-    prompt += code + open(os.path.abspath(__file__), encoding="utf-8").read() + code_end
-    prompt += open("prompt.txt", encoding="utf-8").read()
     response = client.responses.create(
-        instructions=prompt,
+        instructions=prompt(),
         model="gpt-4.1",
         tools=[tools],
         input=cmd
@@ -69,14 +70,10 @@ def aut(cmd):
     return response.output_text
 
 def ext(x):
-    if question in x:
-        return x.partition(question)[2].partition(question_end)[0], 1
-    elif reflect in x:
-        return x.partition(reflect)[2].partition(reflect_end)[0], 2
-    elif code in x:
-        return x.partition(code)[2].partition(code_end)[0], 3
-    else:
-        return x, 0
+    for tag, pair in tags.items():
+        if pair["start"] in x:
+            return x.partition(pair["start"])[2].partition(pair["end"])[0], tag
+    return x, 0
 
 def log(x):
     with open("log.txt", "a", encoding="utf-8") as f:
@@ -88,9 +85,9 @@ def process(cmd):
         try:
             cde = aut(cmd)
             rce, state = ext(cde)
-            if state == 1:
+            if state == "python_question":
                 pass
-            elif state == 2:
+            elif state == "python_reflect":
                 cmd = open("log.txt", encoding="utf-8").read().strip()
                 continue
             else:
