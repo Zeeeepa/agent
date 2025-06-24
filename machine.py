@@ -66,7 +66,7 @@ def aut(cmd):
         tools=[tools],
         input=cmd
     )
-    log(f"\nPulse: {pulse} \n{response.output_text}\n")
+    log(f"\n{response.output_text}\n")
     return response.output_text
 
 def ext(x):
