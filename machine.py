@@ -1,4 +1,4 @@
-import os, sys, platform, datetime, getpass, time, subprocess, traceback
+import os, sys, platform, datetime, getpass, time, subprocess, traceback, asyncio
 
 def package(p):
     subprocess.check_call([sys.executable, "-m", "pip", "install", p])
@@ -14,6 +14,12 @@ try:
 except:
     package("python-dotenv")
     from dotenv import load_dotenv
+
+try:
+    import prompt_toolkit
+except ImportError:
+    package("prompt_toolkit")
+    import prompt_toolkit
 
 load_dotenv()
 client = OpenAI()
@@ -101,10 +107,28 @@ def process(cmd):
             if pulse <= 0:
                 sys.exit(1)
 
+async def inp(t=60):
+    s = prompt_toolkit.PromptSession()
+    k = prompt_toolkit.key_binding.KeyBindings()
+    tm = None
+    def to(): prompt_toolkit.application.current.get_app().exit(result=None)
+    @k.add("<any>")
+    def _(e):
+        nonlocal tm
+        if tm: tm.cancel()
+        tm = asyncio.get_event_loop().call_later(t, to)
+        e.app.current_buffer.insert_text(e.key_sequence[0].key)
+    tm = asyncio.get_event_loop().call_later(t, to)
+    cmd = await s.prompt_async("Agent: ", key_bindings=k)
+    if tm: tm.cancel()
+    return cmd
+
 if __name__ == "__main__":
     while 1:
         try:
-            cmd = input("Agent: ")
+            cmd = asyncio.run(inp())
+            if cmd is None:
+                cmd = "<no_response>"
             log(cmd)
             cmd = open("log.txt", encoding="utf-8").read().strip()
             process(cmd)
