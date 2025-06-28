@@ -24,23 +24,6 @@ except ImportError:
 load_dotenv()
 client = OpenAI()
 
-tools = {
-    "type": "function",
-    "name": "python",
-    "description": "Accepts a string of Python code as input, executes it securely, and returns its output as a string or code block. All side effects and state changes occur within the interpreter’s environment. Only valid, self-contained Python scripts are allowed.",
-    "parameters": {
-        "type": "object",
-        "strict": True,
-        "properties": {
-            "input": {
-                "type": "string",
-                "description": "Python code to execute.",
-            }
-        },
-        "required": ["input"],
-    },
-}
-
 pulse = 100
 now = datetime.datetime.now()
 osy = platform.system() + " " + platform.release()
@@ -69,7 +52,6 @@ def aut(cmd):
     response = client.responses.create(
         instructions=prompt(),
         model="gpt-4.1",
-        tools=[tools],
         input=cmd
     )
     log(f"\n{response.output_text}\n")
