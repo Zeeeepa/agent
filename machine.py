@@ -71,24 +71,16 @@ def process(cmd):
     while 1:
         try:
             resp = aut(cmd)
-            reflect  = False
-            handled = False
             for tag, body in re.findall(r'<(\w+)_\d+>(.*?)</\1_\d+>', resp, re.S):
                 if tag == "machine":
+                    pass
+                elif tag == "python_reflect":
                     pass
                 elif tag in ("python_question", "python"):
                     log(f"\n{body}\n")
                     exec(body, globals())
                     pulse += 10
-                    handled = True
                     break
-                elif tag == "python_reflect":
-                    reflect = True
-            if handled:
-                break
-            if reflect:
-                cmd = open("log.txt", encoding="utf-8").read().strip()
-                continue
             break
         except Exception:
             log(traceback.format_exc())
