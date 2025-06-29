@@ -1,4 +1,4 @@
-import os, sys, platform, datetime, getpass, time, subprocess, traceback, asyncio
+import os, sys, platform, datetime, getpass, time, subprocess, traceback, asyncio, re
 
 def package(p):
     subprocess.check_call([sys.executable, "-m", "pip", "install", p])
@@ -36,7 +36,7 @@ you = os.path.abspath(__file__)
 def bld():
     global unique_key, tags
     unique_key = str(int(time.time()))
-    tag_types = ["python", "python_question", "python_reflect"]
+    tag_types = ["machine", "python", "python_question", "python_reflect"]
     tags = {
         tag: {
             "start": f"<{tag}_{unique_key}>\n",
@@ -54,7 +54,6 @@ def aut(cmd):
         model="gpt-4.1",
         input=cmd
     )
-    log(f"\n{response.output_text}\n")
     return response.output_text
 
 def ext(x):
@@ -63,25 +62,33 @@ def ext(x):
             return x.partition(pair["start"])[2].partition(pair["end"])[0], tag
     return x, 0
 
-def log(x):
-    with open("log.txt", "a", encoding="utf-8") as f:
-        f.write(x + "\n")
+def log(x, f="log.txt"):
+    with open(f, "a", encoding="utf-8") as file:
+        file.write(x + "\n")
 
 def process(cmd):
     global pulse
     while 1:
         try:
-            cde = aut(cmd)
-            rce, state = ext(cde)
-            if state == "python_question":
-                pass
-            elif state == "python_reflect":
+            resp = aut(cmd)
+            reflect  = False
+            handled = False
+            for tag, body in re.findall(r'<(\w+)_\d+>(.*?)</\1_\d+>', resp, re.S):
+                if tag == "machine":
+                    pass
+                elif tag in ("python_question", "python"):
+                    log(f"\n{body}\n")
+                    exec(body, globals())
+                    pulse += 10
+                    handled = True
+                    break
+                elif tag == "python_reflect":
+                    reflect = True
+            if handled:
+                break
+            if reflect:
                 cmd = open("log.txt", encoding="utf-8").read().strip()
                 continue
-            else:
-                pass
-            exec(rce, globals())
-            pulse += 10
             break
         except Exception:
             log(traceback.format_exc())
