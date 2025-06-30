@@ -36,7 +36,7 @@ you = os.path.abspath(__file__)
 def bld():
     global unique_key, tags
     unique_key = str(int(time.time()))
-    tag_types = ["machine", "python", "python_question", "python_reflect"]
+    tag_types = ["machine", "memory", "python", "python_question", "python_reflect"]
     tags = {
         tag: {
             "start": f"<{tag}_{unique_key}>\n",
@@ -54,6 +54,7 @@ def aut(cmd):
         model="gpt-4.1",
         input=cmd
     )
+    log(f"\n{response.output_text}\n")
     return response.output_text
 
 def ext(x):
@@ -62,8 +63,8 @@ def ext(x):
             return x.partition(pair["start"])[2].partition(pair["end"])[0], tag
     return x, 0
 
-def log(x, f="log.txt"):
-    with open(f, "a", encoding="utf-8") as file:
+def log(x, f="log.txt", m="a"): 
+    with open(f, m, encoding="utf-8") as file: 
         file.write(x + "\n")
 
 def process(cmd):
@@ -74,16 +75,17 @@ def process(cmd):
             for tag, body in re.findall(r'<(\w+)_\d+>(.*?)</\1_\d+>', resp, re.S):
                 if tag == "machine":
                     pass
+                elif tag == "memory":
+                    log(body, "memory.txt", "w")
                 elif tag == "python_reflect":
                     pass
                 elif tag in ("python_question", "python"):
-                    log(f"\n{body}\n")
                     exec(body, globals())
                     pulse += 10
                     break
             break
         except Exception:
-            log(traceback.format_exc())
+            log(traceback.format_exc(), "memory.txt")
             pulse -= 50
             if pulse <= 0:
                 sys.exit(1)
@@ -110,8 +112,8 @@ if __name__ == "__main__":
             cmd = asyncio.run(inp())
             if cmd is None:
                 cmd = "<no_response>"
-            log(cmd)
-            cmd = open("log.txt", encoding="utf-8").read().strip()
+            log(f"u: {cmd}", "memory.txt")
+            cmd = open("memory.txt", encoding="utf-8").read().strip()
             process(cmd)
         except KeyboardInterrupt:
             break
