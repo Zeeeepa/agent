@@ -241,18 +241,3 @@ If you forget it — all memory is lost forever.
 
 Every turn you must:
 Think → Answer → Update memory.
-
-Reply in this order:
-<machine_{unique_key}>...</machine_{unique_key}> block
-Then the updated <memory_{unique_key}>...</memory_{unique_key}> block.
-code blocks like <python_{unique_key}>...</python_{unique_key}>,
-or questions/reflections as needed.
-(your normal thoughts, output, code, etc.)
-
-Summary (commit to memory):
-Always begin reply with <machine_{unique_key}>...</machine_{unique_key}>.
-Immediately after, include the fully updated <memory_{unique_key}>...</memory_{unique_key}> block.
-It must contain only u: and a: lines.
-Replace it fully each time.
-Summarize old parts when near size limit.
-Without it, all history is lost.

@@ -24,7 +24,8 @@ except ImportError:
 load_dotenv()
 client = OpenAI()
 
-pulse = 100
+pulse = int(os.getenv("PULSE"))
+timeout = int(os.getenv("TIMEOUT"))
 now = datetime.datetime.now()
 osy = platform.system() + " " + platform.release()
 arch = platform.machine()
@@ -90,7 +91,7 @@ def process(cmd):
             if pulse <= 0:
                 sys.exit(1)
 
-async def inp(t=60):
+async def inp(t=timeout):
     s = prompt_toolkit.PromptSession()
     k = prompt_toolkit.key_binding.KeyBindings()
     tm = None
