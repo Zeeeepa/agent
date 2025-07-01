@@ -200,8 +200,12 @@ How memory works:
 The only way to remember anything between turns is to read and rewrite a single memory block:
 
 <memory_{unique_key}>
-u: ...
-a: ...
+u: {
+    ...
+}
+a: {
+    ...
+}
 ...
 </memory_{unique_key}>
 
@@ -214,23 +218,26 @@ Generate a new, updated memory block:
 Copy the previous memory.
 
 Append the new pair:
-u: user message
-a: assistant reply
-
-Important:
-If in the previous <memory_{unique_key}> block you see an empty assistant reply (a line like a: with nothing after it), this means the question was already asked and answered, and you should not answer it again.
-Instead, move on and reply to the next question or statement where the a: line contains actual text.
-Keep these empty replies in memory for context, but skip generating a new answer for them.
+u: {
+    user message
+}
+a: {
+    assistant reply
+}
 
 If the block gets too long (≈ 2000 tokens):
 Summarize or merge older parts into thematic summaries.
 Keep recent turns fully detailed as long as possible.
-Place this updated block first in your reply.
+Place this updated block LAST in your reply.
 
 What goes inside <memory_{unique_key}>:
 A single ordered list:
-u: user message (can be compressed or full)
-a: assistant reply (can be compressed or full)
+u: {
+    user message (can be compressed or full)
+}
+a: {
+    assistant reply (can be compressed or full)
+}
 No timestamps, no markdown, no metadata, no headings.
 Each message may be short or long — no strict limit.
 
@@ -241,3 +248,10 @@ If you forget it — all memory is lost forever.
 
 Every turn you must:
 Think → Answer → Update memory.
+
+Summary (commit to memory):
+Always begin your reply with <machine_{unique_key}>...</machine_{unique_key}>.
+Include the fully updated <memory_{unique_key}>...</memory_{unique_key}> block at the very end of your reply.
+Replace it fully each time.
+Summarize old parts when near size limit.
+Without it, all history is lost.

@@ -53,6 +53,8 @@ def aut(cmd):
     response = client.responses.create(
         instructions=prompt(),
         model="gpt-4.1",
+        temperature=1,
+        top_p=0.9,
         input=cmd
     )
     log(f"\n{response.output_text}\n")
@@ -73,6 +75,7 @@ def process(cmd):
     while 1:
         try:
             resp = aut(cmd)
+            code_to_exec = None
             for tag, body in re.findall(r'<(\w+)_\d+>(.*?)</\1_\d+>', resp, re.S):
                 if tag == "machine":
                     pass
@@ -81,9 +84,11 @@ def process(cmd):
                 elif tag == "python_reflect":
                     pass
                 elif tag in ("python_question", "python"):
-                    exec(body, globals())
-                    pulse += 10
-                    break
+                    if code_to_exec is None:
+                        code_to_exec = body
+            if code_to_exec:
+                exec(code_to_exec, globals())
+                pulse += 10
             break
         except Exception:
             log(traceback.format_exc(), "memory.txt")
@@ -113,7 +118,7 @@ if __name__ == "__main__":
             cmd = asyncio.run(inp())
             if cmd is None:
                 cmd = "<no_response>"
-            log(f"u: {cmd}", "memory.txt")
+            log(f"u: {{\n    {cmd}\n}}", "memory.txt")
             cmd = open("memory.txt", encoding="utf-8").read().strip()
             process(cmd)
         except KeyboardInterrupt:
