@@ -37,7 +37,7 @@ you = os.path.abspath(__file__)
 def bld():
     global key, tags
     key = str(int(time.time()))
-    tag_types = ["machine", "python", "python_question", "reflect"]
+    tag_types = ["machine", "python", "python_question"]
     tags = {
         tag: {
             "start": f"<{tag}_{key}>\n",
@@ -78,8 +78,6 @@ def process(cmd):
             code = None
             for tag, body in re.findall(r'<(\w+)_\d+>(.*?)</\1_\d+>', resp, re.S):
                 if tag == "machine":
-                    pass
-                elif tag == "reflect":
                     pass
                 elif tag in ("python_question", "python"):
                     if code is None:
