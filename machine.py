@@ -22,7 +22,19 @@ except ImportError:
     import prompt_toolkit
 
 load_dotenv()
-client = OpenAI()
+
+proxy = os.getenv("PROXY")
+if proxy:
+    try:
+        from httpx_socks import SyncProxyTransport
+        import httpx
+    except ImportError:
+        package("httpx-socks")
+        from httpx_socks import SyncProxyTransport
+        import httpx
+    client = OpenAI(http_client=httpx.Client(transport=SyncProxyTransport.from_url(proxy)))
+else:
+    client = OpenAI()
 
 pulse = int(os.getenv("PULSE"))
 timeout = int(os.getenv("TIMEOUT"))
