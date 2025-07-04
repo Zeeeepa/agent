@@ -38,13 +38,10 @@ else:
 
 pulse = int(os.getenv("PULSE"))
 timeout = int(os.getenv("TIMEOUT"))
-now = datetime.datetime.now()
 osy = platform.system() + " " + platform.release()
 arch = platform.machine()
 host = platform.node()
 user = getpass.getuser()
-py = sys.executable
-you = os.path.abspath(__file__)
 
 def bld():
     global key, tags
@@ -56,10 +53,10 @@ def bld():
             "end": f"</{tag}_{key}>"
         } for tag in tag_types
     }
-    return f"\n{key}\n{now}\n{osy}\n{arch}\n{host}\n{user}\n{py}\n{you}\n"
+    return f"\nkey: {key}\nos: {osy}\narch: {arch}\nhost: {host}\nuser: {user}\n"
 
 def prompt():
-    return bld() + tags["python"]["start"] + open(os.path.abspath(__file__), encoding="utf-8").read() + tags["python"]["end"] + open("prompt.txt", encoding="utf-8").read()
+    return bld() + open("prompt.txt", encoding="utf-8").read()
 
 def aut(cmd):
     response = client.responses.create(
@@ -93,7 +90,7 @@ def process(cmd):
         try:
             resp = aut(cmd)
             code = None
-            for tag, body in re.findall(r'<(\w+)_\d+>(.*?)</\1_\d+>', resp, re.S):
+            for tag, body in re.findall(rf'<(\w+)_{key}>\n?(.*?)</\1_{key}>', resp, re.S):
                 if tag == "machine":
                     pass
                 elif tag in ("python_question", "python"):
