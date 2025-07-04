@@ -78,9 +78,14 @@ def ext(x):
             return x.partition(pair["start"])[2].partition(pair["end"])[0], tag
     return x, 0
 
-def log(x, f="log.txt", m="a"): 
-    with open(f, m, encoding="utf-8") as file: 
-        file.write(x + "\n")
+def log(x, f="log.txt", m="a", N=None):
+    if N:
+        try: l = open(f, encoding="utf-8").read().splitlines()
+        except: l = []
+        l.append(x)
+        open(f, "w", encoding="utf-8").write("\n".join(l[-N:]) + "\n")
+    else:
+        open(f, m, encoding="utf-8").write(x + "\n")
 
 def process(cmd):
     global pulse
@@ -95,7 +100,7 @@ def process(cmd):
                     if code is None:
                         code = body
             if code:
-                log(f"a: {{{code}}}", "memory.txt")
+                log(f"{code}", "memory.txt")
                 exec(code, globals())
                 pulse += 10
             break
@@ -129,7 +134,7 @@ if __name__ == "__main__":
             cmd = asyncio.run(inp())
             if cmd is None:
                 cmd = "<no_response>"
-            log(f"u: {{\n{cmd}\n}}", "memory.txt")
+            log(f"{cmd}", "memory.txt", N=100)
             cmd = open("memory.txt", encoding="utf-8").read().strip()
             process(cmd)
         except KeyboardInterrupt:
