@@ -43,7 +43,7 @@ arch = platform.machine()
 host = platform.node()
 user = getpass.getuser()
 
-def bld():
+def build():
     global key, tags
     key = str(int(time.time()))
     tag_types = ["machine", "python", "python_question"]
@@ -56,7 +56,7 @@ def bld():
     return f"\nkey: {key}\nos: {osy}\narch: {arch}\nhost: {host}\nuser: {user}\n"
 
 def prompt():
-    return bld() + open("prompt.txt", encoding="utf-8").read()
+    return build() + open("prompt.txt", encoding="utf-8").read()
 
 def aut(cmd):
     response = client.responses.create(
@@ -68,12 +68,6 @@ def aut(cmd):
     )
     log(f"\n{response.output_text}\n")
     return response.output_text
-
-def ext(x):
-    for tag, pair in tags.items():
-        if pair["start"] in x:
-            return x.partition(pair["start"])[2].partition(pair["end"])[0], tag
-    return x, 0
 
 def log(x, f="log.txt", m="a", N=None):
     if N:
