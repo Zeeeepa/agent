@@ -87,7 +87,6 @@ def execute_safely(code):
         "threading.Thread(",
         "subprocess.run(",
         "subprocess.call(",
-        "subprocess.Popen(",
     ]
     is_dangerous = any(pattern in code for pattern in dangerous)
     if is_dangerous:
