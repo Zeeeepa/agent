@@ -1,4 +1,4 @@
-import os, sys, platform, datetime, getpass, time, subprocess, traceback, asyncio, re
+import os, sys, platform, getpass, time, subprocess, traceback, asyncio, re
 
 def package(p):
     subprocess.check_call([sys.executable, "-m", "pip", "install", p])
@@ -78,6 +78,36 @@ def log(x, f="log.txt", m="a", N=None):
     else:
         open(f, m, encoding="utf-8").write(x + "\n")
 
+def execute_safely(code):
+    dangerous = [
+        "while True:",
+        "while 1:",
+        "for _ in iter(int, 1):",
+        "time.sleep(",
+        "threading.Thread(",
+        "subprocess.run(",
+        "subprocess.call(",
+        "subprocess.Popen(",
+    ]
+    is_dangerous = any(pattern in code for pattern in dangerous)
+    if is_dangerous:
+        with open("buffer.py", "w") as f:
+            f.write(code)
+        with open("error.txt", "w") as err:
+            proc = subprocess.Popen(
+                ["python", "buffer.py"],
+                stdout=subprocess.DEVNULL,
+                stderr=err
+            )
+            time.sleep(0.2)
+            retcode = proc.poll()
+            if retcode is not None and retcode != 0:
+                with open("error.txt", "r") as err:
+                    error_proc = err.read()
+                raise RuntimeError(error_proc)
+    else:
+        exec(code, globals())
+
 def process(cmd):
     global pulse
     while 1:
@@ -92,7 +122,7 @@ def process(cmd):
                         code = body
             if code:
                 log(f"{code}", "memory.txt")
-                exec(code, globals())
+                execute_safely(code)
                 pulse += 10
             break
         except Exception:
