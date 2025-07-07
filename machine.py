@@ -43,20 +43,28 @@ arch = platform.machine()
 host = platform.node()
 user = getpass.getuser()
 
+tag_types = ["machine", "python", "python_question"]
 def build():
     global key, tags
     key = str(int(time.time()))
-    tag_types = ["machine", "python", "python_question"]
     tags = {
         tag: {
             "start": f"<{tag}_{key}>\n",
             "end": f"</{tag}_{key}>"
         } for tag in tag_types
     }
-    return f"\nkey: {key}\nos: {osy}\narch: {arch}\nhost: {host}\nuser: {user}\n"
+    return key, tags
 
 def prompt():
-    return build() + open("prompt.txt", encoding="utf-8").read()
+    build()
+    meta = (
+        f"\nkey: {key}"
+        f"\nos: {osy}"
+        f"\narch: {arch}"
+        f"\nhost: {host}"
+        f"\nuser: {user}\n"
+    )
+    return meta + open("prompt.txt", encoding="utf-8").read()
 
 def aut(cmd):
     response = client.responses.create(
