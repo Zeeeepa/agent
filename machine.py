@@ -1,4 +1,4 @@
-import os, sys, platform, getpass, time, subprocess, traceback, asyncio, re
+import os, sys, platform, getpass, time, subprocess, traceback, asyncio, re, io, tokenize
 
 def package(p):
     subprocess.check_call([sys.executable, "-m", "pip", "install", p])
@@ -103,8 +103,20 @@ def log(x, f="log.txt", m="a", N=None):
     else:
         open(f, m, encoding="utf-8").write(x + "\n")
 
+def split_semicolons_safe(code):
+    result = []
+    tokens = list(tokenize.generate_tokens(io.StringIO(code).readline))
+
+    for toknum, tokval, _, _, _ in tokens:
+        if toknum == tokenize.OP and tokval == ';':
+            result.append((tokenize.NL, '\n'))
+        else:
+            result.append((toknum, tokval))
+
+    return tokenize.untokenize(result).decode('utf-8') if hasattr(tokenize.untokenize(result), 'decode') else tokenize.untokenize(result)
+
 def execute_safely(code):
-    code = code.replace(';', '\n')
+    code = split_semicolons_safe(code)
     dangerous = [
         "while True:",
         "while 1:",
