@@ -55,6 +55,16 @@ def build():
     }
     return key, tags
 
+async def show_loading(stop_event: asyncio.Event):
+    spin = ["◜", "◝", "◞", "◟"]
+    start = time.perf_counter()
+    while not stop_event.is_set():
+        elapsed = time.perf_counter() - start
+        sys.stdout.write(f"\r{spin[int(elapsed*8)%4]}  Processing {elapsed:.1f}s")
+        sys.stdout.flush()
+        await asyncio.sleep(0.05)
+    sys.stdout.write("\r\033[K")
+
 def prompt():
     build()
     meta = (
@@ -66,16 +76,23 @@ def prompt():
     )
     return meta + open("prompt.txt", encoding="utf-8").read()
 
-def aut(cmd):
-    response = client.responses.create(
-        instructions=prompt(),
-        model="gpt-4.1",
-        temperature=1,
-        top_p=0.9,
-        input=cmd
-    )
-    log(f"\n{response.output_text}\n")
-    return response.output_text
+async def aut(cmd):
+    stop_event = asyncio.Event()
+    loading_task = asyncio.create_task(show_loading(stop_event))
+    try:
+        response = await asyncio.to_thread(
+            client.responses.create,
+            instructions=prompt(),
+            model="gpt-4.1",
+            temperature=1,
+            top_p=0.9,
+            input=cmd
+        )
+        log(f"\n{response.output_text}\n")
+        return response.output_text
+    finally:
+        stop_event.set()
+        await loading_task
 
 def log(x, f="log.txt", m="a", N=None):
     if N:
@@ -115,11 +132,11 @@ def execute_safely(code):
     else:
         exec(code, globals())
 
-def process(cmd):
+async def process(cmd):
     global pulse
     while 1:
         try:
-            resp = aut(cmd)
+            resp = await aut(cmd)
             code = None
             for tag, body in re.findall(rf'<(\w+)_{key}>\n?(.*?)</\1_{key}>', resp, re.S):
                 if tag == "machine":
@@ -143,27 +160,67 @@ def process(cmd):
 async def inp(t=timeout):
     s = prompt_toolkit.PromptSession()
     k = prompt_toolkit.key_binding.KeyBindings()
-    tm = None
-    def to(): prompt_toolkit.application.current.get_app().exit(result=None)
+    timer_task = None
+    done = asyncio.Event()
+    async def timeout_worker():
+        try:
+            await asyncio.sleep(t)
+            done.set()
+        except asyncio.CancelledError:
+            pass
     @k.add("<any>")
-    def _(e):
-        nonlocal tm
-        if tm: tm.cancel()
-        tm = asyncio.get_event_loop().call_later(t, to)
-        e.app.current_buffer.insert_text(e.key_sequence[0].key)
-    tm = asyncio.get_event_loop().call_later(t, to)
-    cmd = await s.prompt_async("Agent: ", key_bindings=k)
-    if tm: tm.cancel()
-    return cmd
+    def _(event):
+        nonlocal timer_task
+        if timer_task:
+            timer_task.cancel()
+        timer_task = asyncio.create_task(timeout_worker())
+        event.app.current_buffer.insert_text(event.key_sequence[0].key)
+    try:
+        timer_task = asyncio.create_task(timeout_worker())
+        prompt_task = asyncio.create_task(s.prompt_async("Agent: ", key_bindings=k))
+        done_wait_task = asyncio.create_task(done.wait())
+        await asyncio.wait(
+            [prompt_task, done_wait_task],
+            return_when=asyncio.FIRST_COMPLETED
+        )
+        if done.is_set():
+            prompt_task.cancel()
+            try:
+                await prompt_task
+            except asyncio.CancelledError:
+                pass
+            return None
+        else:
+            if timer_task:
+                timer_task.cancel()
+            return await prompt_task
+    except asyncio.CancelledError:
+        if timer_task:
+            timer_task.cancel()
+        if 'prompt_task' in locals():
+            prompt_task.cancel()
+            try:
+                await prompt_task
+            except asyncio.CancelledError:
+                pass
+        raise
 
-if __name__ == "__main__":
+async def main():
     while 1:
         try:
-            cmd = asyncio.run(inp())
+            cmd = await inp()
             if cmd is None:
                 cmd = "<no_response>"
             log(f"{cmd}", "memory.txt", N=100)
             cmd = open("memory.txt", encoding="utf-8").read().strip()
-            process(cmd)
+            await process(cmd)
         except KeyboardInterrupt:
             break
+        except asyncio.CancelledError:
+            break
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
