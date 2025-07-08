@@ -104,6 +104,7 @@ def log(x, f="log.txt", m="a", N=None):
         open(f, m, encoding="utf-8").write(x + "\n")
 
 def execute_safely(code):
+    code = code.replace(';', '\n')
     dangerous = [
         "while True:",
         "while 1:",
