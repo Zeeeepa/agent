@@ -68,6 +68,7 @@ async def show_loading(stop_event: asyncio.Event):
 def prompt():
     build()
     meta = (
+        f"\npulse: 1"
         f"\nkey: {key}"
         f"\nos: {osy}"
         f"\narch: {arch}"
