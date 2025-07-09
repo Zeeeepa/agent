@@ -1,6 +1,6 @@
 ![2](https://github.com/user-attachments/assets/a18257a3-a678-4fd4-bf77-750dab4d99bb)
 
-# Agent
+# Agent&nbsp;&nbsp;[![Visualise&nbsp;Repo](https://img.shields.io/badge/Visualise%20Repo-blue?style=flat-square)](https://repomapr.com/machinegpt/agent)
 
 A high-velocity, self-sufficient Python AI agent framework that leverages the OpenAI Python SDK to interpret natural-language commands, generate and execute code dynamically, and manage its runtime environment with zero friction. It features automated dependency installation, secure environment configuration, structured logging, and a minimalist plugin interface for embedding powerful Python tools—all under the permissive Apache 2.0 license.
 
