@@ -21,6 +21,12 @@ except ImportError:
     package("prompt_toolkit")
     import prompt_toolkit
 
+try:
+    from art import tprint
+except ImportError:
+    package("art")
+    from art import tprint
+
 load_dotenv()
 
 proxy = os.getenv("PROXY")
@@ -220,6 +226,7 @@ async def inp(t=timeout):
         raise
 
 async def main():
+    tprint("Jinx", "random")
     while 1:
         try:
             cmd = await inp()
