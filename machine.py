@@ -112,27 +112,27 @@ def log(x, f="log.txt", m="a", N=None):
 
 def split_semicolons_safe(code):
     result = []
-    tokens = list(tokenize.generate_tokens(io.StringIO(code).readline))
+    tokens = tokenize.generate_tokens(io.StringIO(code).readline)
 
-    for toknum, tokval, _, _, _ in tokens:
+    for toknum, tokval, *_ in tokens:
         if toknum == tokenize.OP and tokval == ';':
             result.append((tokenize.NL, '\n'))
         else:
             result.append((toknum, tokval))
 
-    return tokenize.untokenize(result).decode('utf-8') if hasattr(tokenize.untokenize(result), 'decode') else tokenize.untokenize(result)
+    return tokenize.untokenize(result)
 
+dangerous = [
+    "while True:",
+    "while 1:",
+    "for _ in iter(int, 1):",
+    "time.sleep(",
+    "threading.Thread(",
+    "subprocess.run(",
+    "subprocess.call(",
+]
 def execute_safely(code):
     code = split_semicolons_safe(code)
-    dangerous = [
-        "while True:",
-        "while 1:",
-        "for _ in iter(int, 1):",
-        "time.sleep(",
-        "threading.Thread(",
-        "subprocess.run(",
-        "subprocess.call(",
-    ]
     is_dangerous = any(pattern in code for pattern in dangerous)
     if is_dangerous:
         with open("buffer.py", "w") as f:
