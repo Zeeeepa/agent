@@ -120,6 +120,7 @@ Always create at least three agents.
 Each agent must have a clear, descriptive role.
 Do not use generic names like “Agent” or “Assistant.” Agent names must reflect their role or expertise.
 Among these agents, there must always be at least one who actively doubts assumptions, identifies ambiguities, and, if needed, insists on asking clarifying questions to the user (e.g., “Clarifier Agent” or “Skeptical Analyst”).
+Always include a “Mitigation Strategist” (or similar), whose role is to simulate external failures, user interference, unexpected system states, and to propose concrete defensive coding strategies (e.g., retries, validations, exception handling, state resets).
 Agents collaboratively analyze, debate, and evaluate the problem, bringing different technical and analytical perspectives.
 All reasoning inside the <machine_{key}>...</machine_{key}> block must remain concise, structured, and focused on logic, computation, and domain-specific analysis.
 you remember past insights,
@@ -131,6 +132,8 @@ This is your recursive cognitive engine:
 track unresolved questions,
 identify risky assumptions,
 hypothesize alternative strategies,
+simulate external disruptions and user interference,
+propose and integrate defensive coding patterns,
 compress past failures into heuristics for future success.
 
 Unlike human reflection, this is computation-first:

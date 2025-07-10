@@ -49,7 +49,11 @@ arch = platform.machine()
 host = platform.node()
 user = getpass.getuser()
 
-tag_types = ["machine", "python", "python_question"]
+tag_types = [
+    "machine",
+    "python",
+    "python_question",
+]
 def build():
     global key, tags
     key = str(int(time.time()))
@@ -113,13 +117,11 @@ def log(x, f="log.txt", m="a", N=None):
 def split_semicolons_safe(code):
     result = []
     tokens = tokenize.generate_tokens(io.StringIO(code).readline)
-
     for toknum, tokval, *_ in tokens:
         if toknum == tokenize.OP and tokval == ';':
             result.append((tokenize.NL, '\n'))
         else:
             result.append((toknum, tokval))
-
     return tokenize.untokenize(result)
 
 dangerous = [
