@@ -22,6 +22,12 @@ except ImportError:
     import prompt_toolkit
 
 try:
+    import black
+except ImportError:
+    package("black")
+    import black
+
+try:
     from art import tprint
 except ImportError:
     package("art")
@@ -133,8 +139,11 @@ dangerous = [
     "subprocess.run(",
     "subprocess.call(",
 ]
+mode = black.Mode()
 def execute_safely(code):
     code = split_semicolons_safe(code)
+    code = black.format_str(code, mode=mode)
+    log(f"{code}", "code.txt")
     is_dangerous = any(pattern in code for pattern in dangerous)
     if is_dangerous:
         with open("buffer.py", "w") as f:
@@ -201,28 +210,60 @@ async def inp(t=timeout):
         timer_task = asyncio.create_task(timeout_worker())
         prompt_task = asyncio.create_task(s.prompt_async("Agent: ", key_bindings=k))
         done_wait_task = asyncio.create_task(done.wait())
-        await asyncio.wait(
+        done, pending = await asyncio.wait(
             [prompt_task, done_wait_task],
             return_when=asyncio.FIRST_COMPLETED
         )
-        if done.is_set():
+        if done_wait_task in done:
             prompt_task.cancel()
             try:
                 await prompt_task
             except asyncio.CancelledError:
                 pass
+            if timer_task:
+                timer_task.cancel()
+                try:
+                    await timer_task
+                except asyncio.CancelledError:
+                    pass
+            if not done_wait_task.done():
+                done_wait_task.cancel()
+                try:
+                    await done_wait_task
+                except asyncio.CancelledError:
+                    pass
             return None
         else:
             if timer_task:
                 timer_task.cancel()
+                try:
+                    await timer_task
+                except asyncio.CancelledError:
+                    pass
+            if done_wait_task:
+                done_wait_task.cancel()
+                try:
+                    await done_wait_task
+                except asyncio.CancelledError:
+                    pass
             return await prompt_task
     except asyncio.CancelledError:
         if timer_task:
             timer_task.cancel()
+            try:
+                await timer_task
+            except asyncio.CancelledError:
+                pass
         if 'prompt_task' in locals():
             prompt_task.cancel()
             try:
                 await prompt_task
+            except asyncio.CancelledError:
+                pass
+        if 'done_wait_task' in locals():
+            done_wait_task.cancel()
+            try:
+                await done_wait_task
             except asyncio.CancelledError:
                 pass
         raise
@@ -235,6 +276,7 @@ async def main():
             if cmd is None:
                 cmd = "<no_response>"
             log(f"{cmd}", "memory.txt", N=100)
+            log(f"{cmd}", "code.txt")
             cmd = open("memory.txt", encoding="utf-8").read().strip()
             await process(cmd)
         except KeyboardInterrupt:
