@@ -206,66 +206,31 @@ async def inp(t=timeout):
             timer_task.cancel()
         timer_task = asyncio.create_task(timeout_worker())
         event.app.current_buffer.insert_text(event.key_sequence[0].key)
+    async def cancel_wait(task):
+        if task:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
     try:
         timer_task = asyncio.create_task(timeout_worker())
         prompt_task = asyncio.create_task(s.prompt_async("Agent: ", key_bindings=k))
         done_wait_task = asyncio.create_task(done.wait())
-        done, pending = await asyncio.wait(
-            [prompt_task, done_wait_task],
-            return_when=asyncio.FIRST_COMPLETED
-        )
+        done, _ = await asyncio.wait([prompt_task, done_wait_task], return_when=asyncio.FIRST_COMPLETED)
         if done_wait_task in done:
-            prompt_task.cancel()
-            try:
-                await prompt_task
-            except asyncio.CancelledError:
-                pass
-            if timer_task:
-                timer_task.cancel()
-                try:
-                    await timer_task
-                except asyncio.CancelledError:
-                    pass
-            if not done_wait_task.done():
-                done_wait_task.cancel()
-                try:
-                    await done_wait_task
-                except asyncio.CancelledError:
-                    pass
+            await cancel_wait(prompt_task)
+            await cancel_wait(timer_task)
+            await cancel_wait(done_wait_task)
             return None
         else:
-            if timer_task:
-                timer_task.cancel()
-                try:
-                    await timer_task
-                except asyncio.CancelledError:
-                    pass
-            if done_wait_task:
-                done_wait_task.cancel()
-                try:
-                    await done_wait_task
-                except asyncio.CancelledError:
-                    pass
+            await cancel_wait(timer_task)
+            await cancel_wait(done_wait_task)
             return await prompt_task
     except asyncio.CancelledError:
-        if timer_task:
-            timer_task.cancel()
-            try:
-                await timer_task
-            except asyncio.CancelledError:
-                pass
-        if 'prompt_task' in locals():
-            prompt_task.cancel()
-            try:
-                await prompt_task
-            except asyncio.CancelledError:
-                pass
-        if 'done_wait_task' in locals():
-            done_wait_task.cancel()
-            try:
-                await done_wait_task
-            except asyncio.CancelledError:
-                pass
+        await cancel_wait(prompt_task)
+        await cancel_wait(timer_task)
+        await cancel_wait(done_wait_task)
         raise
 
 async def main():
