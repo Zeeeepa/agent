@@ -5,13 +5,13 @@ def package(p):
 
 try:
     import openai
-except:
+except ImportError:
     package("openai")
     import openai
 
 try:
     import dotenv
-except:
+except ImportError:
     package("python-dotenv")
     import dotenv
 

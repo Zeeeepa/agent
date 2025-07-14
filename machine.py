@@ -70,6 +70,7 @@ async def aut(cmd):
             model="gpt-4.1",
             temperature=1,
             top_p=0.9,
+            max_output_tokens=4096,
             input=cmd
         )
         log(f"\n{response.output_text}\n")
@@ -231,7 +232,7 @@ async def main():
                 cmd = "<no_response>"
             if not cmd.strip():
                 continue
-            log(f"{cmd}", "memory.txt", N=100)
+            log(f"{cmd}", "memory.txt", N=300)
             log(f"{cmd}", "code.txt")
             cmd = open("memory.txt", encoding="utf-8").read().strip()
             await process(cmd)
