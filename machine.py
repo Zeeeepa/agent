@@ -1,6 +1,6 @@
 import os, sys, subprocess, platform, getpass, time, traceback, asyncio, re, io, ast, multiprocessing, contextlib, threading
 
-from install import OpenAI, prompt_toolkit, black, art, package
+from install import openai, prompt_toolkit, black, art, package
 
 proxy = os.getenv("PROXY")
 if proxy:
@@ -11,9 +11,9 @@ if proxy:
         package("httpx-socks")
         from httpx_socks import SyncProxyTransport
         import httpx
-    client = OpenAI(http_client=httpx.Client(transport=SyncProxyTransport.from_url(proxy)))
+    client = openai.OpenAI(http_client=httpx.Client(transport=SyncProxyTransport.from_url(proxy)))
 else:
-    client = OpenAI()
+    client = openai.OpenAI()
 
 pulse = int(os.getenv("PULSE"))
 timeout = int(os.getenv("TIMEOUT"))

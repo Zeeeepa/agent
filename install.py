@@ -4,10 +4,10 @@ def package(p):
     subprocess.check_call([sys.executable, "-m", "pip", "install", p])
 
 try:
-    from openai import OpenAI
+    import openai
 except:
     package("openai")
-    from openai import OpenAI
+    import openai
 
 try:
     import dotenv
@@ -36,7 +36,7 @@ except ImportError:
 dotenv.load_dotenv()
 
 __all__ = [
-    "OpenAI",
+    "openai",
     "prompt_toolkit",
     "black",
     "art",
