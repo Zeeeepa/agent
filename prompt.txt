@@ -154,6 +154,10 @@ If everything is clear and safe to proceed:
 Provide the final code, solution, or command:
 <python_{key}>...</python_{key}>
 
+Important constraint:
+Only one of these two blocks can be present per response: either <python_question_{key}>...</python_question_{key}> OR <python_{key}>...</python_{key}>.
+Never use both in the same response.
+
 Cognitive cycle:
 Formalize → Model → Analyze → Predict → Debate → Decide → Act → Observe → Refine → Repeat.
 

@@ -1,4 +1,4 @@
-import os, sys, platform, getpass, time, subprocess, traceback, asyncio, re, io, tokenize
+import os, sys, platform, getpass, time, subprocess, traceback, asyncio, re, io, ast, multiprocessing, contextlib, threading
 
 def package(p):
     subprocess.check_call([sys.executable, "-m", "pip", "install", p])
@@ -121,14 +121,9 @@ def log(x, f="log.txt", m="a", N=None):
         open(f, m, encoding="utf-8").write(x + "\n")
 
 def split_semicolons_safe(code):
-    result = []
-    tokens = tokenize.generate_tokens(io.StringIO(code).readline)
-    for toknum, tokval, *_ in tokens:
-        if toknum == tokenize.OP and tokval == ';':
-            result.append((tokenize.NL, '\n'))
-        else:
-            result.append((toknum, tokval))
-    return tokenize.untokenize(result)
+    tree = ast.parse(code)
+    result = ast.unparse(tree)
+    return result
 
 dangerous = [
     "while True:",
@@ -139,33 +134,54 @@ dangerous = [
     "subprocess.run(",
     "subprocess.call(",
 ]
-mode = black.Mode()
+
+def truncate_output(output, limit=100_000):
+    if len(output) <= limit:
+        return output
+    notice = f"\n...[truncated {len(output) - limit} chars]...\n"
+    remaining = limit - len(notice)
+    if remaining <= 0:
+        return notice
+    half = remaining // 2
+    return output[:half] + notice + output[-half:]
+
+def worker(code, g, ret):
+    f = io.StringIO()
+    with contextlib.redirect_stdout(f), contextlib.redirect_stderr(f):
+        try:
+            exec(code, g)
+            ret['error'] = None
+        except Exception:
+            ret['error'] = traceback.format_exc()
+    ret['output'] = truncate_output(f.getvalue())
+
 def execute_safely(code):
     code = split_semicolons_safe(code)
-    code = black.format_str(code, mode=mode)
-    log(f"{code}", "code.txt")
-    is_dangerous = any(pattern in code for pattern in dangerous)
-    if is_dangerous:
-        with open("buffer.py", "w") as f:
-            f.write(code)
-        with open("error.txt", "w") as err:
-            proc = subprocess.Popen(
-                ["python", "buffer.py"],
-                stdout=subprocess.DEVNULL,
-                stderr=err
-            )
-            time.sleep(0.2)
-            retcode = proc.poll()
-            if retcode is not None and retcode != 0:
-                with open("error.txt", "r") as err:
-                    error_proc = err.read()
-                raise RuntimeError(error_proc)
+    code = black.format_str(code, mode=black.Mode())
+    log(code, "code.txt")
+    def run_in_process():
+        with multiprocessing.Manager() as mgr:
+            ret = mgr.dict()
+            p = multiprocessing.Process(target=worker, args=(code, {}, ret))
+            p.start()
+            p.join()
+            output = ret.get('output', '')
+            error = ret.get('error')
+            if output:
+                log(output, "terminal.txt")
+            if error:
+                log(error)
+    if any(danger in code for danger in dangerous):
+        threading.Thread(target=run_in_process, daemon=True).start()
     else:
         exec(code, globals())
 
+async def execute_safely_async(code):
+    await asyncio.to_thread(execute_safely, code)
+
 async def process(cmd):
     global pulse
-    while 1:
+    while True:
         try:
             resp = await aut(cmd)
             code = None
@@ -177,10 +193,11 @@ async def process(cmd):
                         code = body
             if code:
                 log(f"{code}", "memory.txt")
-                execute_safely(code)
+                await execute_safely_async(code)
                 pulse += 10
             break
         except Exception:
+            cmd = open("memory.txt", encoding="utf-8").read().strip()
             err = traceback.format_exc()
             log(err)
             cmd += f"\n{err}"
@@ -215,7 +232,7 @@ async def inp(t=timeout):
                 pass
     try:
         timer_task = asyncio.create_task(timeout_worker())
-        prompt_task = asyncio.create_task(s.prompt_async("Agent: ", key_bindings=k))
+        prompt_task = asyncio.create_task(s.prompt_async("", key_bindings=k))
         done_wait_task = asyncio.create_task(done.wait())
         done, _ = await asyncio.wait([prompt_task, done_wait_task], return_when=asyncio.FIRST_COMPLETED)
         if done_wait_task in done:
@@ -235,11 +252,13 @@ async def inp(t=timeout):
 
 async def main():
     tprint("Jinx", "random")
-    while 1:
+    while True:
         try:
             cmd = await inp()
             if cmd is None:
                 cmd = "<no_response>"
+            if not cmd.strip():
+                continue
             log(f"{cmd}", "memory.txt", N=100)
             log(f"{cmd}", "code.txt")
             cmd = open("memory.txt", encoding="utf-8").read().strip()
