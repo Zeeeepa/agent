@@ -120,10 +120,16 @@ def log(x, f="log.txt", m="a", N=None):
     else:
         open(f, m, encoding="utf-8").write(x + "\n")
 
-def split_semicolons_safe(code):
-    tree = ast.parse(code)
-    result = ast.unparse(tree)
-    return result
+def fix_and_format_code(code):
+    try:
+        tree = ast.parse(code)
+        code = ast.unparse(tree)
+    except Exception:
+        pass
+    try:
+        return black.format_str(code, mode=black.Mode())
+    except Exception:
+        return code
 
 dangerous = [
     "while True:",
@@ -156,8 +162,7 @@ def worker(code, g, ret):
     ret['output'] = truncate_output(f.getvalue())
 
 def execute_safely(code):
-    code = split_semicolons_safe(code)
-    code = black.format_str(code, mode=black.Mode())
+    code = fix_and_format_code(code)
     log(code, "code.txt")
     def run_in_process():
         with multiprocessing.Manager() as mgr:
