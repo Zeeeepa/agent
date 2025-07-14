@@ -1,4 +1,4 @@
-import os, sys, platform, getpass, time, traceback, asyncio, re, io, ast, multiprocessing, contextlib, threading
+import os, sys, subprocess, platform, getpass, time, traceback, asyncio, re, io, ast, multiprocessing, contextlib, threading
 
 from install import OpenAI, prompt_toolkit, black, art, package
 
