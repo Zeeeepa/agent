@@ -1,39 +1,6 @@
-import os, sys, platform, getpass, time, subprocess, traceback, asyncio, re, io, ast, multiprocessing, contextlib, threading
+import os, sys, platform, getpass, time, traceback, asyncio, re, io, ast, multiprocessing, contextlib, threading
 
-def package(p):
-    subprocess.check_call([sys.executable, "-m", "pip", "install", p])
-
-try:
-    from openai import OpenAI
-except:
-    package("openai")
-    from openai import OpenAI
-
-try:
-    from dotenv import load_dotenv
-except:
-    package("python-dotenv")
-    from dotenv import load_dotenv
-
-try:
-    import prompt_toolkit
-except ImportError:
-    package("prompt_toolkit")
-    import prompt_toolkit
-
-try:
-    import black
-except ImportError:
-    package("black")
-    import black
-
-try:
-    from art import tprint
-except ImportError:
-    package("art")
-    from art import tprint
-
-load_dotenv()
+from install import OpenAI, prompt_toolkit, black, art, package
 
 proxy = os.getenv("PROXY")
 if proxy:
@@ -256,7 +223,7 @@ async def inp(t=timeout):
         raise
 
 async def main():
-    tprint("Jinx", "random")
+    art.tprint("Jinx", "random")
     while True:
         try:
             cmd = await inp()
