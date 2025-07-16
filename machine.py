@@ -85,12 +85,17 @@ async def aut(cmd):
 
 def log(x, f="log.txt", m="a", N=None):
     if N:
-        try: l = open(f, encoding="utf-8").read().splitlines()
-        except: l = []
+        try:
+            with open(f, encoding="utf-8") as file:
+                l = file.read().splitlines()
+        except:
+            l = []
         l.append(x)
-        open(f, "w", encoding="utf-8").write("\n".join(l[-N:]) + "\n")
+        with open(f, "w", encoding="utf-8") as file:
+            file.write("\n".join(l[-N:]) + "\n")
     else:
-        open(f, m, encoding="utf-8").write(x + "\n")
+        with open(f, m, encoding="utf-8") as file:
+            file.write(x + "\n")
 
 def fix_and_format_code(code):
     try:
