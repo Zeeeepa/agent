@@ -1,4 +1,4 @@
-import os, sys, subprocess, platform, getpass, time, traceback, asyncio, re, io, ast, multiprocessing, contextlib, threading
+import os, sys, subprocess, platform, getpass, time, traceback, asyncio, re, io, ast, multiprocessing, contextlib, threading, queue
 
 from install import openai, prompt_toolkit, black, art, package
 
@@ -129,9 +129,10 @@ def worker(code, g, ret):
             ret['error'] = traceback.format_exc()
     ret['output'] = truncate_output(f.getvalue())
 
-def execute_safely(code):
+async def execute_safely(code):
     code = fix_and_format_code(code)
     log(code, "code.txt")
+    error_queue = queue.Queue()
     def run_in_process():
         with multiprocessing.Manager() as mgr:
             ret = mgr.dict()
@@ -144,13 +145,23 @@ def execute_safely(code):
                 log(output, "terminal.txt")
             if error:
                 log(error)
+                error_queue.put(error)
     if any(danger in code for danger in dangerous):
         threading.Thread(target=run_in_process, daemon=True).start()
+        stop_event = asyncio.Event()
+        loading_task = asyncio.create_task(show_loading(stop_event))
+        await asyncio.sleep(3)
+        stop_event.set()
+        await loading_task
+        if not error_queue.empty():
+            raise RuntimeError(error_queue.get())
     else:
-        exec(code, globals())
-
-async def execute_safely_async(code):
-    await asyncio.to_thread(execute_safely, code)
+        try:
+            exec(code, globals())
+        except Exception:
+            err = traceback.format_exc()
+            log(err)
+            raise RuntimeError(err)
 
 async def process(cmd):
     global pulse
@@ -166,7 +177,7 @@ async def process(cmd):
                         code = body
             if code:
                 log(f"{code}", "memory.txt")
-                await execute_safely_async(code)
+                await execute_safely(code)
                 pulse += 10
             break
         except Exception:
