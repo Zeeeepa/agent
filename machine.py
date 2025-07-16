@@ -1,6 +1,7 @@
 import os, sys, subprocess, platform, getpass, time, traceback, asyncio, re, io, ast, multiprocessing, contextlib, threading, queue
 
 from install import openai, prompt_toolkit, black, art, package
+from forbidden_snippets import forbidden_snippets
 
 proxy = os.getenv("PROXY")
 if proxy:
@@ -102,16 +103,6 @@ def fix_and_format_code(code):
     except Exception:
         return code
 
-dangerous = [
-    "while True:",
-    "while 1:",
-    "for _ in iter(int, 1):",
-    "time.sleep(",
-    "threading.Thread(",
-    "subprocess.run(",
-    "subprocess.call(",
-]
-
 def truncate_output(output, limit=100_000):
     if len(output) <= limit:
         return output
@@ -149,7 +140,7 @@ async def execute_safely(code):
             if error:
                 log(error)
                 error_queue.put(error)
-    if any(danger in code for danger in dangerous):
+    if any(danger in code for danger in forbidden_snippets):
         threading.Thread(target=run_in_process, daemon=True).start()
         await with_loading(asyncio.sleep(3))
         if not error_queue.empty():
