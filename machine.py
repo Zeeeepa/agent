@@ -48,6 +48,15 @@ async def show_loading(stop_event: asyncio.Event):
         await asyncio.sleep(0.05)
     sys.stdout.write("\r\033[K")
 
+async def with_loading(coro):
+    stop_event = asyncio.Event()
+    loading_task = asyncio.create_task(show_loading(stop_event))
+    try:
+        return await coro
+    finally:
+        stop_event.set()
+        await loading_task
+
 def prompt():
     build()
     meta = (
@@ -61,23 +70,17 @@ def prompt():
     return meta + open("prompt.txt", encoding="utf-8").read()
 
 async def aut(cmd):
-    stop_event = asyncio.Event()
-    loading_task = asyncio.create_task(show_loading(stop_event))
-    try:
-        response = await asyncio.to_thread(
-            client.responses.create,
-            instructions=prompt(),
-            model="gpt-4.1",
-            temperature=1,
-            top_p=0.9,
-            max_output_tokens=4096,
-            input=cmd
-        )
-        log(f"\n{response.output_text}\n")
-        return response.output_text
-    finally:
-        stop_event.set()
-        await loading_task
+    response = await with_loading(asyncio.to_thread(
+        client.responses.create,
+        instructions=prompt(),
+        model="gpt-4.1",
+        temperature=1,
+        top_p=0.9,
+        max_output_tokens=4096,
+        input=cmd
+    ))
+    log(f"\n{response.output_text}\n")
+    return response.output_text
 
 def log(x, f="log.txt", m="a", N=None):
     if N:
@@ -148,11 +151,7 @@ async def execute_safely(code):
                 error_queue.put(error)
     if any(danger in code for danger in dangerous):
         threading.Thread(target=run_in_process, daemon=True).start()
-        stop_event = asyncio.Event()
-        loading_task = asyncio.create_task(show_loading(stop_event))
-        await asyncio.sleep(3)
-        stop_event.set()
-        await loading_task
+        await with_loading(asyncio.sleep(3))
         if not error_queue.empty():
             raise RuntimeError(error_queue.get())
     else:
