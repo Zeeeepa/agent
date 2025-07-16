@@ -34,6 +34,12 @@ except ImportError:
     import libcst
 
 try:
+    import autopep8
+except ImportError:
+    package("autopep8")
+    import autopep8
+
+try:
     import art
 except ImportError:
     package("art")
@@ -46,6 +52,7 @@ __all__ = [
     "prompt_toolkit",
     "black",
     "libcst",
+    "autopep8",
     "art",
     "package"
 ]
