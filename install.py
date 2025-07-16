@@ -28,6 +28,12 @@ except ImportError:
     import black
 
 try:
+    import libcst
+except ImportError:
+    package("libcst")
+    import libcst
+
+try:
     import art
 except ImportError:
     package("art")
@@ -39,6 +45,7 @@ __all__ = [
     "openai",
     "prompt_toolkit",
     "black",
+    "libcst",
     "art",
     "package"
 ]

@@ -1,6 +1,6 @@
 import os, sys, subprocess, platform, getpass, time, traceback, asyncio, re, io, ast, multiprocessing, contextlib, threading, queue
 
-from install import openai, prompt_toolkit, black, art, package
+from install import openai, prompt_toolkit, black, libcst, art, package
 from forbidden_snippets import forbidden_snippets
 
 proxy = os.getenv("PROXY")
@@ -96,6 +96,11 @@ def fix_and_format_code(code):
     try:
         tree = ast.parse(code)
         code = ast.unparse(tree)
+    except Exception:
+        pass
+    try:
+        module = libcst.cst.parse_module(code)
+        code = module.code
     except Exception:
         pass
     try:
