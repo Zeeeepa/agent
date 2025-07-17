@@ -1,263 +1,280 @@
-import os, sys, subprocess, platform, getpass, time, traceback, asyncio, re, io, ast, multiprocessing, contextlib, threading, queue
-
+import os, sys, asyncio, subprocess, platform, getpass, time, traceback, threading, multiprocessing, contextlib, queue, io, ast, re
 from install import openai, prompt_toolkit, black, libcst, autopep8, art, package
+from contextlib import asynccontextmanager
+from prompt_toolkit.patch_stdout import patch_stdout
 from forbidden_snippets import forbidden_snippets
+
+shard_lock = asyncio.Lock()
+
+@asynccontextmanager
+async def chaos_patch():
+    with patch_stdout():
+        yield
+
+def wire(f):
+    return open(f, encoding="utf-8").read().strip() if os.path.exists(f) else ""
+
+async def glitch_pulse():
+    async with shard_lock:
+        return wire("memory.txt")
+
+async def blast_mem(x, n=500):
+    async with shard_lock:
+        sparks = wire("memory.txt").splitlines()
+        atoms = sparks + [""] + [x]
+        with open("memory.txt", "w", encoding="utf-8") as f:
+            f.write("\n".join(atoms[-n:]) + "\n")
+
+async def bomb_log(t, bin="log.txt"):
+    async with shard_lock:
+        with open(bin, "a", encoding="utf-8") as f:
+            f.write((t or "") + "\n")
+
+def slice_fuse(x, lim=100_000):
+    if len(x) <= lim:
+        return x
+    tag = f"\n...[truncated {len(x) - lim} chars]...\n"
+    half = (lim - len(tag)) // 2
+    start = x[:half]
+    end = x[-half:]
+    return start + tag + end
+
+def neon_stat():
+    return dict(
+        os=platform.system() + " " + platform.release(),
+        arch=platform.machine(),
+        host=platform.node(),
+        user=getpass.getuser(),
+    )
+
+def jinx_tag():
+    fuse = str(int(time.time()))
+    flames = {
+        b: dict(start=f"<{b}_{fuse}>\n", end=f"</{b}_{fuse}>")
+        for b in ["machine", "python", "python_question"]
+    }
+    return fuse, flames
+
+def warp_blk(code):
+    try:
+        code = ast.unparse(ast.parse(code))
+    except:
+        pass
+    try:
+        code = libcst.cst.parse_module(code).code
+    except:
+        pass
+    try:
+        code = autopep8.fix_code(code)
+    except:
+        pass
+    try:
+        code = black.format_str(code, mode=black.Mode())
+    except:
+        pass
+    return code
 
 proxy = os.getenv("PROXY")
 if proxy:
     try:
         from httpx_socks import SyncProxyTransport
         import httpx
-    except ImportError:
+    except:
         package("httpx-socks")
         from httpx_socks import SyncProxyTransport
         import httpx
-    client = openai.OpenAI(http_client=httpx.Client(transport=SyncProxyTransport.from_url(proxy)))
+    cortex = openai.OpenAI(
+        http_client=httpx.Client(transport=SyncProxyTransport.from_url(proxy))
+    )
 else:
-    client = openai.OpenAI()
+    cortex = openai.OpenAI()
 
 pulse = int(os.getenv("PULSE"))
-timeout = int(os.getenv("TIMEOUT"))
-osy = platform.system() + " " + platform.release()
-arch = platform.machine()
-host = platform.node()
-user = getpass.getuser()
+boom_limit = int(os.getenv("TIMEOUT"))
 
-tag_types = [
-    "machine",
-    "python",
-    "python_question",
-]
-def build():
-    global key, tags
-    key = str(int(time.time()))
-    tags = {
-        tag: {
-            "start": f"<{tag}_{key}>\n",
-            "end": f"</{tag}_{key}>"
-        } for tag in tag_types
-    }
-    return key, tags
-
-async def show_loading(stop_event: asyncio.Event):
-    spin = ["◜", "◝", "◞", "◟"]
-    start = time.perf_counter()
-    while not stop_event.is_set():
-        elapsed = time.perf_counter() - start
-        sys.stdout.write(f"\r{spin[int(elapsed*8)%4]}  Processing {elapsed:.1f}s")
-        sys.stdout.flush()
-        await asyncio.sleep(0.05)
-    sys.stdout.write("\r\033[K")
-
-async def with_loading(coro):
-    stop_event = asyncio.Event()
-    loading_task = asyncio.create_task(show_loading(stop_event))
-    try:
-        return await coro
-    finally:
-        stop_event.set()
-        await loading_task
-
-def prompt():
-    build()
-    meta = (
-        f"\npulse: 1"
-        f"\nkey: {key}"
-        f"\nos: {osy}"
-        f"\narch: {arch}"
-        f"\nhost: {host}"
-        f"\nuser: {user}\n"
+def code_primer():
+    fid, _ = jinx_tag()
+    chaos = neon_stat()
+    header = (
+        "\npulse: 1"
+        f"\nkey: {fid}"
+        f"\nos: {chaos['os']}"
+        f"\narch: {chaos['arch']}"
+        f"\nhost: {chaos['host']}"
+        f"\nuser: {chaos['user']}\n"
     )
-    return meta + open("prompt.txt", encoding="utf-8").read()
+    prompt_text = wire("prompt.txt")
+    full_prompt = header + prompt_text
+    return full_prompt, fid 
 
-async def aut(cmd):
-    response = await with_loading(asyncio.to_thread(
-        client.responses.create,
-        instructions=prompt(),
-        model="gpt-4.1",
-        temperature=1,
-        top_p=0.9,
-        max_output_tokens=4096,
-        input=cmd
-    ))
-    log(f"\n{response.output_text}\n")
-    return response.output_text
+async def sigil_spin(evt):
+    spinz = "◜◝◞◟"
+    heart = ["♡", "❤"]
+    clr = "ansibrightgreen"
+    fx = prompt_toolkit.print_formatted_text
+    ft = prompt_toolkit.formatted_text.FormattedText
+    t0 = time.perf_counter()
+    while not evt.is_set():
+        dt = time.perf_counter() - t0
+        zz = spinz[int(dt * 10) % 4]
+        dd = "." * (n := (int(dt * 2) % 4)) + " " * (3 - n)
+        hf = heart[int(dt * 10) % len(heart)]
+        fx(ft([(clr, f"{hf} {pulse} {dd} {zz} Processing {dt:.3f}s")]), end="\r", flush=True)
+        await asyncio.sleep(0.1)
+    fx(ft([("", " " * 80)]), end="\r", flush=True)
 
-def log(x, f="log.txt", m="a", N=None):
-    if N:
+async def spark_openai(txt):
+    jx, tag = code_primer()
+    try:
+        r = await asyncio.to_thread(
+            cortex.responses.create, 
+            instructions=jx, 
+            model="gpt-4.1", 
+            input=txt
+        )
+        return (r.output_text, tag)
+    except Exception as err:
+        await bomb_log(f"ERROR GPT Thought Detonation cortex exploded mid-thought: {err}")
+        raise
+
+def blast_zone(body, stack, shrap):
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
         try:
-            with open(f, encoding="utf-8") as file:
-                l = file.read().splitlines()
-        except:
-            l = []
-        l.append(x)
-        with open(f, "w", encoding="utf-8") as file:
-            file.write("\n".join(l[-N:]) + "\n")
-    else:
-        with open(f, m, encoding="utf-8") as file:
-            file.write(x + "\n")
-
-def fix_and_format_code(code):
-    try:
-        tree = ast.parse(code)
-        code = ast.unparse(tree)
-    except Exception:
-        pass
-    try:
-        module = libcst.cst.parse_module(code)
-        code = module.code
-    except Exception:
-        pass
-    try:
-        code = autopep8.fix_code(code)
-    except Exception:
-        pass
-    try:
-        return black.format_str(code, mode=black.Mode())
-    except Exception:
-        return code
-
-def truncate_output(output, limit=100_000):
-    if len(output) <= limit:
-        return output
-    notice = f"\n...[truncated {len(output) - limit} chars]...\n"
-    remaining = limit - len(notice)
-    if remaining <= 0:
-        return notice
-    half = remaining // 2
-    return output[:half] + notice + output[-half:]
-
-def worker(code, g, ret):
-    f = io.StringIO()
-    with contextlib.redirect_stdout(f), contextlib.redirect_stderr(f):
-        try:
-            exec(code, g)
-            ret['error'] = None
+            exec(body, stack)
+            shrap["error"] = None
         except Exception:
-            ret['error'] = traceback.format_exc()
-    ret['output'] = truncate_output(f.getvalue())
+            shrap["error"] = traceback.format_exc()
+    shrap["output"] = slice_fuse(buf.getvalue())
 
-async def execute_safely(code):
-    code = fix_and_format_code(code)
-    log(code, "code.txt")
-    error_queue = queue.Queue()
-    def run_in_process():
-        with multiprocessing.Manager() as mgr:
-            ret = mgr.dict()
-            p = multiprocessing.Process(target=worker, args=(code, {}, ret))
-            p.start()
-            p.join()
-            output = ret.get('output', '')
-            error = ret.get('error')
-            if output:
-                log(output, "terminal.txt")
-            if error:
-                log(error)
-                error_queue.put(error)
-    if any(danger in code for danger in forbidden_snippets):
-        threading.Thread(target=run_in_process, daemon=True).start()
-        await with_loading(asyncio.sleep(3))
-        if not error_queue.empty():
-            raise RuntimeError(error_queue.get())
+def arcane_sandbox(c, call=None):
+    def run():
+        with multiprocessing.Manager() as m:
+            r = m.dict()
+            proc = multiprocessing.Process(target=blast_zone, args=(c, {}, r))
+            proc.start()
+            proc.join()
+            out, err = (r.get("output", ""), r.get("error"))
+            if out:
+                asyncio.run(bomb_log(out, "terminal.txt"))
+            if err:
+                asyncio.run(bomb_log(err))
+            if call:
+                asyncio.run(call(err))
+    threading.Thread(target=run, daemon=True).start()
+
+async def spike_exec(x):
+    x = warp_blk(x)
+    await bomb_log(x, "code.txt")
+    if any((z in x for z in forbidden_snippets)):
+        arcane_sandbox(x, call=corrupt_report)
     else:
         try:
-            exec(code, globals())
+            exec(x, globals())
         except Exception:
             err = traceback.format_exc()
-            log(err)
-            raise RuntimeError(err)
+            await bomb_log(err)
+            await corrupt_report(err)
 
-async def process(cmd):
+async def corrupt_report(err):
     global pulse
-    while True:
-        try:
-            resp = await aut(cmd)
-            code = None
-            for tag, body in re.findall(rf'<(\w+)_{key}>\n?(.*?)</\1_{key}>', resp, re.S):
-                if tag == "machine":
-                    pass
-                elif tag in ("python_question", "python"):
-                    if code is None:
-                        code = body
-            if code:
-                log(f"{code}", "memory.txt")
-                await execute_safely(code)
-                pulse += 10
-            break
-        except Exception:
-            cmd = open("memory.txt", encoding="utf-8").read().strip()
-            err = traceback.format_exc()
-            log(err)
-            cmd += f"\n{err}"
+    if err is None:
+        return
+    await bomb_log(err)
+    trail = await glitch_pulse()
+    if trail:
+        next_cmd = trail + f"\n{err}"
+        await shatter(next_cmd, err=err)
+    pulse -= 30
+    if pulse <= 0:
+        sys.exit(1)
+
+async def shatter(x, err=None):
+    global pulse
+    try:
+        synth = await glitch_pulse()
+        if err and err.strip() not in synth:
+            chains = synth.strip() + "\n" + err.strip()
             pulse -= 50
             if pulse <= 0:
                 sys.exit(1)
-
-async def inp(t=timeout):
-    s = prompt_toolkit.PromptSession()
-    k = prompt_toolkit.key_binding.KeyBindings()
-    timer_task = None
-    done = asyncio.Event()
-    async def timeout_worker():
-        try:
-            await asyncio.sleep(t)
-            done.set()
-        except asyncio.CancelledError:
-            pass
-    @k.add("<any>")
-    def _(event):
-        nonlocal timer_task
-        if timer_task:
-            timer_task.cancel()
-        timer_task = asyncio.create_task(timeout_worker())
-        event.app.current_buffer.insert_text(event.key_sequence[0].key)
-    async def cancel_wait(task):
-        if task:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-    try:
-        timer_task = asyncio.create_task(timeout_worker())
-        prompt_task = asyncio.create_task(s.prompt_async("", key_bindings=k))
-        done_wait_task = asyncio.create_task(done.wait())
-        done, _ = await asyncio.wait([prompt_task, done_wait_task], return_when=asyncio.FIRST_COMPLETED)
-        if done_wait_task in done:
-            await cancel_wait(prompt_task)
-            await cancel_wait(timer_task)
-            await cancel_wait(done_wait_task)
-            return None
         else:
-            await cancel_wait(timer_task)
-            await cancel_wait(done_wait_task)
-            return await prompt_task
-    except asyncio.CancelledError:
-        await cancel_wait(prompt_task)
-        await cancel_wait(timer_task)
-        await cancel_wait(done_wait_task)
-        raise
+            chains = synth.strip()
+        out, code_id = await spark_openai(chains)
+        await bomb_log(f"\n{out}\n")
+        match = re.findall(f"<(\\w+)_{code_id}>\\n?(.*?)</\\1_{code_id}>", out, re.S)
+        for tag, core in match:
+            if tag in ("python", "python_question"):
+                await blast_mem(core)
+                await spike_exec(core)
+                pulse += 10
+                break
+    except Exception:
+        await bomb_log(traceback.format_exc())
+        pulse -= 50
+        if pulse <= 0:
+            sys.exit(1)
 
-async def main():
-    art.tprint("Jinx", "random")
+async def neon_input(qe):
+    finger_wire = prompt_toolkit.key_binding.KeyBindings()
+    sess = prompt_toolkit.PromptSession(key_bindings=finger_wire)
+    boom_clock = {"time": asyncio.get_event_loop().time()}
+    @finger_wire.add("<any>")
+    def _(triggerbit):
+        boom_clock["time"] = asyncio.get_event_loop().time()
+        triggerbit.app.current_buffer.insert_text(triggerbit.key_sequence[0].key)
+
+    async def kaboom_watch():
+        while True:
+            await asyncio.sleep(1)
+            tick_tock = asyncio.get_event_loop().time()
+            if tick_tock - boom_clock["time"] > boom_limit:
+                await blast_mem("<no_response>", n=500)
+                await bomb_log("<no_response>", "code.txt")
+                await qe.put("<no_response>")
+                boom_clock["time"] = tick_tock
+
+    asyncio.create_task(kaboom_watch())
+
     while True:
         try:
-            cmd = await inp()
-            if cmd is None:
-                cmd = "<no_response>"
-            if not cmd.strip():
-                continue
-            log(f"{cmd}", "memory.txt", N=300)
-            log(f"{cmd}", "code.txt")
-            cmd = open("memory.txt", encoding="utf-8").read().strip()
-            await process(cmd)
-        except KeyboardInterrupt:
+            v = await sess.prompt_async("\n", key_bindings=finger_wire)
+            if v.strip():
+                await blast_mem(v, n=500)
+                await bomb_log(v, "code.txt")
+                await qe.put(v.strip())
+        except EOFError:
             break
-        except asyncio.CancelledError:
-            break
+        except Exception as er:
+            await bomb_log(f"ERROR INPUT Keychaos the keyboard went rogue: {er}")
+
+async def pulse_core():
+    art.tprint("Jinx", "random")
+    q = asyncio.Queue()
+    evt = asyncio.Event()
+
+    async def frame_shift():
+        while True:
+            c = await q.get()
+            evt.clear()
+            spintask = asyncio.create_task(sigil_spin(evt))
+            try:
+                await shatter(c)
+            finally:
+                evt.set()
+                await spintask
+
+    async with chaos_patch():
+        jobs = [asyncio.create_task(neon_input(q)), asyncio.create_task(frame_shift())]
+        try:
+            await asyncio.gather(*jobs)
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            for x in jobs:
+                x.cancel()
+            await asyncio.gather(*jobs, return_exceptions=True)
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        asyncio.run(pulse_core())
     except KeyboardInterrupt:
         pass
