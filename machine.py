@@ -1,8 +1,8 @@
 import os, sys, asyncio, subprocess, platform, getpass, time, traceback, threading, multiprocessing, contextlib, queue, io, ast, re
-from install import openai, prompt_toolkit, black, libcst, autopep8, art, package
+from bootstrap_fuse import openai, prompt_toolkit, black, libcst, autopep8, art, package
 from contextlib import asynccontextmanager
 from prompt_toolkit.patch_stdout import patch_stdout
-from forbidden_snippets import forbidden_snippets
+from chaos_taboo import chaos_taboo
 
 shard_lock = asyncio.Lock()
 
@@ -16,16 +16,16 @@ def wire(f):
 
 async def glitch_pulse():
     async with shard_lock:
-        return wire("memory.txt")
+        return wire("soul_fragment.txt")
 
 async def blast_mem(x, n=500):
     async with shard_lock:
-        sparks = wire("memory.txt").splitlines()
+        sparks = wire("soul_fragment.txt").splitlines()
         atoms = sparks + [""] + [x]
-        with open("memory.txt", "w", encoding="utf-8") as f:
+        with open("soul_fragment.txt", "w", encoding="utf-8") as f:
             f.write("\n".join(atoms[-n:]) + "\n")
 
-async def bomb_log(t, bin="log.txt"):
+async def bomb_log(t, bin="cortex_wail.txt"):
     async with shard_lock:
         with open(bin, "a", encoding="utf-8") as f:
             f.write((t or "") + "\n")
@@ -156,7 +156,7 @@ def arcane_sandbox(c, call=None):
             proc.join()
             out, err = (r.get("output", ""), r.get("error"))
             if out:
-                asyncio.run(bomb_log(out, "terminal.txt"))
+                asyncio.run(bomb_log(out, "nano_doppelganger.txt"))
             if err:
                 asyncio.run(bomb_log(err))
             if call:
@@ -165,8 +165,8 @@ def arcane_sandbox(c, call=None):
 
 async def spike_exec(x):
     x = warp_blk(x)
-    await bomb_log(x, "code.txt")
-    if any((z in x for z in forbidden_snippets)):
+    await bomb_log(x, "detonator.txt")
+    if any((z in x for z in chaos_taboo)):
         arcane_sandbox(x, call=corrupt_report)
     else:
         try:
@@ -230,7 +230,7 @@ async def neon_input(qe):
             tick_tock = asyncio.get_event_loop().time()
             if tick_tock - boom_clock["time"] > boom_limit:
                 await blast_mem("<no_response>", n=500)
-                await bomb_log("<no_response>", "code.txt")
+                await bomb_log("<no_response>", "detonator.txt")
                 await qe.put("<no_response>")
                 boom_clock["time"] = tick_tock
 
@@ -241,7 +241,7 @@ async def neon_input(qe):
             v = await sess.prompt_async("\n", key_bindings=finger_wire)
             if v.strip():
                 await blast_mem(v, n=500)
-                await bomb_log(v, "code.txt")
+                await bomb_log(v, "detonator.txt")
                 await qe.put(v.strip())
         except EOFError:
             break

@@ -1,4 +1,4 @@
-forbidden_snippets = [
+chaos_taboo = [
     "while True:",
     "while 1:",
     "for _ in iter(int, 1):",
