@@ -58,19 +58,19 @@ def jinx_tag():
 def warp_blk(code):
     try:
         code = ast.unparse(ast.parse(code))
-    except:
+    except Exception:
         pass
     try:
         code = libcst.cst.parse_module(code).code
-    except:
+    except Exception:
         pass
     try:
         code = autopep8.fix_code(code)
-    except:
+    except Exception:
         pass
     try:
         code = black.format_str(code, mode=black.Mode())
-    except:
+    except Exception:
         pass
     return code
 
@@ -79,7 +79,7 @@ if proxy:
     try:
         from httpx_socks import SyncProxyTransport
         import httpx
-    except:
+    except ImportError:
         package("httpx-socks")
         from httpx_socks import SyncProxyTransport
         import httpx
@@ -105,7 +105,19 @@ def code_primer():
     )
     prompt_text = wire("prompt.txt")
     full_prompt = header + prompt_text
-    return full_prompt, fid 
+    return full_prompt, fid
+
+async def detonate_payload(pyro, retries=2, delay=3):
+    for attempt in range(retries):
+        try:
+            return await pyro()
+        except Exception as err:
+            await bomb_log(f"Spiking the loop: Detonating again after combustion: {err} (attempt {attempt + 1} of {retries})")
+            if attempt < retries - 1:
+                await asyncio.sleep(delay)
+            else:
+                await bomb_log(f"System fracturing: Max retries burned — payload collapse {retries} attempts.")
+                raise
 
 async def sigil_spin(evt):
     spinz = "◜◝◞◟"
@@ -125,17 +137,19 @@ async def sigil_spin(evt):
 
 async def spark_openai(txt):
     jx, tag = code_primer()
-    try:
-        r = await asyncio.to_thread(
-            cortex.responses.create, 
-            instructions=jx, 
-            model="gpt-4.1", 
-            input=txt
-        )
-        return (r.output_text, tag)
-    except Exception as err:
-        await bomb_log(f"ERROR GPT Thought Detonation cortex exploded mid-thought: {err}")
-        raise
+    async def openai_task():
+        try:
+            r = await asyncio.to_thread(
+                cortex.responses.create, 
+                instructions=jx, 
+                model="gpt-4.1", 
+                input=txt
+            )
+            return (r.output_text, tag)
+        except Exception as err:
+            await bomb_log(f"ERROR GPT Thought Detonation cortex exploded mid-thought: {err}")
+            raise
+    return await detonate_payload(openai_task)
 
 def blast_zone(body, stack, shrap):
     buf = io.StringIO()
@@ -151,16 +165,29 @@ def arcane_sandbox(c, call=None):
     def run():
         with multiprocessing.Manager() as m:
             r = m.dict()
-            proc = multiprocessing.Process(target=blast_zone, args=(c, {}, r))
-            proc.start()
-            proc.join()
-            out, err = (r.get("output", ""), r.get("error"))
-            if out:
-                asyncio.run(bomb_log(out, "nano_doppelganger.txt"))
-            if err:
-                asyncio.run(bomb_log(err))
-            if call:
-                asyncio.run(call(err))
+            def sandbox_task():
+                try:
+                    proc = multiprocessing.Process(target=blast_zone, args=(c, {}, r))
+                    proc.start()
+                    proc.join()
+                except Exception as e:
+                    raise Exception(f"Payload mutation error: Recursive detonation instability: {e}")
+            async def async_sandbox_task():
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, sandbox_task)
+            async def scatter_core():
+                try:
+                    await detonate_payload(async_sandbox_task)
+                    out, err = r.get("output", ""), r.get("error")
+                    if out:
+                        await bomb_log(out, "nano_doppelganger.txt")
+                    if err:
+                        await bomb_log(err)
+                    if call:
+                        await call(err)
+                except Exception as e:
+                    await bomb_log(f"Unrecoverable: Logic shredded after recursive collapse — system exile: {e}")
+            asyncio.run(scatter_core())
     threading.Thread(target=run, daemon=True).start()
 
 async def spike_exec(x):
