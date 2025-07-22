@@ -20,6 +20,7 @@ from prompt_toolkit import print_formatted_text
 from prompt_toolkit.formatted_text import FormattedText
 
 from chaos_taboo import chaos_taboo
+from typing import Tuple
 
 from contextlib import asynccontextmanager
 
@@ -460,7 +461,7 @@ class ChaosEngine:
         }
 
     @staticmethod
-    def jinx_tag() -> (str, dict):
+    def jinx_tag() -> Tuple[str, dict]:
         """Generate a unique tag for the current code generation attempt.
 
         Returns:
@@ -473,7 +474,7 @@ class ChaosEngine:
         }
         return fuse, flames
 
-    def code_primer(self) -> (str, str):
+    def code_primer(self) -> Tuple[str, str]:
         """Compose the initial prompt data from environment and local system info.
 
         Returns:
@@ -578,6 +579,8 @@ class ChaosEngine:
                     await self.sandbox.execute_in_place(core, globals(), self._corrupt_report)
                     self.pulse += 10
                     break
+            else:
+                print(out_text)
 
         except Exception:
             tb = traceback.format_exc()

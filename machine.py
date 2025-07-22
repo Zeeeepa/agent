@@ -239,6 +239,8 @@ async def shatter(x, err=None):
                 await spike_exec(core)
                 pulse += 10
                 break
+        else:
+            print(out)
     except Exception:
         await bomb_log(traceback.format_exc())
         pulse -= 50
