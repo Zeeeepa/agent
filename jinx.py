@@ -493,8 +493,8 @@ class ChaosEngine:
             f"\nuser: {chaos_info['user']}\n"
         )
 
-        # Read user seeded prompt from prompt.txt if available.
-        initial_text = self._safe_read_file("prompt.txt")
+        # Read user seeded prompt from burning_logic.txt if available.
+        initial_text = self._safe_read_file("prompt/burning_logic.txt")
 
         return header + initial_text, fid
 

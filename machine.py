@@ -105,7 +105,7 @@ def code_primer():
         f"\nhost: {chaos['host']}"
         f"\nuser: {chaos['user']}\n"
     )
-    return header + wire("prompt.txt"), fid
+    return header + wire("prompt/burning_logic.txt"), fid
 
 # 🚀 Fire a payload, retry if spark fizzles
 async def detonate_payload(pyro, retries=2, delay=3):
