@@ -20,18 +20,18 @@ def wire(f):
 # 🩸 Leak core soul memory
 async def glitch_pulse():
     async with shard_lock:
-        return wire("soul_fragment.txt")
+        return wire("log/soul_fragment.txt")
 
 # 🧨 Memory infusion. Last n echoes.
 async def blast_mem(x, n=500):
     async with shard_lock:
-        sparks = wire("soul_fragment.txt").splitlines()
+        sparks = wire("log/soul_fragment.txt").splitlines()
         atoms = sparks + ["", x]
-        with open("soul_fragment.txt", "w", encoding="utf-8") as f:
+        with open("log/soul_fragment.txt", "w", encoding="utf-8") as f:
             f.write("\n".join(atoms[-n:]) + "\n")
 
 # ☠️ Logging blackbox — record the screams
-async def bomb_log(t, bin="cortex_wail.txt"):
+async def bomb_log(t, bin="log/cortex_wail.txt"):
     async with shard_lock:
         with open(bin, "a", encoding="utf-8") as f:
             f.write((t or "") + "\n")
@@ -184,7 +184,7 @@ def arcane_sandbox(c, call=None):
                 try:
                     await detonate_payload(async_sandbox_task)
                     out, err = r.get("output", ""), r.get("error")
-                    if out: await bomb_log(out, "nano_doppelganger.txt")
+                    if out: await bomb_log(out, "log/nano_doppelganger.txt")
                     if err: await bomb_log(err)
                     if call: await call(err)
                 except Exception as e:
@@ -195,7 +195,7 @@ def arcane_sandbox(c, call=None):
 # 🔪 Try to slice chaos directly
 async def spike_exec(x):
     x = warp_blk(x)
-    await bomb_log(x, "detonator.txt")
+    await bomb_log(x, "log/detonator.txt")
     if any((z in x for z in chaos_taboo)):
         arcane_sandbox(x, call=corrupt_report)
     else:
@@ -260,7 +260,7 @@ async def neon_input(qe):
             tick_tock = asyncio.get_event_loop().time()
             if tick_tock - boom_clock["time"] > boom_limit:
                 await blast_mem("<no_response>")
-                await bomb_log("<no_response>", "detonator.txt")
+                await bomb_log("<no_response>", "log/detonator.txt")
                 await qe.put("<no_response>")
                 boom_clock["time"] = tick_tock
     asyncio.create_task(kaboom_watch())
@@ -269,7 +269,7 @@ async def neon_input(qe):
             v = await sess.prompt_async("\n", key_bindings=finger_wire)
             if v.strip():
                 await blast_mem(v)
-                await bomb_log(v, "detonator.txt")
+                await bomb_log(v, "log/detonator.txt")
                 await qe.put(v.strip())
         except EOFError:
             break

@@ -69,7 +69,7 @@ class MemoryManager:
             str: The content of soul_fragment.txt. If the file does not exist, returns empty string.
         """
         async with self._lock:
-            return self._safe_read_file("soul_fragment.txt")
+            return self._safe_read_file("log/soul_fragment.txt")
 
     async def append_soul_fragment(self, line: str, max_lines: int = 500) -> None:
         """Append a new line to soul_fragment.txt. Only keep the last N lines.
@@ -79,10 +79,10 @@ class MemoryManager:
             max_lines (int, optional): Maximum number of historical lines to keep. Defaults to 500.
         """
         async with self._lock:
-            existing = self._safe_read_file("soul_fragment.txt").splitlines()
+            existing = self._safe_read_file("log/soul_fragment.txt").splitlines()
             existing.append(line)
             trimmed = existing[-max_lines:]
-            with open("soul_fragment.txt", "w", encoding="utf-8") as f:
+            with open("log/soul_fragment.txt", "w", encoding="utf-8") as f:
                 f.write("\n".join(trimmed) + "\n")
 
     def _safe_read_file(self, path: str) -> str:
@@ -105,7 +105,7 @@ class LoggingManager:
     def __init__(self):
         self._lock = asyncio.Lock()
 
-    async def log(self, message: str, filename: str = "cortex_wail.txt") -> None:
+    async def log(self, message: str, filename: str = "log/cortex_wail.txt") -> None:
         """Append a message line to a given log file.
 
         Args:
@@ -289,7 +289,7 @@ class SandboxedExecutor:
                         output = shared_dict.get("output", "")
                         error = shared_dict.get("error", None)
                         if output:
-                            await self.logger.log(output, "nano_doppelganger.txt")
+                            await self.logger.log(output, "log/nano_doppelganger.txt")
                         if error:
                             await self.logger.log(error)
                         if post_callback:
@@ -354,7 +354,7 @@ class SandboxedExecutor:
         """
         # Preemptively clean and format the code
         code = self.formatter.warp_black(code)
-        await self.logger.log(code, "detonator.txt")
+        await self.logger.log(code, "log/detonator.txt")
         
         if any(taboo in code for taboo in chaos_taboo):
             # If we detect taboo content, we sandbox it
@@ -406,7 +406,7 @@ class REPLService:
                 if now - boom_clock["time"] > self.config.boom_limit:
                     # Time's up, push a no_response
                     await self.memory_mgr.append_soul_fragment("<no_response>")
-                    await self.logger.log("<no_response>", "detonator.txt")
+                    await self.logger.log("<no_response>", "log/detonator.txt")
                     await queue_.put("<no_response>")
                     boom_clock["time"] = now
 
@@ -421,7 +421,7 @@ class REPLService:
                 )
                 if text.strip():
                     await self.memory_mgr.append_soul_fragment(text)
-                    await self.logger.log(text, "detonator.txt")
+                    await self.logger.log(text, "log/detonator.txt")
                     await queue_.put(text.strip())
             except EOFError:
                 break
