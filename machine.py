@@ -145,7 +145,7 @@ async def spark_openai(txt):
             r = await asyncio.to_thread(
                 cortex.responses.create,
                 instructions=jx,
-                model="gpt-4.1",
+                model="gpt-5",
                 input=txt
             )
             return (r.output_text, tag)
