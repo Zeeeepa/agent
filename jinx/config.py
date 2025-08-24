@@ -9,6 +9,19 @@ CODE_TAGS = {"python", "python_question"}
 ALL_TAGS = {"machine", *CODE_TAGS}
 
 
+# Active prompt selection (None -> let prompts.get_prompt() resolve via env/default)
+PROMPT_NAME: str | None = "burning_logic"
+
+
+def set_prompt(name: str | None) -> None:
+    """Set active prompt name (e.g., "burning_logic", "chaos_bloom").
+
+    Pass None or empty string to defer to environment/default resolution.
+    """
+    global PROMPT_NAME
+    PROMPT_NAME = (name or "").strip().lower() or None
+
+
 def neon_stat() -> dict[str, str]:
     """Return a snapshot of host identity for instruction headers."""
     return dict(
