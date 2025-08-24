@@ -22,7 +22,7 @@ async def code_primer() -> tuple[str, str]:
         ``(header_plus_prompt, code_tag_id)`` where ``code_tag_id`` is used to
         identify code blocks in downstream parsing.
     """
-    return build_header_and_tag()
+    return await build_header_and_tag()
 
 
 async def spark_openai(txt: str) -> tuple[str, str]:

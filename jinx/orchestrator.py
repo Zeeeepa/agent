@@ -9,8 +9,7 @@ and the async runtime core.
 from __future__ import annotations
 
 import asyncio
-from jinx.runtime_service import pulse_core
-from jinx.bootstrap import load_env
+from jinx.bootstrap import load_env, ensure_optional
 
 
 def main() -> None:
@@ -22,4 +21,10 @@ def main() -> None:
     """
     # Ensure environment variables (e.g., OPENAI_API_KEY) are loaded from .env
     load_env()
+    # Ensure runtime optional deps are present before importing runtime_service
+    ensure_optional(["aiofiles"])
+
+    # Defer import until after dependencies are ensured to avoid early import errors
+    from jinx.runtime_service import pulse_core
+
     asyncio.run(pulse_core())

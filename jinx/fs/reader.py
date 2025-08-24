@@ -1,12 +1,16 @@
 from __future__ import annotations
 
-import os
+import aiofiles
+from aiofiles import ospath
 
 
-def read_text(path: str) -> str:
+async def read_text(path: str) -> str:
     """Read entire text file if it exists else return empty string."""
     try:
-        return open(path, encoding="utf-8").read().strip() if os.path.exists(path) else ""
+        if await ospath.exists(path):
+            async with aiofiles.open(path, encoding="utf-8") as f:
+                return (await f.read()).strip()
+        return ""
     except Exception:
         # Maintain silent failure semantics similar to existing wire()
         return ""

@@ -16,7 +16,7 @@ from jinx.logger import append_line
 async def glitch_pulse() -> str:
     """Return the current conversation transcript contents."""
     async with shard_lock:
-        return read_transcript("log/soul_fragment.txt")
+        return await read_transcript("log/soul_fragment.txt")
 
 
 async def blast_mem(x: str, n: int = 500) -> None:
@@ -30,7 +30,7 @@ async def blast_mem(x: str, n: int = 500) -> None:
         Maximum number of lines to retain (default 500).
     """
     async with shard_lock:
-        append_and_trim("log/soul_fragment.txt", x, keep_lines=n)
+        await append_and_trim("log/soul_fragment.txt", x, keep_lines=n)
 
 
 async def bomb_log(t: str, bin: str = "log/cortex_wail.txt") -> None:
@@ -44,4 +44,4 @@ async def bomb_log(t: str, bin: str = "log/cortex_wail.txt") -> None:
         Path to the log file (created if missing).
     """
     async with shard_lock:
-        append_line(bin, t or "")
+        await append_line(bin, t or "")

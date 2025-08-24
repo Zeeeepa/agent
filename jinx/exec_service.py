@@ -47,7 +47,7 @@ async def spike_exec(
         return
     await bomb_log(x, "log/detonator.txt")
     if any((z in x for z in taboo)):
-        arcane_sandbox(x, call=on_error)
+        await arcane_sandbox(x, call=on_error)
         return
     try:
         out = run_inline(x)

@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import aiofiles
 
-def read_transcript(path: str) -> str:
+
+async def read_transcript(path: str) -> str:
     """Return the contents of the transcript file or empty string on error.
 
-    Pure function: no locking here. Caller is responsible for synchronization.
+    Pure function: no locking; caller is responsible for synchronization.
     """
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            return f.read()
+        async with aiofiles.open(path, "r", encoding="utf-8") as f:
+            return await f.read()
     except Exception:
         return ""

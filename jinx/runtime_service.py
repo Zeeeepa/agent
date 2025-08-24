@@ -23,7 +23,8 @@ async def pulse_core() -> None:
     - Gracefully cancels background tasks on shutdown.
     """
     show_banner()
-    q: asyncio.Queue[str] = asyncio.Queue()
+    # Bounded queue to avoid unbounded memory growth under bursts
+    q: asyncio.Queue[str] = asyncio.Queue(maxsize=100)
 
     async with chaos_patch():
         jobs: list[asyncio.Task[None]] = [
