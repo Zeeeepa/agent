@@ -11,12 +11,16 @@ def get_hearts(ascii_only: bool, can: Callable[[str], bool] = can_render) -> Tup
     """
     if ascii_only:
         return "<3", "<3"
-    full = "❤" if can("❤") else None
-    hollow = "♡" if can("♡") else None
-    if full and hollow:
+
+    full, hollow = "❤", "♡"
+    full_ok = can(full)
+    hollow_ok = can(hollow)
+
+    if full_ok and hollow_ok:
         return full, hollow
-    if full:
-        return full, full
-    if hollow:
-        return hollow, hollow
+
+    if full_ok or hollow_ok:
+        single = full if full_ok else hollow
+        return single, single
+
     return "<3", "<3"

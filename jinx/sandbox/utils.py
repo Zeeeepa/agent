@@ -2,56 +2,23 @@ from __future__ import annotations
 
 import os
 from datetime import datetime
-from typing import Any, Optional
-import json
-import aiofiles
-from jinx.log_paths import SANDBOX_DIR, SANDBOX_INDEX
+from jinx.log_paths import SANDBOX_DIR
+import asyncio
 
 
 def make_run_log_path(base_dir: str = SANDBOX_DIR) -> str:
     os.makedirs(base_dir, exist_ok=True)
-    return os.path.join(base_dir, f"run_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.log")
+    return os.path.join(base_dir, f"pending_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.log")
 
-
-async def index_run(
-    log_path: str,
-    status: str,
-    code_id: Optional[str] = None,
-    error: Optional[str] = None,
-    index_path: str = SANDBOX_INDEX,
-    extra: Optional[dict[str, Any]] = None,
-) -> None:
-    """Append a compact record about a sandbox run to an index file.
-
-    Parameters
-    ----------
-    log_path : str
-        Path to the streamed log file for this run.
-    status : str
-        "ok" | "error" | "cancelled" etc.
-    code_id : Optional[str]
-        Optional code identifier.
-    error : Optional[str]
-        Optional error message.
-    index_path : str
-        JSONL index file path.
-    extra : Optional[dict]
-        Any extra fields to record.
-    """
-    os.makedirs(os.path.dirname(index_path), exist_ok=True)
-    rec = {
-        "ts": datetime.now().isoformat(timespec="milliseconds"),
-        "log_path": log_path,
-        "status": status,
-        "code_id": code_id,
-    }
-    if error:
-        rec["error"] = error
-    if extra:
-        rec.update(extra)
+async def async_rename_run_log(log_path: str, status: str) -> str:
     try:
-        async with aiofiles.open(index_path, "a", encoding="utf-8") as f:
-            await f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        base = os.path.basename(log_path)
+        ts = base.split("_", 1)[1][:-4] if ("_" in base and base.endswith(".log")) else datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+        prefix = "ok" if status == "ok" else "error"
+        new_path = os.path.join(os.path.dirname(log_path), f"{prefix}_{ts}.log")
+        if os.path.abspath(new_path) == os.path.abspath(log_path):
+            return log_path
+        await asyncio.to_thread(os.replace, log_path, new_path)
+        return new_path
     except Exception:
-        # Best-effort: indexing must not break execution
-        pass
+        return log_path

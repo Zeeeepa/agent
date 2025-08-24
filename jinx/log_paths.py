@@ -16,4 +16,3 @@ CLOCKWORK_GHOST: str = os.path.join("log", "clockwork_ghost.txt")
 
 # Sandbox streaming logs directory and index
 SANDBOX_DIR: str = os.path.join("log", "sandbox")
-SANDBOX_INDEX: str = os.path.join(SANDBOX_DIR, "index.jsonl")
