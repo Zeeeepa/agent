@@ -40,9 +40,10 @@ async def neon_input(qe: asyncio.Queue[str]) -> None:
             if tick_tock - boom_clock["time"] > boom_limit:
                 await blast_mem("<no_response>")
                 await bomb_log("<no_response>", TRIGGER_ECHOES)
+                # Do not disrupt FIFO order: emit only if queue has space
                 placed = try_put_nowait(qe, "<no_response>")
                 if not placed:
-                    await bomb_log("<no_response> dropped: input queue saturated", BLUE_WHISPERS)
+                    await bomb_log("<no_response> skipped: input queue saturated", BLUE_WHISPERS)
                 boom_clock["time"] = tick_tock
 
     asyncio.create_task(kaboom_watch())
@@ -50,13 +51,10 @@ async def neon_input(qe: asyncio.Queue[str]) -> None:
         try:
             v: str = await sess.prompt_async("\n", key_bindings=finger_wire)
             if v.strip():
-                await blast_mem(v)
+                # Do not write to transcript here; conversation_service will append
                 await bomb_log(v, TRIGGER_ECHOES)
-                put_drop_oldest(
-                    qe,
-                    v.strip(),
-                    on_drop=lambda: bomb_log("input dropped oldest: queue saturated", BLUE_WHISPERS),
-                )
+                # Preserve strict FIFO ordering for user inputs via backpressure
+                await qe.put(v.strip())
         except EOFError:
             break
         except Exception as e:  # pragma: no cover - guard rail for TTY issues

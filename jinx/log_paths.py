@@ -16,3 +16,6 @@ CLOCKWORK_GHOST: str = os.path.join("log", "clockwork_ghost.txt")
 
 # Sandbox streaming logs directory and index
 SANDBOX_DIR: str = os.path.join("log", "sandbox")
+
+# Evergreen durable memory store
+EVERGREEN_MEMORY: str = os.path.join("log", "evergreen_memory.txt")

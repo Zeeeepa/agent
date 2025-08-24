@@ -60,3 +60,18 @@ async def append_and_trim(path: str, text: str, keep_lines: int = 500) -> None:
     except Exception:
         # Best-effort; swallow I/O errors to mirror existing semantics
         pass
+
+
+async def write_text(path: str, text: str) -> None:
+    """Overwrite a text file with provided contents (creates parent dirs).
+
+    Best-effort semantics consistent with other helpers: swallow I/O errors.
+    """
+    try:
+        d = os.path.dirname(path)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        async with aiofiles.open(path, "w", encoding="utf-8") as f:
+            await f.write(text or "")
+    except Exception:
+        pass
