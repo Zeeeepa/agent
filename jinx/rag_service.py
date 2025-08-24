@@ -42,5 +42,7 @@ def build_file_search_tools() -> Dict[str, Any]:
                 "type": "file_search",
                 "vector_store_ids": vector_store_ids,
             }
-        ]
+        ],
+        # Force the model to call File Search instead of leaving it on auto.
+        # "tool_choice": {"type": "file_search"},
     }
