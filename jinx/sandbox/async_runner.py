@@ -9,6 +9,7 @@ from typing import Awaitable, Callable
 from jinx.sandbox.executor import blast_zone
 from jinx.retry import detonate_payload
 from jinx.logging_service import bomb_log
+from jinx.log_paths import CLOCKWORK_GHOST
 from jinx.sandbox.utils import make_run_log_path, index_run
 
 
@@ -41,7 +42,7 @@ async def run_sandbox(code: str, callback: Callable[[str | None], Awaitable[None
             out, err = r.get("output", ""), r.get("error")
             log_path = r.get("log_path")
             if out:
-                await bomb_log(out, "log/nano_doppelganger.txt")
+                await bomb_log(out, CLOCKWORK_GHOST)
             if err:
                 await bomb_log(err)
             if log_path:

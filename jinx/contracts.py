@@ -8,6 +8,7 @@ contracts to be interchangeable in the runtime.
 from __future__ import annotations
 
 from typing import Awaitable, Callable, Protocol, runtime_checkable
+from jinx.log_paths import BLUE_WHISPERS
 import asyncio
 
 
@@ -53,7 +54,7 @@ class LoggerPort(Protocol):
     async def blast_mem(self, x: str, n: int = 500) -> None:  # pragma: no cover
         ...
 
-    async def bomb_log(self, t: str, bin: str = "log/cortex_wail.txt") -> None:  # pragma: no cover
+    async def bomb_log(self, t: str, bin: str = BLUE_WHISPERS) -> None:  # pragma: no cover
         ...
 
 

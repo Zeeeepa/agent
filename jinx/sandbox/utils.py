@@ -5,9 +5,10 @@ from datetime import datetime
 from typing import Any, Optional
 import json
 import aiofiles
+from jinx.log_paths import SANDBOX_DIR, SANDBOX_INDEX
 
 
-def make_run_log_path(base_dir: str = os.path.join("log", "sandbox")) -> str:
+def make_run_log_path(base_dir: str = SANDBOX_DIR) -> str:
     os.makedirs(base_dir, exist_ok=True)
     return os.path.join(base_dir, f"run_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.log")
 
@@ -17,7 +18,7 @@ async def index_run(
     status: str,
     code_id: Optional[str] = None,
     error: Optional[str] = None,
-    index_path: str = os.path.join("log", "sandbox", "index.jsonl"),
+    index_path: str = SANDBOX_INDEX,
     extra: Optional[dict[str, Any]] = None,
 ) -> None:
     """Append a compact record about a sandbox run to an index file.

@@ -9,6 +9,7 @@ runtime straightforward and deterministic.
 from __future__ import annotations
 
 from .state import shard_lock
+from jinx.log_paths import INK_SMEARED_DIARY, BLUE_WHISPERS
 from jinx.transcript import read_transcript, append_and_trim
 from jinx.logger import append_line
 
@@ -16,7 +17,7 @@ from jinx.logger import append_line
 async def glitch_pulse() -> str:
     """Return the current conversation transcript contents."""
     async with shard_lock:
-        return await read_transcript("log/soul_fragment.txt")
+        return await read_transcript(INK_SMEARED_DIARY)
 
 
 async def blast_mem(x: str, n: int = 500) -> None:
@@ -30,10 +31,10 @@ async def blast_mem(x: str, n: int = 500) -> None:
         Maximum number of lines to retain (default 500).
     """
     async with shard_lock:
-        await append_and_trim("log/soul_fragment.txt", x, keep_lines=n)
+        await append_and_trim(INK_SMEARED_DIARY, x, keep_lines=n)
 
 
-async def bomb_log(t: str, bin: str = "log/cortex_wail.txt") -> None:
+async def bomb_log(t: str, bin: str = BLUE_WHISPERS) -> None:
     """Append a line to a log file.
 
     Parameters

@@ -12,6 +12,7 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.key_binding import KeyBindings
 from .state import boom_limit
 from .logging_service import blast_mem, bomb_log
+from jinx.log_paths import TRIGGER_ECHOES, BLUE_WHISPERS
 from jinx.async_utils.queue import try_put_nowait, put_drop_oldest
 
 
@@ -38,10 +39,10 @@ async def neon_input(qe: asyncio.Queue[str]) -> None:
             tick_tock = asyncio.get_event_loop().time()
             if tick_tock - boom_clock["time"] > boom_limit:
                 await blast_mem("<no_response>")
-                await bomb_log("<no_response>", "log/detonator.txt")
+                await bomb_log("<no_response>", TRIGGER_ECHOES)
                 placed = try_put_nowait(qe, "<no_response>")
                 if not placed:
-                    await bomb_log("<no_response> dropped: input queue saturated", "log/cortex_wail.txt")
+                    await bomb_log("<no_response> dropped: input queue saturated", BLUE_WHISPERS)
                 boom_clock["time"] = tick_tock
 
     asyncio.create_task(kaboom_watch())
@@ -50,11 +51,11 @@ async def neon_input(qe: asyncio.Queue[str]) -> None:
             v: str = await sess.prompt_async("\n", key_bindings=finger_wire)
             if v.strip():
                 await blast_mem(v)
-                await bomb_log(v, "log/detonator.txt")
+                await bomb_log(v, TRIGGER_ECHOES)
                 put_drop_oldest(
                     qe,
                     v.strip(),
-                    on_drop=lambda: bomb_log("input dropped oldest: queue saturated", "log/cortex_wail.txt"),
+                    on_drop=lambda: bomb_log("input dropped oldest: queue saturated", BLUE_WHISPERS),
                 )
         except EOFError:
             break
