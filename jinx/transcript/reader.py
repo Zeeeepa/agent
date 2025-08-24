@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import aiofiles
+from jinx.async_utils.fs import read_text_raw
 
 
 async def read_transcript(path: str) -> str:
@@ -9,7 +9,6 @@ async def read_transcript(path: str) -> str:
     Pure function: no locking; caller is responsible for synchronization.
     """
     try:
-        async with aiofiles.open(path, "r", encoding="utf-8") as f:
-            return await f.read()
+        return await read_text_raw(path)
     except Exception:
         return ""

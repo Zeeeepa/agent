@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Iterable, List, Sequence
 
-from .data import chaos_taboo
+from .constants import chaos_taboo
 from .errors import UnsafeCodeError
 
 

@@ -11,13 +11,11 @@ isolation mechanism.
 
 from __future__ import annotations
 
-import traceback
 from typing import Awaitable, Callable, Iterable, List
 from .format_service import warp_blk
 from .logging_service import bomb_log
 from .sandbox_service import arcane_sandbox
 from jinx.codeexec import collect_violations
-from jinx.codeexec.runner.inline import run_inline
 
 
 async def spike_exec(
@@ -46,18 +44,6 @@ async def spike_exec(
         await on_error(msg)
         return
     await bomb_log(x, "log/detonator.txt")
-    if any((z in x for z in taboo)):
-        await arcane_sandbox(x, call=on_error)
-        return
-    try:
-        out = run_inline(x)
-        if out:
-            await bomb_log(out, "log/nano_doppelganger.txt")
-            # Echo to terminal as well
-            import sys as _sys
-            _sys.stdout.write(out)
-            _sys.stdout.flush()
-    except Exception:
-        err = traceback.format_exc()
-        await bomb_log(err)
-        await on_error(err)
+    # Always execute in sandbox to prevent UI lag from busy loops
+    await arcane_sandbox(x, call=on_error)
+    return
