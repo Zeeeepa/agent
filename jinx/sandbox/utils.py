@@ -22,3 +22,28 @@ async def async_rename_run_log(log_path: str, status: str) -> str:
         return new_path
     except Exception:
         return log_path
+
+
+def read_latest_sandbox_tail(max_lines: int = 80) -> tuple[str | None, bool]:
+    """Return the latest sandbox log content and whether it's a tail.
+
+    Returns (content, tailed). If no logs found or on error, returns (None, False).
+    """
+    try:
+        if not os.path.isdir(SANDBOX_DIR):
+            return None, False
+        logs = [
+            os.path.join(SANDBOX_DIR, f)
+            for f in os.listdir(SANDBOX_DIR)
+            if f.endswith(".log")
+        ]
+        if not logs:
+            return None, False
+        latest = max(logs, key=os.path.getmtime)
+        with open(latest, "r", encoding="utf-8", errors="replace") as fh:
+            lines = fh.read().splitlines()
+        if len(lines) <= max_lines:
+            return ("\n".join(lines), False)
+        return ("\n".join(lines[-max_lines:]), True)
+    except Exception:
+        return None, False
