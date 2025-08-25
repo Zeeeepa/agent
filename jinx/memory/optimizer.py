@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+"""Memory optimization pipeline.
+
+Collects recent transcript and evergreen memory, asks the LLM to compact
+and persist updated memory state, and serializes executions through a
+single worker to preserve ordering.
+"""
+
 import os
 import asyncio
 from typing import Optional, Tuple
@@ -7,6 +14,7 @@ from typing import Optional, Tuple
 from jinx.logging_service import bomb_log, glitch_pulse
 from jinx.prompts import get_prompt
 from jinx.openai_mod import call_openai
+from jinx.retry import detonate_payload
 from .parse import parse_output
 from .storage import read_evergreen, write_state
 
@@ -17,6 +25,13 @@ _worker_task: asyncio.Task[None] | None = None
 
 
 async def _optimize_memory_impl(snapshot: str | None) -> None:
+    """Run a single memory optimization round.
+
+    Parameters
+    ----------
+    snapshot : str | None
+        Optional explicit transcript; when None, pulls from `glitch_pulse()`.
+    """
     await bomb_log("MEMORY optimize: start")
     try:
         transcript = await glitch_pulse() if snapshot is None else snapshot
@@ -31,13 +46,13 @@ async def _optimize_memory_impl(snapshot: str | None) -> None:
         timeout_sec = float(os.getenv("MEMORY_TIMEOUT_SEC", "60"))
 
         input_text = (transcript or "") + ("\n\n" if transcript and evergreen else "") + (evergreen or "")
-        try:
-            # Apply a timeout to avoid stalling the whole pipeline
-            async with asyncio.timeout(timeout_sec):
-                out = await call_openai(instructions, model, input_text)
-        except TimeoutError:
-            await bomb_log(f"ERROR memory optimize timeout after {timeout_sec}s")
-            return
+
+        async def _invoke_llm() -> str:
+            return await call_openai(instructions, model, input_text)
+
+        # Reuse shared retry/timeout helper for consistency with openai_service
+        out = await detonate_payload(_invoke_llm, timeout=timeout_sec)
+
         compact, durable = parse_output(out)
         await write_state(compact, durable)
         await bomb_log("MEMORY optimize: done")
@@ -77,6 +92,6 @@ async def submit(snapshot: str | None = None) -> None:
     """
     _ensure_worker()
     assert _queue is not None
-    fut: asyncio.Future[None] = asyncio.get_event_loop().create_future()
+    fut: asyncio.Future[None] = asyncio.get_running_loop().create_future()
     await _queue.put((snapshot, fut))
     await fut
