@@ -28,11 +28,8 @@ async def run_sandbox(code: str, callback: Callable[[str | None], Awaitable[None
                     target=blast_zone, args=(code, {}, r, log_path)
                 )
                 proc.start()
-                # Strict real-time: yield to the loop without delaying
-                while proc.is_alive():
-                    await asyncio.sleep(0)
-                # Ensure exit code is collected
-                proc.join(timeout=0)
+                # Avoid busy-spin: wait for process termination in a thread
+                await asyncio.to_thread(proc.join)
             except Exception as e:
                 raise Exception(f"Payload mutation error: {e}")
 
