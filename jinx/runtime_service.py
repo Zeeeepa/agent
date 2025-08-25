@@ -11,6 +11,7 @@ import asyncio
 from jinx.banner_service import show_banner
 from jinx.utils import chaos_patch
 from jinx.runtime import start_input_task, frame_shift as _frame_shift
+from jinx.embeddings import start_embeddings_task
 
 
 async def pulse_core() -> None:
@@ -30,6 +31,7 @@ async def pulse_core() -> None:
         jobs: list[asyncio.Task[None]] = [
             start_input_task(q),
             asyncio.create_task(_frame_shift(q)),
+            start_embeddings_task(),
         ]
         try:
             await asyncio.gather(*jobs)

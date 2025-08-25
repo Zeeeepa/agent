@@ -10,6 +10,8 @@ from jinx.conversation import build_chains, run_blocks
 from jinx.sandbox.utils import read_latest_sandbox_tail
 from jinx.memory_service import optimize_memory
 from .ui import pretty_echo
+from jinx.embeddings.retrieval import build_context_for
+from jinx.embeddings.pipeline import embed_text
 
 
 async def corrupt_report(err: Optional[str]) -> None:
@@ -36,8 +38,22 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
         # Append the user input to the transcript first to ensure ordering
         if x and x.strip():
             await blast_mem(x.strip())
+            # Also embed the raw user input for retrieval (source: dialogue)
+            try:
+                await embed_text(x.strip(), source="dialogue", kind="user")
+            except Exception:
+                pass
         synth = await glitch_pulse()
         chains, decay = build_chains(synth, err)
+        # Prepend embeddings-based context using the current user input as the query
+        try:
+            ctx = await build_context_for(x or synth or "")
+            if ctx:
+                # ctx already formatted as <context_from_embeddings>...</context_from_embeddings>
+                chains = f"{ctx}\n\n{chains}"
+        except Exception:
+            # Fail open if retrieval has issues
+            pass
         if decay:
             await dec_pulse(decay)
         out, code_id = await spark_openai(chains)
@@ -62,6 +78,11 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
         # Append the model output to the transcript to keep turn-complete context
         if out and out.strip():
             await blast_mem(out.strip())
+            # Also embed the agent output for retrieval (source: dialogue)
+            try:
+                await embed_text(out.strip(), source="dialogue", kind="agent")
+            except Exception:
+                pass
     except Exception:
         await bomb_log(traceback.format_exc())
         await dec_pulse(50)
