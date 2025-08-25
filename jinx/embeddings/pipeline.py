@@ -161,11 +161,15 @@ async def embed_text(text: str, *, source: str, kind: str = "text") -> Dict[str,
 
 
 async def _append_index(source: str, row: Dict[str, Any]) -> None:
-    path = os.path.join(INDEX_DIR, f"{source}.jsonl")
+    # Some sources may include path separators (e.g., "sandbox/<file>").
+    # Sanitize to a flat filename for the index while keeping a readable hint.
+    safe_source = source.replace(os.sep, "__").replace("/", "__")
+    path = os.path.join(INDEX_DIR, f"{safe_source}.jsonl")
     # Append-only, tolerate concurrent writers via simple retry
     line = json.dumps(row, ensure_ascii=False)
     for _ in range(3):
         try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "a", encoding="utf-8") as f:
                 f.write(line + "\n")
             return

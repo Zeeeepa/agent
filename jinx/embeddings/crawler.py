@@ -5,6 +5,14 @@ import os
 from typing import Callable, Awaitable, Dict, Set
 
 from jinx.log_paths import SANDBOX_DIR
+import time
+import os
+
+# Max lines per second per sandbox file to process (others dropped). Tunable via env.
+_SANDBOX_MAX_LPS = int(os.getenv("EMBED_SANDBOX_MAX_LPS", "5"))
+# Preroll config: how many existing lines to ingest on startup per file, and max bytes read
+_PREROLL_LINES = int(os.getenv("EMBED_SANDBOX_PREROLL_LINES", "50"))
+_PREROLL_MAX_BYTES = int(os.getenv("EMBED_SANDBOX_PREROLL_MAX_BYTES", str(256 * 1024)))
 
 Callback = Callable[[str, str, str], Awaitable[None]]  # (text, source, kind)
 
@@ -34,6 +42,31 @@ async def _ensure_paths() -> None:
     # No trigger_echoes ingestion
 
 
+def _read_tail_lines(path: str, max_bytes: int, max_lines: int) -> list[str]:
+    """Read up to the last `max_lines` lines from the file, scanning at most `max_bytes`.
+
+    Best-effort: if file is smaller than `max_bytes`, reads once; otherwise reads the tail chunk.
+    """
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return []
+    start = max(0, size - max_bytes)
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            if start > 0:
+                f.seek(start)
+                # Skip partial line if we started mid-line
+                f.readline()
+            data = f.read()
+    except OSError:
+        return []
+    lines = [ln.strip() for ln in data.splitlines() if ln.strip()]
+    if max_lines > 0:
+        lines = lines[-max_lines:]
+    return lines
+
+
 async def _tail_file(path: str, *, source: str, cb: Callback) -> None:
     # Start from EOF; only new lines are processed
     try:
@@ -49,7 +82,15 @@ async def _tail_file(path: str, *, source: str, cb: Callback) -> None:
                 continue
 
     with f:
+        # Optional preroll: embed last N existing lines before switching to live tail
+        if _PREROLL_LINES > 0:
+            for ln in _read_tail_lines(path, _PREROLL_MAX_BYTES, _PREROLL_LINES):
+                # Reuse same callback and limiter semantics
+                await cb(ln, source, "line")
         f.seek(0, os.SEEK_END)
+        # Rate limiting state per file
+        win_start = time.time()
+        processed = 0
         while True:
             line = f.readline()
             if not line:
@@ -57,6 +98,16 @@ async def _tail_file(path: str, *, source: str, cb: Callback) -> None:
                 continue
             line = line.strip()
             if line:
+                # Apply simple token bucket for sandbox sources
+                if source.startswith("sandbox/") and _SANDBOX_MAX_LPS > 0:
+                    now = time.time()
+                    if now - win_start >= 1.0:
+                        win_start = now
+                        processed = 0
+                    if processed >= _SANDBOX_MAX_LPS:
+                        # Drop extra lines in the current 1s window
+                        continue
+                    processed += 1
                 await cb(line, source, "line")
 
 

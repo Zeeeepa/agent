@@ -116,7 +116,8 @@ async def retrieve_top_k(query: str, k: int | None = None, *, max_time_ms: int |
     for obj in iter_recent_items():
         vec = obj.get("embedding") or []
         meta = obj.get("meta", {})
-        if (meta.get("source") or "").strip().lower() != "dialogue":
+        src_l = (meta.get("source") or "").strip().lower()
+        if not (src_l == "dialogue" or src_l.startswith("sandbox/")):
             continue
         pv = (meta.get("text_preview") or "").strip()
         if len(pv) < MIN_PREVIEW_LEN or _is_noise(pv):
@@ -146,7 +147,11 @@ async def retrieve_top_k(query: str, k: int | None = None, *, max_time_ms: int |
         meta = obj.get("meta", {})
         src_l = (src or "").strip().lower()
         meta_src_l = (meta.get("source") or "").strip().lower()
-        if src_l != "dialogue" and meta_src_l != "dialogue":
+        allow_src = (
+            src_l == "dialogue" or src_l.startswith("sandbox/") or
+            meta_src_l == "dialogue" or meta_src_l.startswith("sandbox/")
+        )
+        if not allow_src:
             continue
         pv = (meta.get("text_preview") or "").strip()
         # Filter out very short previews to avoid trivial/noisy lines
@@ -182,7 +187,13 @@ async def build_context_for(query: str, *, k: int | None = None, max_chars: int 
     seen_hash: set[str] = set()
     q_hash = hashlib.sha256((query or "").strip().encode("utf-8", errors="ignore")).hexdigest() if query else ""
     body_parts: List[str] = []
-    for score, src, obj in hits:
+    # Preserve chronological order in the final context to avoid semantic chaos.
+    # We first select by similarity (retrieve_top_k), then sort chosen items by their timestamp.
+    hits_sorted = sorted(
+        hits,
+        key=lambda h: float((h[2].get("meta", {}).get("ts") or 0.0)),
+    )
+    for score, src, obj in hits_sorted:
         meta = obj.get("meta", {})
         pv = (meta.get("text_preview") or "").strip()
         csha = (meta.get("content_sha256") or "").strip()
@@ -196,7 +207,7 @@ async def build_context_for(query: str, *, k: int | None = None, max_chars: int 
             seen_hash.add(csha)
         role = (meta.get("kind") or "").strip().lower()
         if role not in ("user", "agent"):
-            role = "note"
+            role = "jinx"
         line = f"{role}: {pv}"
         body_parts.append(line)
         total = sum(len(p) for p in body_parts)
@@ -207,4 +218,4 @@ async def build_context_for(query: str, *, k: int | None = None, max_chars: int 
         return ""
 
     body = "\n".join(body_parts)
-    return f"<embeddings_context>\n{body}\n</embeddings_context>"
+    return f"<semantic_hints>\n{body}\n</semantic_hints>"
