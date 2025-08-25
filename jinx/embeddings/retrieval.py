@@ -205,11 +205,11 @@ async def build_context_for(query: str, *, k: int | None = None, max_chars: int 
             if csha in seen_hash:
                 continue
             seen_hash.add(csha)
-        role = (meta.get("kind") or "").strip().lower()
-        if role not in ("user", "agent"):
-            role = "jinx"
-        line = f"{role}: {pv}"
-        body_parts.append(line)
+        # Produce information-only hint: normalize whitespace and drop role labels
+        normalized = " ".join(pv.split())
+        if not normalized:
+            continue
+        body_parts.append(normalized)
         total = sum(len(p) for p in body_parts)
         if total > max_chars:
             break
@@ -217,5 +217,6 @@ async def build_context_for(query: str, *, k: int | None = None, max_chars: int 
     if not body_parts:
         return ""
 
-    body = "\n".join(body_parts)
-    return f"<semantic_hints>\n{body}\n</semantic_hints>"
+    # Join with a blank line between hints for readability
+    body = "\n\n".join(body_parts)
+    return f"<embeddings_context>\n{body}\n</embeddings_context>"
