@@ -13,6 +13,7 @@ from jinx.memory_service import optimize_memory
 from .ui import pretty_echo
 from jinx.embeddings.retrieval import build_context_for
 from jinx.embeddings.pipeline import embed_text
+from jinx.conversation.formatting import build_header, ensure_header_block_separation
 
 
 async def corrupt_report(err: Optional[str]) -> None:
@@ -68,30 +69,14 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
         # 3) <task> reflects the immediate objective: last user input or error to fix
         task_text = (err.strip() if err and err.strip() else (x.strip() if x and x.strip() else ""))
 
-        # Assemble header parts if present
-        header_parts = []
-        if ctx:
-            # ensure a trailing newline after the block
-            header_parts.append(ctx.rstrip() + "\n")  # already wrapped as <embeddings_context> ...
-        if mem_text and mem_text.strip():
-            header_parts.append(f"<memory>\n\n{mem_text.strip()}\n\n</memory>\n")
-        if task_text:
-            header_parts.append(f"<task>\n\n{task_text}\n\n</task>\n")
-
-        if header_parts:
-            header_text = "\n\n".join(header_parts)
-            # Normalize potential non-breaking spaces and enforce newlines between blocks
-            # Replace any stray unicode spaces or characters between tag boundaries
-            header_text = header_text.replace("\u00A0", " ")
-            header_text = re.sub(r"(</embeddings_context>)[^<]*(<memory>)", r"\1\n\n\2", header_text)
-            header_text = re.sub(r"(</memory>)[^<]*(<task>)", r"\1\n\n\2", header_text)
+        # Assemble header using shared formatting utilities
+        header_text = build_header(ctx, mem_text, task_text)
+        if header_text:
             chains = header_text + ("\n\n" + chains if chains else "")
         if decay:
             await dec_pulse(decay)
-        # Final normalization guard: ensure blocks don't touch even if prior steps introduced spaces
-        chains = chains.replace("\u00A0", " ")
-        chains = re.sub(r"(</embeddings_context>)[^<]*(<memory>)", r"\1\n\n\2", chains)
-        chains = re.sub(r"(</memory>)[^<]*(<task>)", r"\1\n\n\2", chains)
+        # Final normalization guard
+        chains = ensure_header_block_separation(chains)
         out, code_id = await spark_openai(chains)
 
         # Ensure that on any execution error we also show the raw model output

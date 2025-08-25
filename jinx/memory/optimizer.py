@@ -10,6 +10,7 @@ single worker to preserve ordering.
 import os
 import asyncio
 from typing import Optional, Tuple
+import re
 
 from jinx.logging_service import bomb_log, glitch_pulse
 from jinx.prompts import get_prompt
@@ -19,6 +20,7 @@ from .parse import parse_output
 from .storage import read_evergreen, write_state
 from jinx.log_paths import OPENAI_REQUESTS_DIR_MEMORY
 from jinx.logger.openai_requests import write_openai_request_dump
+from jinx.config import ALL_TAGS
 
 # Single worker ensures strict ordering; lock protects model call & writes
 _mem_lock: asyncio.Lock = asyncio.Lock()
@@ -50,11 +52,30 @@ async def _optimize_memory_impl(snapshot: str | None) -> None:
         # Compose a structured input for the optimizer with clear tags and spacing
         parts: list[str] = []
         t_body = (transcript or "").strip()
+
+        # Extract tool blocks (machine/python) out of transcript
+        tool_blocks: list[str] = []
         if t_body:
-            parts.append(f"<transcript>\n\n{t_body}\n\n</transcript>")
+            tag_alt = "|".join(sorted(ALL_TAGS))
+            pattern = re.compile(fr"<(?:{tag_alt})_[^>]+>.*?</(?:{tag_alt})_[^>]+>", re.DOTALL)
+            for m in pattern.finditer(t_body):
+                tool_blocks.append(m.group(0).strip())
+            # Remove tool blocks from transcript text
+            t_body = pattern.sub("", t_body)
+            # Normalize spacing inside transcript (collapse 3+ newlines to 2)
+            t_body = re.sub(r"\n{3,}", "\n\n", t_body).strip()
+            if t_body:
+                parts.append(f"<transcript>\n\n{t_body}\n\n</transcript>")
+        # Append evergreen immediately after transcript
         e_body = (evergreen or "").strip()
         if e_body:
             parts.append(f"<evergreen>\n\n{e_body}\n\n</evergreen>")
+
+        # Then append extracted tool blocks, each separated clearly
+        for blk in tool_blocks:
+            # Ensure nice spacing around tool blocks
+            cleaned = re.sub(r"\n{3,}", "\n\n", blk.strip())
+            parts.append(cleaned)
         input_text = ("\n\n".join(parts)).replace("\u00A0", " ")
 
         async def _invoke_llm() -> str:
