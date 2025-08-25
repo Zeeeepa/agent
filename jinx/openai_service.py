@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import os
 from jinx.openai_mod import build_header_and_tag, call_openai
+from jinx.log_paths import OPENAI_REQUESTS_DIR_GENERAL
+from jinx.logger.openai_requests import write_openai_request_dump
 
 
 async def code_primer() -> tuple[str, str]:
@@ -43,6 +45,17 @@ async def spark_openai(txt: str) -> tuple[str, str]:
     model = os.getenv("OPENAI_MODEL", "gpt-5")
 
     async def openai_task() -> tuple[str, str]:
+        # Log general request via micro-module
+        try:
+            await write_openai_request_dump(
+                target_dir=OPENAI_REQUESTS_DIR_GENERAL,
+                kind="GENERAL",
+                instructions=jx,
+                input_text=txt,
+                model=model,
+            )
+        except Exception:
+            pass
         out = await call_openai(jx, model, txt)
         return (out, tag)
 

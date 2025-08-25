@@ -17,6 +17,8 @@ from jinx.openai_mod import call_openai
 from jinx.retry import detonate_payload
 from .parse import parse_output
 from .storage import read_evergreen, write_state
+from jinx.log_paths import OPENAI_REQUESTS_DIR_MEMORY
+from jinx.logger.openai_requests import write_openai_request_dump
 
 # Single worker ensures strict ordering; lock protects model call & writes
 _mem_lock: asyncio.Lock = asyncio.Lock()
@@ -45,9 +47,28 @@ async def _optimize_memory_impl(snapshot: str | None) -> None:
         model = os.getenv("OPENAI_MODEL", "gpt-5")
         timeout_sec = float(os.getenv("MEMORY_TIMEOUT_SEC", "60"))
 
-        input_text = (transcript or "") + ("\n\n" if transcript and evergreen else "") + (evergreen or "")
+        # Compose a structured input for the optimizer with clear tags and spacing
+        parts: list[str] = []
+        t_body = (transcript or "").strip()
+        if t_body:
+            parts.append(f"<transcript>\n\n{t_body}\n\n</transcript>")
+        e_body = (evergreen or "").strip()
+        if e_body:
+            parts.append(f"<evergreen>\n\n{e_body}\n\n</evergreen>")
+        input_text = ("\n\n".join(parts)).replace("\u00A0", " ")
 
         async def _invoke_llm() -> str:
+            # Log memory-optimizer request via micro-module
+            try:
+                await write_openai_request_dump(
+                    target_dir=OPENAI_REQUESTS_DIR_MEMORY,
+                    kind="MEMORY",
+                    instructions=instructions,
+                    input_text=input_text,
+                    model=model,
+                )
+            except Exception:
+                pass
             return await call_openai(instructions, model, input_text)
 
         # Reuse shared retry/timeout helper for consistency with openai_service

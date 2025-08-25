@@ -205,11 +205,10 @@ async def build_context_for(query: str, *, k: int | None = None, max_chars: int 
             if csha in seen_hash:
                 continue
             seen_hash.add(csha)
-        # Produce information-only hint: normalize whitespace and drop role labels
-        normalized = " ".join(pv.split())
-        if not normalized:
+        # Keep original line breaks for readability; collapse only excessive trailing/leading space
+        if not pv:
             continue
-        body_parts.append(normalized)
+        body_parts.append(pv)
         total = sum(len(p) for p in body_parts)
         if total > max_chars:
             break
@@ -217,6 +216,6 @@ async def build_context_for(query: str, *, k: int | None = None, max_chars: int 
     if not body_parts:
         return ""
 
-    # Join with a blank line between hints for readability
+    # Join with a blank line between hints for readability and add padding inside the tag
     body = "\n\n".join(body_parts)
-    return f"<embeddings_context>\n{body}\n</embeddings_context>"
+    return f"<embeddings_context>\n\n{body}\n\n</embeddings_context>"

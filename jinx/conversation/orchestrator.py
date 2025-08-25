@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import traceback
+import re
 from typing import Optional
 
 from jinx.logging_service import glitch_pulse, bomb_log, blast_mem
@@ -44,18 +45,53 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
             except Exception:
                 pass
         synth = await glitch_pulse()
-        chains, decay = build_chains(synth, err)
-        # Prepend embeddings-based context using the current user input as the query
+        # Do not include the transcript in 'chains' since it is placed into <memory>
+        chains, decay = build_chains("", err)
+        # Build standardized header blocks in a stable order before the main chains
+        # 1) <embeddings_context> from recent dialogue/sandbox using current input as query
         try:
             ctx = await build_context_for(x or synth or "")
-            if ctx:
-                # ctx already formatted as <context_from_embeddings>...</context_from_embeddings>
-                chains = f"{ctx}\n\n{chains}"
         except Exception:
-            # Fail open if retrieval has issues
+            ctx = ""
+        # 2) <memory> from transcript (exclude the latest user input line if present)
+        mem_text = synth or ""
+        try:
+            last_line = (x or "").strip()
+            if last_line and mem_text.strip().endswith(last_line):
+                lines = [ln for ln in mem_text.splitlines()]
+                # remove only the final occurrence if it matches exactly
+                if lines and lines[-1].strip() == last_line:
+                    lines = lines[:-1]
+                mem_text = "\n".join(lines).strip()
+        except Exception:
             pass
+        # 3) <task> reflects the immediate objective: last user input or error to fix
+        task_text = (err.strip() if err and err.strip() else (x.strip() if x and x.strip() else ""))
+
+        # Assemble header parts if present
+        header_parts = []
+        if ctx:
+            # ensure a trailing newline after the block
+            header_parts.append(ctx.rstrip() + "\n")  # already wrapped as <embeddings_context> ...
+        if mem_text and mem_text.strip():
+            header_parts.append(f"<memory>\n\n{mem_text.strip()}\n\n</memory>\n")
+        if task_text:
+            header_parts.append(f"<task>\n\n{task_text}\n\n</task>\n")
+
+        if header_parts:
+            header_text = "\n\n".join(header_parts)
+            # Normalize potential non-breaking spaces and enforce newlines between blocks
+            # Replace any stray unicode spaces or characters between tag boundaries
+            header_text = header_text.replace("\u00A0", " ")
+            header_text = re.sub(r"(</embeddings_context>)[^<]*(<memory>)", r"\1\n\n\2", header_text)
+            header_text = re.sub(r"(</memory>)[^<]*(<task>)", r"\1\n\n\2", header_text)
+            chains = header_text + ("\n\n" + chains if chains else "")
         if decay:
             await dec_pulse(decay)
+        # Final normalization guard: ensure blocks don't touch even if prior steps introduced spaces
+        chains = chains.replace("\u00A0", " ")
+        chains = re.sub(r"(</embeddings_context>)[^<]*(<memory>)", r"\1\n\n\2", chains)
+        chains = re.sub(r"(</memory>)[^<]*(<task>)", r"\1\n\n\2", chains)
         out, code_id = await spark_openai(chains)
 
         # Ensure that on any execution error we also show the raw model output

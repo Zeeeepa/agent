@@ -19,3 +19,9 @@ SANDBOX_DIR: str = os.path.join("log", "sandbox")
 
 # Evergreen durable memory store
 EVERGREEN_MEMORY: str = os.path.join("log", "evergreen_memory.txt")
+
+# Directory for general OpenAI request dumps (one file per request)
+OPENAI_REQUESTS_DIR_GENERAL: str = os.path.join("log", "openai", "general")
+
+# Directory for memory optimizer OpenAI request dumps (one file per request)
+OPENAI_REQUESTS_DIR_MEMORY: str = os.path.join("log", "openai", "memory")
