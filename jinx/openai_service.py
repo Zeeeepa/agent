@@ -60,5 +60,4 @@ async def spark_openai(txt: str) -> tuple[str, str]:
         return (out, tag)
 
     from .retry import detonate_payload
-
     return await detonate_payload(openai_task)

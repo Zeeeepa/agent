@@ -63,19 +63,20 @@ async def _optimize_memory_impl(snapshot: str | None) -> None:
             # Remove tool blocks from transcript text
             t_body = pattern.sub("", t_body)
             # Normalize spacing inside transcript (collapse 3+ newlines to 2)
-            t_body = re.sub(r"\n{3,}", "\n\n", t_body).strip()
+            t_body = re.sub(r"\n{3,}", "\n", t_body).strip()
             if t_body:
-                parts.append(f"<transcript>\n\n{t_body}\n\n</transcript>")
+                parts.append(f"<transcript>\n{t_body}\n</transcript>")
         # Append evergreen immediately after transcript
         e_body = (evergreen or "").strip()
         if e_body:
-            parts.append(f"<evergreen>\n\n{e_body}\n\n</evergreen>")
+            parts.append(f"<evergreen>\n{e_body}\n</evergreen>")
 
         # Then append extracted tool blocks, each separated clearly
         for blk in tool_blocks:
             # Ensure nice spacing around tool blocks
-            cleaned = re.sub(r"\n{3,}", "\n\n", blk.strip())
+            cleaned = re.sub(r"\n{3,}", "\n", blk.strip())
             parts.append(cleaned)
+        # Join with a full blank line between logical sections (<transcript>, <evergreen>, tool blocks)
         input_text = ("\n\n".join(parts)).replace("\u00A0", " ")
 
         async def _invoke_llm() -> str:

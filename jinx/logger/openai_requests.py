@@ -53,7 +53,7 @@ async def write_openai_request_dump(
             + [
                 "[instructions]\n",
                 instructions,
-                "\n\n[input]\n",
+                "\n[input]\n",
                 input_text,
                 f"\n===== {kind} REQUEST END =====\n",
             ]

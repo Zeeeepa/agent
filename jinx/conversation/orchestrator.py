@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import traceback
 import re
+import asyncio
 from typing import Optional
 
 from jinx.logging_service import glitch_pulse, bomb_log, blast_mem
@@ -14,16 +15,49 @@ from .ui import pretty_echo
 from jinx.embeddings.retrieval import build_context_for
 from jinx.embeddings.pipeline import embed_text
 from jinx.conversation.formatting import build_header, ensure_header_block_separation
+from jinx.memory import read_evergreen
+from jinx.config import ALL_TAGS
+
+
+_err_queue: asyncio.Queue[str] | None = None
+_err_worker_task: asyncio.Task[None] | None = None
+
+
+def _ensure_error_worker() -> None:
+    global _err_queue, _err_worker_task
+    if _err_queue is None:
+        _err_queue = asyncio.Queue(maxsize=256)
+    if _err_worker_task is None or _err_worker_task.done():
+        _err_worker_task = asyncio.create_task(_error_retry_worker())
+
+
+async def _error_retry_worker() -> None:
+    assert _err_queue is not None
+    while True:
+        err = await _err_queue.get()
+        try:
+            # Process error-driven retry as a serialized follow-up step
+            await shatter("", err=err)
+        except Exception:
+            # Swallow to keep worker alive; actual error path logs separately
+            pass
+        finally:
+            _err_queue.task_done()
+
+
+async def enqueue_error_retry(err: str) -> None:
+    _ensure_error_worker()
+    assert _err_queue is not None
+    await _err_queue.put(err)
 
 
 async def corrupt_report(err: Optional[str]) -> None:
-    """Log an error, echo it into the conversation, and decay pulse."""
+    """Log an error, enqueue a serialized retry, and decay pulse."""
     if err is None:
         return
     await bomb_log(err)
-    trail = await glitch_pulse()
-    if trail:
-        await shatter(trail + f"\n{err}", err=err)
+    # Enqueue follow-up step to be processed by a single worker
+    await enqueue_error_retry(err)
     await dec_pulse(30)
 
 
@@ -47,7 +81,8 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
                 pass
         synth = await glitch_pulse()
         # Do not include the transcript in 'chains' since it is placed into <memory>
-        chains, decay = build_chains("", err)
+        # Do not inject error text into the body chains; it will live in <error>
+        chains, decay = build_chains("", None)
         # Build standardized header blocks in a stable order before the main chains
         # 1) <embeddings_context> from recent dialogue/sandbox using current input as query
         try:
@@ -66,13 +101,37 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
                 mem_text = "\n".join(lines).strip()
         except Exception:
             pass
-        # 3) <task> reflects the immediate objective: last user input or error to fix
-        task_text = (err.strip() if err and err.strip() else (x.strip() if x and x.strip() else ""))
+        # Sanitize transcript for <memory>: remove tool blocks and prior header blocks
+        try:
+            tag_alt = "|".join(sorted(ALL_TAGS))
+            # Remove tool blocks like <machine_...>...</machine_...>, <python_...>...</python_...>
+            tool_pat = re.compile(fr"<(?:{tag_alt})_[^>]+>.*?</(?:{tag_alt})_[^>]+>", re.DOTALL)
+            mem_text = tool_pat.sub("", mem_text)
+            # Remove any prior header blocks to avoid nesting/duplication
+            header_pat = re.compile(r"<(?:embeddings_context|memory|evergreen|task|error)>.*?</(?:embeddings_context|memory|evergreen|task|error)>", re.DOTALL)
+            mem_text = header_pat.sub("", mem_text)
+            # Collapse excessive whitespace/newlines
+            mem_text = re.sub(r"\n{3,}", "\n\n", mem_text).strip()
+        except Exception:
+            pass
+        # 2.5) <evergreen> persistent durable facts
+        try:
+            evergreen_text = (await read_evergreen()) or ""
+        except Exception:
+            evergreen_text = ""
+        # 3) <task> reflects the immediate objective: when handling an error,
+        #    avoid copying traceback or transcript into <task>
+        task_text = ("" if (err and err.strip()) else ((x.strip() if x and x.strip() else "")))
+        # Optional <error> block carries execution or prior error details
+        error_text = (err.strip() if err and err.strip() else None)
 
         # Assemble header using shared formatting utilities
-        header_text = build_header(ctx, mem_text, task_text)
+        header_text = build_header(ctx, mem_text, task_text, error_text, evergreen_text)
         if header_text:
             chains = header_text + ("\n\n" + chains if chains else "")
+        # If an error is present, enforce a decay hit to drive auto-fix loop
+        if err and err.strip():
+            decay = max(decay, 50)
         if decay:
             await dec_pulse(decay)
         # Final normalization guard

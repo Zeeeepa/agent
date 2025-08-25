@@ -217,5 +217,5 @@ async def build_context_for(query: str, *, k: int | None = None, max_chars: int 
         return ""
 
     # Join with a blank line between hints for readability and add padding inside the tag
-    body = "\n\n".join(body_parts)
-    return f"<embeddings_context>\n\n{body}\n\n</embeddings_context>"
+    body = "\n".join(body_parts)
+    return f"<embeddings_context>\n{body}\n</embeddings_context>"
