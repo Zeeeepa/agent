@@ -142,8 +142,6 @@ def _load() -> str:
         "Only one of these two blocks can be present per response: either <python_question_{key}>...</python_question_{key}> OR <python_{key}>...</python_{key}>.\n"
         "Never use both in the same response.\n\n"
         "Important:\n"
-        "Always use the key provided: {key}.\n"
-        "Do NOT generate or invent your own key.\n"
         "Use only the following block tags: <machine_{key}>, <python_question_{key}>, <python_{key}>.\n\n"
         "Only the <python_{key}>...</python_{key}> blocks are later executed, in order, using `exec(code, globals())`, so they can share variables and functions across steps.\n\n"
         "Cognitive Directive [Dialogue Parsing Subroutine]:\n"
