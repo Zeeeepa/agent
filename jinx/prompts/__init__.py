@@ -32,3 +32,4 @@ from . import burning_logic  # noqa: F401
 from . import chaos_bloom  # noqa: F401
 from . import jinxed_blueprint  # noqa: F401
 from . import memory_optimizer  # noqa: F401
+from . import burning_logic_recovery  # noqa: F401

@@ -106,7 +106,9 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
             await dec_pulse(decay)
         # Final normalization guard
         chains = ensure_header_block_separation(chains)
-        out, code_id = await spark_openai(chains)
+        # Use a dedicated recovery prompt only when fixing an error; otherwise default prompt
+        prompt_override = "burning_logic_recovery" if (err and err.strip()) else None
+        out, code_id = await spark_openai(chains, prompt_override=prompt_override)
 
         # Ensure that on any execution error we also show the raw model output
         async def on_exec_error(err_msg: Optional[str]) -> None:

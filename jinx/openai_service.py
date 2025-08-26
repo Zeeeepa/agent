@@ -15,7 +15,7 @@ from jinx.log_paths import OPENAI_REQUESTS_DIR_GENERAL
 from jinx.logger.openai_requests import write_openai_request_dump
 
 
-async def code_primer() -> tuple[str, str]:
+async def code_primer(prompt_override: str | None = None) -> tuple[str, str]:
     """Build instruction header and return it with a code tag identifier.
 
     Returns
@@ -24,10 +24,10 @@ async def code_primer() -> tuple[str, str]:
         ``(header_plus_prompt, code_tag_id)`` where ``code_tag_id`` is used to
         identify code blocks in downstream parsing.
     """
-    return await build_header_and_tag()
+    return await build_header_and_tag(prompt_override)
 
 
-async def spark_openai(txt: str) -> tuple[str, str]:
+async def spark_openai(txt: str, *, prompt_override: str | None = None) -> tuple[str, str]:
     """Call OpenAI Responses API and return output text with the code tag.
 
     Parameters
@@ -40,7 +40,7 @@ async def spark_openai(txt: str) -> tuple[str, str]:
     tuple[str, str]
         ``(output_text, code_tag_id)``
     """
-    jx, tag = await code_primer()
+    jx, tag = await code_primer(prompt_override)
     # Model override via env; otherwise rely on SDK defaults
     model = os.getenv("OPENAI_MODEL", "gpt-5")
 
