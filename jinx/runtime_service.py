@@ -14,8 +14,8 @@ from jinx.runtime import start_input_task, frame_shift as _frame_shift
 from jinx.embeddings import start_embeddings_task
 import jinx.state as jx_state
 import contextlib
-from jinx.memory.optimizer import stop as stop_memory_optimizer
-from jinx.conversation.orchestrator import stop_error_worker
+from jinx.memory.optimizer import stop as stop_memory_optimizer, start_memory_optimizer_task
+from jinx.conversation.error_worker import stop_error_worker
 
 async def pulse_core() -> None:
     """Run the main asynchronous processing loop.
@@ -35,6 +35,7 @@ async def pulse_core() -> None:
             start_input_task(q),
             asyncio.create_task(_frame_shift(q)),
             start_embeddings_task(),
+            start_memory_optimizer_task(),
         ]
         try:
             # Race the running jobs against a shutdown signal
@@ -55,8 +56,18 @@ async def pulse_core() -> None:
                 with contextlib.suppress(asyncio.CancelledError):
                     await shutdown_task
         except (asyncio.CancelledError, KeyboardInterrupt):
+            # Signal global shutdown to all components
+            jx_state.shutdown_event.set()
             with contextlib.suppress(Exception):
+                await stop_error_worker()
                 await stop_memory_optimizer()
             for x in jobs:
                 x.cancel()
             await asyncio.gather(*jobs, return_exceptions=True)
+        finally:
+            # Ensure the shutdown waiter is not leaked
+            with contextlib.suppress(UnboundLocalError):
+                if 'shutdown_task' in locals() and not shutdown_task.done():
+                    shutdown_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await shutdown_task

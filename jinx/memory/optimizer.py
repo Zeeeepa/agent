@@ -28,6 +28,7 @@ import contextlib
 _mem_lock: asyncio.Lock = asyncio.Lock()
 _queue: asyncio.Queue[Tuple[Optional[str], asyncio.Future[None]]] | None = None
 _worker_task: asyncio.Task[None] | None = None
+_stopping: bool = False
 
 
 async def _optimize_memory_impl(snapshot: str | None) -> None:
@@ -107,45 +108,69 @@ async def _optimize_memory_impl(snapshot: str | None) -> None:
 
 async def _worker_loop() -> None:
     assert _queue is not None
+    get_task: asyncio.Task | None = None
+    shutdown_task: asyncio.Task | None = None
     try:
         while True:
+            # Fast-exit if shutdown already requested
+            if jx_state.shutdown_event.is_set():
+                break
             # Wait for either a queue item or a shutdown signal
             get_task = asyncio.create_task(_queue.get())
             shutdown_task = asyncio.create_task(jx_state.shutdown_event.wait())
             done, pending = await asyncio.wait({get_task, shutdown_task}, return_when=asyncio.FIRST_COMPLETED)
             # If shutdown requested, exit loop gracefully
             if shutdown_task in done:
-                get_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await get_task
+                if get_task is not None:
+                    get_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await get_task
                 break
             # Otherwise process the queued job
-            shutdown_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await shutdown_task
+            if shutdown_task is not None:
+                shutdown_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await shutdown_task
             snapshot, fut = get_task.result()
             try:
                 # Serialize through the memory lock
                 async with _mem_lock:
                     await _optimize_memory_impl(snapshot)
-                if not fut.done():
-                    fut.set_result(None)
+                with contextlib.suppress(BaseException):
+                    if not fut.done():
+                        fut.set_result(None)
             except Exception as e:  # propagate to caller
-                if not fut.done():
-                    fut.set_exception(e)
+                with contextlib.suppress(BaseException):
+                    if not fut.done():
+                        fut.set_exception(e)
             finally:
-                _queue.task_done()
+                with contextlib.suppress(Exception):
+                    _queue.task_done()
     except asyncio.CancelledError:
         # Exit quietly on cancellation
         pass
+    finally:
+        # Ensure any locally created tasks are cancelled/awaited to avoid leaks
+        if get_task is not None and not get_task.done():
+            get_task.cancel()
+            # During interpreter teardown, awaiting may raise RuntimeError: loop closed / no running loop
+            with contextlib.suppress(asyncio.CancelledError, RuntimeError, BaseException):
+                await get_task
+        if shutdown_task is not None and not shutdown_task.done():
+            shutdown_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, RuntimeError, BaseException):
+                await shutdown_task
 
 
 def _ensure_worker() -> None:
     global _queue, _worker_task
     if _queue is None:
         _queue = asyncio.Queue(maxsize=32)
+    # Do not start during shutdown or when stopping
+    if jx_state.shutdown_event.is_set() or _stopping:
+        return
     if _worker_task is None or _worker_task.done():
-        _worker_task = asyncio.create_task(_worker_loop())
+        _worker_task = asyncio.create_task(_worker_loop(), name="memory-optimizer")
 
 
 async def submit(snapshot: str | None = None) -> None:
@@ -165,7 +190,8 @@ async def submit(snapshot: str | None = None) -> None:
 
 async def stop() -> None:
     """Stop the optimizer worker and cancel pending jobs gracefully."""
-    global _worker_task
+    global _worker_task, _stopping
+    _stopping = True
     # Signal is already set by shutdown path; ensure worker exits and drain queue
     if _queue is not None:
         # Drain any queued items and cancel their futures so callers don't hang
@@ -179,6 +205,20 @@ async def stop() -> None:
             pass
     if _worker_task is not None and not _worker_task.done():
         _worker_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
+        with contextlib.suppress(asyncio.CancelledError, RuntimeError, BaseException):
             await _worker_task
     _worker_task = None
+    _stopping = False
+
+
+def start_memory_optimizer_task() -> asyncio.Task[None]:
+    """Start the memory optimizer background worker and return its task.
+
+    This mirrors the micro-module pattern used by embeddings service.
+    Safe to call multiple times; will return the existing task if already running.
+    """
+    _ensure_worker()
+    if _worker_task is None:
+        # During shutdown, return a completed noop task to satisfy the contract
+        return asyncio.create_task(asyncio.sleep(0), name="memory-optimizer-noop")
+    return _worker_task

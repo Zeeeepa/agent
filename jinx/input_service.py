@@ -14,6 +14,8 @@ from .state import boom_limit
 from .logging_service import blast_mem, bomb_log
 from jinx.log_paths import TRIGGER_ECHOES, BLUE_WHISPERS
 from jinx.async_utils.queue import try_put_nowait, put_drop_oldest
+import jinx.state as jx_state
+import contextlib
 
 
 async def neon_input(qe: asyncio.Queue[str]) -> None:
@@ -63,16 +65,46 @@ async def neon_input(qe: asyncio.Queue[str]) -> None:
 
     watch_task = asyncio.create_task(kaboom_watch())
     try:
+        prompt_task: asyncio.Task[str] | None = None
+        shutdown_task: asyncio.Task[None] | None = None
         while True:
             try:
-                # key_bindings already provided to PromptSession
-                v: str = await sess.prompt_async("\n")
+                # Race the prompt against a shutdown signal to exit promptly
+                prompt_task = asyncio.create_task(sess.prompt_async("\n"))
+                # Ensure any exception (including BaseException like KeyboardInterrupt) is retrieved
+                def _swallow_task_exc(t: asyncio.Task) -> None:
+                    try:
+                        # Using result() to also re-raise BaseException subclasses
+                        _ = t.result()
+                    except BaseException:
+                        pass
+                prompt_task.add_done_callback(_swallow_task_exc)
+                shutdown_task = asyncio.create_task(jx_state.shutdown_event.wait())
+                done, _ = await asyncio.wait({prompt_task, shutdown_task}, return_when=asyncio.FIRST_COMPLETED)
+                if shutdown_task in done:
+                    # Politely ask prompt_toolkit to exit instead of cancelling the task
+                    try:
+                        sess.app.exit(exception=EOFError())
+                    except Exception:
+                        pass
+                    # Ensure prompt_task finishes and swallow any BaseException (e.g., KeyboardInterrupt)
+                    with contextlib.suppress(BaseException):
+                        await prompt_task
+                    break
+                # Got user input
+                if shutdown_task is not None:
+                    shutdown_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await shutdown_task
+                v: str = prompt_task.result()
                 if v.strip():
-                    # Do not write to transcript here; conversation_service will append
                     await bomb_log(v, TRIGGER_ECHOES)
-                    # Preserve strict FIFO ordering for user inputs via backpressure
                     await qe.put(v.strip())
-            except EOFError:
+            except (EOFError, KeyboardInterrupt):
+                # Treat both as a clean exit of input loop
+                if prompt_task is not None:
+                    with contextlib.suppress(BaseException):
+                        await prompt_task
                 break
             except Exception as e:  # pragma: no cover - guard rail for TTY issues
                 await bomb_log(f"ERROR INPUT chaos keys went rogue: {e}")
@@ -83,3 +115,13 @@ async def neon_input(qe: asyncio.Queue[str]) -> None:
             await watch_task
         except asyncio.CancelledError:
             pass
+        # Force-close prompt_toolkit app and consume any leftover tasks
+        with contextlib.suppress(Exception):
+            sess.app.exit(exception=EOFError())
+        if prompt_task is not None and not prompt_task.done():
+            with contextlib.suppress(BaseException):
+                await prompt_task
+        if shutdown_task is not None and not shutdown_task.done():
+            shutdown_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await shutdown_task
