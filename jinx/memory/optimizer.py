@@ -19,7 +19,7 @@ from jinx.retry import detonate_payload
 from .parse import parse_output
 from .storage import read_evergreen, write_state
 from jinx.log_paths import OPENAI_REQUESTS_DIR_MEMORY
-from jinx.logger.openai_requests import write_openai_request_dump
+from jinx.logger.openai_requests import write_openai_request_dump, write_openai_response_append
 from jinx.config import ALL_TAGS
 import jinx.state as jx_state
 import contextlib
@@ -84,8 +84,9 @@ async def _optimize_memory_impl(snapshot: str | None) -> None:
 
         async def _invoke_llm() -> str:
             # Log memory-optimizer request via micro-module
+            req_path: str = ""
             try:
-                await write_openai_request_dump(
+                req_path = await write_openai_request_dump(
                     target_dir=OPENAI_REQUESTS_DIR_MEMORY,
                     kind="MEMORY",
                     instructions=instructions,
@@ -94,7 +95,13 @@ async def _optimize_memory_impl(snapshot: str | None) -> None:
                 )
             except Exception:
                 pass
-            return await call_openai(instructions, model, input_text)
+            out_text = await call_openai(instructions, model, input_text)
+            # Append response to same file (best-effort)
+            try:
+                await write_openai_response_append(req_path, "MEMORY", out_text)
+            except Exception:
+                pass
+            return out_text
 
         # Reuse shared retry/timeout helper for consistency with openai_service
         out = await detonate_payload(_invoke_llm, timeout=timeout_sec)
