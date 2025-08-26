@@ -21,6 +21,8 @@ from .storage import read_evergreen, write_state
 from jinx.log_paths import OPENAI_REQUESTS_DIR_MEMORY
 from jinx.logger.openai_requests import write_openai_request_dump
 from jinx.config import ALL_TAGS
+import jinx.state as jx_state
+import contextlib
 
 # Single worker ensures strict ordering; lock protects model call & writes
 _mem_lock: asyncio.Lock = asyncio.Lock()
@@ -105,19 +107,37 @@ async def _optimize_memory_impl(snapshot: str | None) -> None:
 
 async def _worker_loop() -> None:
     assert _queue is not None
-    while True:
-        snapshot, fut = await _queue.get()
-        try:
-            # Serialize through the memory lock
-            async with _mem_lock:
-                await _optimize_memory_impl(snapshot)
-            if not fut.done():
-                fut.set_result(None)
-        except Exception as e:  # propagate to caller
-            if not fut.done():
-                fut.set_exception(e)
-        finally:
-            _queue.task_done()
+    try:
+        while True:
+            # Wait for either a queue item or a shutdown signal
+            get_task = asyncio.create_task(_queue.get())
+            shutdown_task = asyncio.create_task(jx_state.shutdown_event.wait())
+            done, pending = await asyncio.wait({get_task, shutdown_task}, return_when=asyncio.FIRST_COMPLETED)
+            # If shutdown requested, exit loop gracefully
+            if shutdown_task in done:
+                get_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await get_task
+                break
+            # Otherwise process the queued job
+            shutdown_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await shutdown_task
+            snapshot, fut = get_task.result()
+            try:
+                # Serialize through the memory lock
+                async with _mem_lock:
+                    await _optimize_memory_impl(snapshot)
+                if not fut.done():
+                    fut.set_result(None)
+            except Exception as e:  # propagate to caller
+                if not fut.done():
+                    fut.set_exception(e)
+            finally:
+                _queue.task_done()
+    except asyncio.CancelledError:
+        # Exit quietly on cancellation
+        pass
 
 
 def _ensure_worker() -> None:
@@ -133,8 +153,32 @@ async def submit(snapshot: str | None = None) -> None:
 
     Maintains strict FIFO ordering while running in a dedicated worker task.
     """
+    # Do not enqueue new work if shutdown has been requested
+    if jx_state.shutdown_event.is_set():
+        return
     _ensure_worker()
     assert _queue is not None
     fut: asyncio.Future[None] = asyncio.get_running_loop().create_future()
     await _queue.put((snapshot, fut))
     await fut
+
+
+async def stop() -> None:
+    """Stop the optimizer worker and cancel pending jobs gracefully."""
+    global _worker_task
+    # Signal is already set by shutdown path; ensure worker exits and drain queue
+    if _queue is not None:
+        # Drain any queued items and cancel their futures so callers don't hang
+        try:
+            while True:
+                snapshot, fut = _queue.get_nowait()
+                if not fut.done():
+                    fut.set_exception(asyncio.CancelledError())
+                _queue.task_done()
+        except asyncio.QueueEmpty:
+            pass
+    if _worker_task is not None and not _worker_task.done():
+        _worker_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await _worker_task
+    _worker_task = None

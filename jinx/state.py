@@ -16,3 +16,6 @@ shard_lock: asyncio.Lock = asyncio.Lock()
 # Global mutable state with safe defaults
 pulse: int = int(os.getenv("PULSE", "100"))
 boom_limit: int = int(os.getenv("TIMEOUT", "30"))
+
+# Global shutdown event set when pulse depletes or an emergency stop is requested
+shutdown_event: asyncio.Event = asyncio.Event()
