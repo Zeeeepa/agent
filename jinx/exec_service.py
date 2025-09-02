@@ -12,7 +12,7 @@ isolation mechanism.
 from __future__ import annotations
 
 from typing import Awaitable, Callable, Iterable, List
-from .format_service import warp_blk
+from jinx.formatters import chain_format
 from .logging_service import bomb_log
 from jinx.log_paths import TRIGGER_ECHOES
 from .sandbox_service import arcane_sandbox
@@ -36,7 +36,7 @@ async def spike_exec(
         Async callback invoked with error text when execution fails or
         constraints are violated.
     """
-    x = warp_blk(code)
+    x = chain_format(code)
     # Enforce prompt constraints before execution (via validators)
     violations: List[str] = collect_violations(x)
     if violations:

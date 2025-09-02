@@ -10,7 +10,7 @@ from jinx.openai_service import spark_openai
 from jinx.error_service import dec_pulse
 from jinx.conversation import build_chains, run_blocks
 from jinx.sandbox.utils import read_latest_sandbox_tail
-from jinx.memory_service import optimize_memory
+from jinx.memory.optimizer import submit as optimize_memory
 from .ui import pretty_echo
 from jinx.embeddings.retrieval import build_context_for
 from jinx.embeddings.pipeline import embed_text

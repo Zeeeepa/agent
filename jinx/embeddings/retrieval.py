@@ -9,7 +9,7 @@ from typing import List, Tuple, Dict, Any
 import hashlib
 import re
 
-from jinx.network_service import get_cortex
+from jinx.net import get_openai_client
 from jinx.embeddings.pipeline import iter_recent_items
 
 EMBED_ROOT = os.path.join("log", "embeddings")
@@ -59,7 +59,7 @@ def _is_noise(pv: str) -> bool:
 async def _embed_query(text: str) -> List[float]:
     async def _call():
         return await asyncio.to_thread(
-            get_cortex().embeddings.create,
+            get_openai_client().embeddings.create,
             model=QUERY_MODEL,
             input=text,
         )

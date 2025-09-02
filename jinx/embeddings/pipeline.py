@@ -9,7 +9,7 @@ from collections import deque
 from typing import Optional, Dict, Any, Deque, Iterable
 import re
 
-from jinx.network_service import get_cortex
+from jinx.net import get_openai_client
 from jinx.config import ALL_TAGS
 
 EMBED_ROOT = os.path.join("log", "embeddings")
@@ -118,7 +118,7 @@ async def embed_text(text: str, *, source: str, kind: str = "text") -> Dict[str,
 
     async def _call() -> Any:
         return await asyncio.to_thread(
-            get_cortex().embeddings.create,
+            get_openai_client().embeddings.create,
             model=model,
             input=text,
         )

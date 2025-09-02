@@ -174,7 +174,7 @@ The runtime is layered, async-first, and auditable:
   - `.env` keys (see `.env.example`): `OPENAI_API_KEY`, `PULSE`, `TIMEOUT`, `OPENAI_MODEL`, optional `PROXY`.
   - `OPENAI_MODEL` env var overrides the default; if unset, service falls back to `gpt-5`.
   - Optional deps are auto-ensured at runtime (e.g., `aiofiles`, `prompt_toolkit`).
-- **Code Style**: Best-effort normalization via `black`, `autopep8`, `libcst` in `jinx/format_service.py`.
+ - **Code Style**: Best-effort normalization via `black`, `autopep8`, `libcst` chained in `jinx/formatters/chain.py`.
 - **Extensibility**:
   - Add new services under `jinx/` and keep them dependency-light.
   - Prefer pure functions with explicit inputs/outputs.

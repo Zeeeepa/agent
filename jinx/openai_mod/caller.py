@@ -3,8 +3,8 @@ from __future__ import annotations
 import os
 
 from jinx.logging_service import bomb_log
-from jinx.network_service import get_cortex
 from jinx.rag_service import build_file_search_tools
+from jinx.net import get_openai_client
 
 
 async def call_openai(instructions: str, model: str, input_text: str) -> str:
@@ -21,7 +21,7 @@ async def call_openai(instructions: str, model: str, input_text: str) -> str:
         extra_kwargs: dict = build_file_search_tools()
 
         r = await asyncio.to_thread(
-            get_cortex().responses.create,
+            get_openai_client().responses.create,
             instructions=instructions,
             model=model,
             input=input_text,
