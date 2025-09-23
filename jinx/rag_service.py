@@ -5,6 +5,7 @@ from typing import Dict, Any, List
 
 
 ENV_OPENAI_VECTOR_STORE_ID: str = "OPENAI_VECTOR_STORE_ID"
+ENV_OPENAI_FORCE_FILE_SEARCH: str = "OPENAI_FORCE_FILE_SEARCH"
 
 
 def _parse_vector_store_ids(raw: str) -> List[str]:
@@ -32,17 +33,22 @@ def build_file_search_tools() -> Dict[str, Any]:
     # Read single env var that may contain one or multiple comma-separated IDs.
     raw_ids = os.getenv(ENV_OPENAI_VECTOR_STORE_ID, "")
     vector_store_ids = _parse_vector_store_ids(raw_ids)
+    # Set to "true" (case-insensitive) to force File Search; anything else -> off
+    force_file_search = os.getenv(ENV_OPENAI_FORCE_FILE_SEARCH, "").strip().lower() == "true"
 
     if not vector_store_ids:
         return {}
 
-    return {
+    extra: Dict[str, Any] = {
         "tools": [
             {
                 "type": "file_search",
                 "vector_store_ids": vector_store_ids,
             }
-        ],
-        # Force the model to call File Search instead of leaving it on auto.
-        # "tool_choice": {"type": "file_search"},
+        ]
     }
+    # If enabled via env, force the model to call File Search instead of leaving it on auto.
+    if force_file_search:
+        extra["tool_choice"] = {"type": "file_search"}
+
+    return extra
