@@ -1,9 +1,14 @@
 from __future__ import annotations
 
-import asyncio
-from jinx.input_service import neon_input
+"""Runtime input_task facade.
+
+Delegates to the micro-module implementation under
+``jinx.micro.runtime.input_task`` while keeping the public API stable.
+"""
+
+from jinx.micro.runtime.input_task import start_input_task as start_input_task
 
 
-def start_input_task(q: asyncio.Queue[str]) -> asyncio.Task[None]:
-    """Start the input task that feeds user messages into the queue."""
-    return asyncio.create_task(neon_input(q))
+__all__ = [
+    "start_input_task",
+]

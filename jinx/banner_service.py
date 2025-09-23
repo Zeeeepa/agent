@@ -1,16 +1,14 @@
-"""Banner service.
+"""Banner facade.
 
-Responsible for rendering the startup banner. Kept separate for clarity and
-potential future customization (branding, version info, etc.).
+Thin wrapper delegating to micro-module implementation under
+``jinx.micro.ui.banner``.
 """
 
 from __future__ import annotations
 
-from jinx.bootstrap import ensure_optional
-
-art = ensure_optional(["art"])["art"]  # type: ignore
+from jinx.micro.ui.banner import show_banner as show_banner
 
 
-def show_banner() -> None:
-    """Render the startup banner."""
-    art.tprint("Jinx", "random")
+__all__ = [
+    "show_banner",
+]

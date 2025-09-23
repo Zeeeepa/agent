@@ -1,54 +1,27 @@
 from __future__ import annotations
 
-import os
-from typing import Dict, Any, List
+from typing import Any, Dict
 
-
-ENV_OPENAI_VECTOR_STORE_ID: str = "OPENAI_VECTOR_STORE_ID"
-ENV_OPENAI_FORCE_FILE_SEARCH: str = "OPENAI_FORCE_FILE_SEARCH"
-
-
-def _parse_vector_store_ids(raw: str) -> List[str]:
-    """Parse a comma-separated list of vector store IDs.
-
-    - Trims whitespace around IDs
-    - Drops empty entries
-    - Deduplicates while preserving order
-    """
-    if not raw:
-        return []
-
-    ids: List[str] = [i.strip() for i in raw.split(",") if i.strip()]
-    # Deduplicate while preserving order
-    return list(dict.fromkeys(ids)) if ids else []
+# Facade that delegates to micro-module implementation.
+# Keep the old import path stable for callers.
+from jinx.micro.rag.file_search import (
+    ENV_OPENAI_VECTOR_STORE_ID,
+    ENV_OPENAI_FORCE_FILE_SEARCH,
+    build_file_search_tools as _build_file_search_tools,
+)
 
 
 def build_file_search_tools() -> Dict[str, Any]:
-    """Return extra kwargs for OpenAI Responses API to enable File Search.
+    """Compatibility facade for File Search tool binding.
 
-    Behavior:
-    - If OPENAI_VECTOR_STORE_ID is set (single or comma-separated) -> bind those.
-    - Otherwise -> return empty dict (feature off by default).
+    Delegates to ``jinx.micro.rag.file_search.build_file_search_tools`` to keep
+    the legacy import location stable while the logic lives in the micro-module.
     """
-    # Read single env var that may contain one or multiple comma-separated IDs.
-    raw_ids = os.getenv(ENV_OPENAI_VECTOR_STORE_ID, "")
-    vector_store_ids = _parse_vector_store_ids(raw_ids)
-    # Set to "true" (case-insensitive) to force File Search; anything else -> off
-    force_file_search = os.getenv(ENV_OPENAI_FORCE_FILE_SEARCH, "").strip().lower() == "true"
+    return _build_file_search_tools()
 
-    if not vector_store_ids:
-        return {}
 
-    extra: Dict[str, Any] = {
-        "tools": [
-            {
-                "type": "file_search",
-                "vector_store_ids": vector_store_ids,
-            }
-        ]
-    }
-    # If enabled via env, force the model to call File Search instead of leaving it on auto.
-    if force_file_search:
-        extra["tool_choice"] = {"type": "file_search"}
-
-    return extra
+__all__ = [
+    "ENV_OPENAI_VECTOR_STORE_ID",
+    "ENV_OPENAI_FORCE_FILE_SEARCH",
+    "build_file_search_tools",
+]

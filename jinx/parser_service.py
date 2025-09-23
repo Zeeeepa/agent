@@ -1,9 +1,13 @@
-"""Parser utilities for tagged model output blocks."""
+"""Parser facade for tagged model output blocks.
+
+Thin wrapper delegating to the micro-module implementation under
+jinx.micro.parser.api to keep the public API stable.
+"""
 
 from __future__ import annotations
 
 from typing import List, Tuple
-from jinx.parser import parse_tagged_blocks as _parse_tagged_blocks, is_code_tag as _is_code_tag
+from jinx.micro.parser.api import parse_tagged_blocks as _parse_tagged_blocks, is_code_tag as _is_code_tag
 
 
 def parse_tagged_blocks(out: str, code_id: str) -> List[Tuple[str, str]]:
