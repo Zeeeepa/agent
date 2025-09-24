@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import traceback
 from typing import Optional
+import os
 
 from jinx.logging_service import glitch_pulse, bomb_log, blast_mem
 from jinx.openai_service import spark_openai
@@ -11,10 +12,13 @@ from jinx.micro.ui.output import pretty_echo
 from jinx.micro.conversation.sandbox_view import show_sandbox_tail
 from jinx.micro.conversation.error_report import corrupt_report
 from jinx.embeddings.retrieval import build_context_for
+from jinx.embeddings.project_retrieval import build_project_context_for
 from jinx.embeddings.pipeline import embed_text
 from jinx.conversation.formatting import build_header, ensure_header_block_separation
 from jinx.micro.memory.storage import read_evergreen
 from jinx.micro.conversation.memory_sanitize import sanitize_transcript_for_memory
+from jinx.micro.embeddings.project_config import ENABLE as PROJ_EMB_ENABLE
+from jinx.micro.embeddings.project_paths import PROJECT_FILES_DIR
 
 
 async def shatter(x: str, err: Optional[str] = None) -> None:
@@ -33,11 +37,20 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
         # Do not inject error text into the body chains; it will live in <error>
         chains, decay = build_chains("", None)
         # Build standardized header blocks in a stable order before the main chains
-        # 1) <embeddings_context> from recent dialogue/sandbox using current input as query
+        # 1) <embeddings_context> from recent dialogue/sandbox using current input as query,
+        #    plus project code embeddings context assembled from emb/ when available
         try:
-            ctx = await build_context_for(x or synth or "")
+            base_ctx = await build_context_for(x or synth or "")
         except Exception:
-            ctx = ""
+            base_ctx = ""
+        # Only build project context when enabled and emb/files exists to avoid unnecessary API calls
+        proj_ctx = ""
+        if PROJ_EMB_ENABLE and os.path.isdir(PROJECT_FILES_DIR):
+            try:
+                proj_ctx = await build_project_context_for(x or synth or "")
+            except Exception:
+                proj_ctx = ""
+        ctx = "\n".join([c for c in [base_ctx, proj_ctx] if c])
         # 2) <memory> from transcript (exclude the latest user input line and sanitize)
         mem_text = sanitize_transcript_for_memory(synth or "", (x or "").strip())
         # 2.5) <evergreen> persistent durable facts

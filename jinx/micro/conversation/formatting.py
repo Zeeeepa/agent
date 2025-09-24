@@ -19,6 +19,14 @@ def ensure_header_block_separation(text: str) -> str:
 
     Currently enforces:
     - </embeddings_context>  [blank line]  <evergreen>
+    - </embeddings_context>  [blank line]  <embeddings_code>
+    - </embeddings_context>  [blank line]  <embeddings_refs>
+    - </embeddings_code>     [blank line]  <evergreen>
+    - </embeddings_code>     [blank line]  <embeddings_refs>
+    - </embeddings_refs>     [blank line]  <evergreen>
+    - </embeddings_refs>     [blank line]  <memory>
+    - </embeddings_refs>     [blank line]  <task>
+    - </embeddings_refs>     [blank line]  <error>
     - </evergreen>           [blank line]  <memory>
     - </memory>              [blank line]  <task>
     - </task>                [blank line]  <error>
@@ -26,7 +34,18 @@ def ensure_header_block_separation(text: str) -> str:
     t = normalize_unicode_spaces(text)
     # Normalize any whitespace (including existing newlines) between blocks to exactly one blank line
     t = re.sub(r"(</embeddings_context>)[\s\u00A0\u2007\u202F]*(<evergreen>)", r"\1\n\n\2", t)
+    t = re.sub(r"(</embeddings_context>)[\s\u00A0\u2007\u202F]*(<embeddings_code>)", r"\1\n\n\2", t)
+    t = re.sub(r"(</embeddings_context>)[\s\u00A0\u2007\u202F]*(<embeddings_refs>)", r"\1\n\n\2", t)
+    t = re.sub(r"(</embeddings_code>)[\s\u00A0\u2007\u202F]*(<evergreen>)", r"\1\n\n\2", t)
+    t = re.sub(r"(</embeddings_code>)[\s\u00A0\u2007\u202F]*(<embeddings_refs>)", r"\1\n\n\2", t)
+    t = re.sub(r"(</embeddings_refs>)[\s\u00A0\u2007\u202F]*(<evergreen>)", r"\1\n\n\2", t)
+    t = re.sub(r"(</embeddings_code>)[\s\u00A0\u2007\u202F]*(<memory>)", r"\1\n\n\2", t)
+    t = re.sub(r"(</embeddings_code>)[\s\u00A0\u2007\u202F]*(<task>)", r"\1\n\n\2", t)
+    t = re.sub(r"(</embeddings_code>)[\s\u00A0\u2007\u202F]*(<error>)", r"\1\n\n\2", t)
     t = re.sub(r"(</evergreen>)[\s\u00A0\u2007\u202F]*(<memory>)", r"\1\n\n\2", t)
+    t = re.sub(r"(</embeddings_refs>)[\s\u00A0\u2007\u202F]*(<memory>)", r"\1\n\n\2", t)
+    t = re.sub(r"(</embeddings_refs>)[\s\u00A0\u2007\u202F]*(<task>)", r"\1\n\n\2", t)
+    t = re.sub(r"(</embeddings_refs>)[\s\u00A0\u2007\u202F]*(<error>)", r"\1\n\n\2", t)
     t = re.sub(r"(</memory>)[\s\u00A0\u2007\u202F]*(<task>)", r"\1\n\n\2", t)
     t = re.sub(r"(</task>)[\s\u00A0\u2007\u202F]*(<error>)", r"\1\n\n\2", t)
     return t
@@ -35,6 +54,7 @@ def ensure_header_block_separation(text: str) -> str:
 def build_header(ctx: str | None, mem_text: str | None, task_text: str | None, error_text: str | None = None, evergreen_text: str | None = None) -> str:
     """Build the standardized header text from parts.
 
+    - "ctx" may include one or both blocks already wrapped: <embeddings_context>... and/or <embeddings_code>...
     - Each provided block is wrapped (or assumed wrapped) and joined with clean spacing.
     - Final output guarantees proper separation between blocks.
     """

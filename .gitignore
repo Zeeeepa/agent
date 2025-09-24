@@ -6,5 +6,11 @@
 # Virtual environment
 .venv/
 
+# Embeddings
+emb/
+
+# Log
+log/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/

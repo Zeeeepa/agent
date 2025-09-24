@@ -8,10 +8,11 @@ friendly, and side-effect contained for testability.
 from __future__ import annotations
 
 import asyncio
+import os
 from jinx.banner_service import show_banner
 from jinx.utils import chaos_patch
 from jinx.runtime import start_input_task, frame_shift as _frame_shift
-from jinx.embeddings import start_embeddings_task
+from jinx.embeddings import start_embeddings_task, start_project_embeddings_task
 import jinx.state as jx_state
 import contextlib
 from jinx.memory.optimizer import stop as stop_memory_optimizer, start_memory_optimizer_task
@@ -37,6 +38,14 @@ async def pulse_core() -> None:
             start_embeddings_task(),
             start_memory_optimizer_task(),
         ]
+        # Optionally start project-wide embeddings generator if enabled
+        try:
+            _enable_proj = os.getenv("EMBED_PROJECT_ENABLE", "0").strip().lower() in {"1", "true", "yes", "on"}
+            if _enable_proj:
+                jobs.append(start_project_embeddings_task())
+        except Exception:
+            pass
+        shutdown_task: asyncio.Task | None = None
         try:
             # Race the running jobs against a shutdown signal
             shutdown_task = asyncio.create_task(jx_state.shutdown_event.wait())
@@ -52,9 +61,10 @@ async def pulse_core() -> None:
                 await asyncio.gather(*jobs, return_exceptions=True)
             else:
                 # Jobs completed naturally; ensure we don't leak the waiter
-                shutdown_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await shutdown_task
+                if shutdown_task is not None:
+                    shutdown_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await shutdown_task
         except (asyncio.CancelledError, KeyboardInterrupt):
             # Signal global shutdown to all components
             jx_state.shutdown_event.set()
@@ -66,8 +76,9 @@ async def pulse_core() -> None:
             await asyncio.gather(*jobs, return_exceptions=True)
         finally:
             # Ensure the shutdown waiter is not leaked
-            with contextlib.suppress(UnboundLocalError):
-                if 'shutdown_task' in locals() and not shutdown_task.done():
-                    shutdown_task.cancel()
+            st = shutdown_task
+            if isinstance(st, asyncio.Task):
+                if not st.done():
+                    st.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
-                        await shutdown_task
+                        await st
