@@ -10,6 +10,7 @@ from .project_retrieval import (
     retrieve_project_top_k,
     build_project_context_for,
 )
+from jinx.micro.embeddings.project_search_api import search_project
 
 __all__ = [
     "start_embeddings_task",
@@ -18,4 +19,5 @@ __all__ = [
     "ProjectEmbeddingsService",
     "retrieve_project_top_k",
     "build_project_context_for",
+    "search_project",
 ]

@@ -12,7 +12,7 @@ from .project_retrieval_config import (
 from .project_line_window import find_line_window
 from .project_identifiers import extract_identifiers
 from .project_lang import lang_for_file
-from .project_py_scope import find_python_scope
+from .project_py_scope import find_python_scope, get_python_symbol_at_line
 from .project_query_tokens import expand_strong_tokens, codeish_tokens
 
 
@@ -73,25 +73,6 @@ def build_snippet(
                 body = snip or body
                 local_ls, local_le = a, b
 
-        # Early escalation: if the token appears multiple times anywhere in the file, return the whole file once
-        if file_rel.endswith('.py') and (query and query.strip()):
-            try:
-                toks = list(dict.fromkeys(expand_strong_tokens(query or "", max_items=32) + codeish_tokens(query or "")))
-                if toks:
-                    low = file_text.lower()
-                    low_lines = [ln.lower() for ln in lines_all]
-                    hit_lines: list[int] = []
-                    for idx, ln in enumerate(low_lines, start=1):
-                        if any(t.lower() in ln for t in toks):
-                            hit_lines.append(idx)
-                    multi_in_text = any(low.count(t.lower()) >= 2 for t in toks)
-                    if len(hit_lines) >= 2 or multi_in_text:
-                        body = file_text
-                        local_ls, local_le = 1, len(lines_all)
-                        is_full_scope = True
-            except Exception:
-                pass
-
         # Prefer full Python scope if it fits budget
         use_ls = local_ls or ls
         use_le = local_le or le
@@ -127,17 +108,25 @@ def build_snippet(
             except Exception:
                 pass
 
-        # (Secondary multi-hit escalation removed — handled earlier)
-
     # Final cap per hit (skip if we intentionally included full scope under policy)
     if not is_full_scope and len(body) > PROJ_SNIPPET_PER_HIT_CHARS:
         body = body[:PROJ_SNIPPET_PER_HIT_CHARS]
 
-    # Final header
+    # Final header (optionally enriched with Python symbol name/kind)
     if local_ls or local_le:
         header = f"[{file_rel}:{local_ls}-{local_le}]"
     else:
         header = f"[{file_rel}]"
+
+    # Enrich with Python symbol info if available
+    try:
+        if file_rel.endswith('.py') and file_text:
+            cand_line = int((local_ls + local_le) // 2) if (local_ls and local_le) else int(local_ls or local_le or 0)
+            sym_name, sym_kind = get_python_symbol_at_line(file_text, cand_line)
+            if sym_name:
+                header = f"[{file_rel}:{local_ls}-{local_le} {sym_kind or ''} {sym_name}]".rstrip()
+    except Exception:
+        pass
 
     lang = lang_for_file(file_rel)
     code_block = f"```{lang}\n{body}\n```" if lang else f"```\n{body}\n```"

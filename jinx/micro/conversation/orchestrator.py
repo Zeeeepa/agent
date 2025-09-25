@@ -43,9 +43,9 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
             base_ctx = await build_context_for(x or synth or "")
         except Exception:
             base_ctx = ""
-        # Only build project context when enabled and emb/files exists to avoid unnecessary API calls
+        # Build project context whenever enabled; retrieval can scan files directly even before emb/ exists
         proj_ctx = ""
-        if PROJ_EMB_ENABLE and os.path.isdir(PROJECT_FILES_DIR):
+        if PROJ_EMB_ENABLE:
             try:
                 proj_ctx = await build_project_context_for(x or synth or "")
             except Exception:

@@ -12,15 +12,19 @@ def find_line_window(text: str, tokens: List[str], around: int = 6) -> Tuple[int
     if not text or not tokens:
         return 0, 0, ""
     lowered = text.lower()
+    # Prefer token order (already prioritized by callers) rather than earliest position.
+    # This helps target more specific identifiers like 'import_module' over generic ones like 'name'.
     hit_pos = -1
     hit_len = 0
     for t in tokens:
-        if not t:
+        tl = (t or "").strip()
+        if not tl:
             continue
-        p = lowered.find(t.lower())
-        if p >= 0 and (hit_pos == -1 or p < hit_pos):
+        p = lowered.find(tl.lower())
+        if p >= 0:
             hit_pos = p
-            hit_len = len(t)
+            hit_len = len(tl)
+            break
     if hit_pos < 0:
         return 0, 0, ""
     pre = text[:hit_pos]

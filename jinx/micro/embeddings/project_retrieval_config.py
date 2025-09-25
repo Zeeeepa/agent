@@ -29,3 +29,13 @@ PROJ_TOTAL_CODE_BUDGET = int(os.getenv("EMBED_PROJECT_TOTAL_CODE_BUDGET", "20000
 
 # Limit the number of hits that expand to full Python scope; others will use windowed snippets (<=0 = unlimited)
 PROJ_FULL_SCOPE_TOP_N = int(os.getenv("EMBED_PROJECT_FULL_SCOPE_TOP_N", "0"))
+
+# Per-stage time budgets (ms). Applied as an upper bound per stage; subject to overall max_time_ms.
+PROJ_STAGE_PYAST_MS = int(os.getenv("EMBED_PROJECT_STAGE_PYAST_MS", "200"))
+PROJ_STAGE_JEDI_MS = int(os.getenv("EMBED_PROJECT_STAGE_JEDI_MS", "220"))
+PROJ_STAGE_PYDOC_MS = int(os.getenv("EMBED_PROJECT_STAGE_PYDOC_MS", "200"))
+PROJ_STAGE_REGEX_MS = int(os.getenv("EMBED_PROJECT_STAGE_REGEX_MS", "220"))
+PROJ_STAGE_PRE_MS = int(os.getenv("EMBED_PROJECT_STAGE_PRE_MS", "220"))
+PROJ_STAGE_EXACT_MS = int(os.getenv("EMBED_PROJECT_STAGE_EXACT_MS", "200"))
+PROJ_STAGE_VECTOR_MS = int(os.getenv("EMBED_PROJECT_STAGE_VECTOR_MS", "250"))
+PROJ_STAGE_KEYWORD_MS = int(os.getenv("EMBED_PROJECT_STAGE_KEYWORD_MS", "180"))

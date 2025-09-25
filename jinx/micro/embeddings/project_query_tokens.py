@@ -29,6 +29,22 @@ def expand_strong_tokens(q: str, max_items: int = 32) -> List[str]:
             for p in tl.split("_"):
                 if len(p) >= 6:
                     tok_set.add(p)
+        # Handle bracketless generics like 'QueueT' by keeping head part
+        # Example: 'QueueT' -> 'Queue'
+        if len(tl) >= 4 and tl[-1].isupper() and tl[:-1].isalpha():
+            head = tl[:-1]
+            if len(head) >= 4:
+                tok_set.add(head)
+        # Split CamelCase into components and add longest meaningful ones
+        # e.g., 'AsyncQueueItem' -> 'Async', 'Queue', 'Item'
+        parts = []
+        try:
+            parts = [p for p in __import__('re').split(r'(?<!^)(?=[A-Z])', tl) if p]
+        except Exception:
+            parts = []
+        for p in parts:
+            if len(p) >= 4:
+                tok_set.add(p)
     toks = [t for t in sorted(tok_set, key=len, reverse=True) if ("_" in t) or ("." in t) or (len(t) >= 6)]
     return toks[:max_items]
 

@@ -6,6 +6,11 @@ from typing import Awaitable, Callable, TypeVar
 T = TypeVar("T")
 
 
+async def _run_on_drop(cb: Callable[[], Awaitable[None]]) -> None:
+    """Wrap an Awaitable callback into a coroutine for create_task()."""
+    await cb()
+
+
 def try_put_nowait(q: "asyncio.Queue[T]", item: T) -> bool:
     """Attempt to enqueue without blocking. Return True on success.
 
@@ -44,5 +49,5 @@ def put_drop_oldest(q: "asyncio.Queue[T]", item: T, on_drop: Callable[[], Awaita
             pass
         if on_drop:
             # Fire-and-forget; caller may choose to await explicitly instead
-            asyncio.create_task(on_drop())
+            asyncio.create_task(_run_on_drop(on_drop))
         q.put_nowait(item)

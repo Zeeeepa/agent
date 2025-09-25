@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import time
 from typing import Any, Dict, List, Tuple
+import re as _re
 
 from .project_config import ROOT, INCLUDE_EXTS, EXCLUDE_DIRS, MAX_FILE_BYTES
 from .project_iter import iter_candidate_files
@@ -29,18 +30,53 @@ def _expand_tokens(q: str, max_items: int = 32) -> List[str]:
 def stage_textscan_hits(query: str, k: int, *, max_time_ms: int | None = 250) -> List[Tuple[float, str, Dict[str, Any]]]:
     """Stage -1: direct text scan over project files (no embeddings).
 
+    - First tries a flexible phrase match (whitespace-insensitive, tolerant around ()=, ,)
+    - Then falls back to token scanning using code-like tokens.
+
     Returns a list of (score, file_rel, obj) sorted by score desc.
     """
     q = (query or "").strip()
     if not q:
         return []
     toks = _expand_tokens(q)
-    if not toks:
-        return []
 
     t0 = time.perf_counter()
     hits: List[Tuple[float, str, Dict[str, Any]]] = []
     seen_rel: set[str] = set()
+
+    # Precompile a flexible phrase pattern to match the raw query with optional whitespace
+    def _flex_phrase_pattern(s: str):
+        s = (s or "").strip()
+        if len(s) < 3:
+            return None
+        parts = [p for p in s.split() if p]
+        if not parts:
+            return None
+        esc_parts: List[str] = []
+        for p in parts:
+            e = _re.escape(p)
+            e = e.replace(r"\(", r"\s*\(\s*")
+            e = e.replace(r"\)", r"\s*\)\s*")
+            e = e.replace(r"\=", r"\s*=\s*")
+            e = e.replace(r"\,", r"\s*,\s*")
+            e = e.replace(r"\:", r"\s*:\s*")
+            e = e.replace(r"\.", r"\s*\.\s*")
+            e = e.replace(r"\-", r"[\-\s]*")
+            e = e.replace("_", r"[_\s]*")
+            e = e.replace(r"\[", r"\s*\[\s*")
+            e = e.replace(r"\]", r"\s*\]\s*")
+            e = e.replace(r"\{", r"\s*\{\s*")
+            e = e.replace(r"\}", r"\s*\}\s*")
+            e = e.replace("<", r"\s*<\s*")
+            e = e.replace(">", r"\s*>\s*")
+            esc_parts.append(e)
+        pat = r"\s*".join(esc_parts)
+        try:
+            return _re.compile(pat, _re.IGNORECASE | _re.DOTALL)
+        except Exception:
+            return None
+
+    phrase_pat = _flex_phrase_pattern(q)
 
     # Pass 1: only files already present in embeddings store (fast and highly relevant)
     rel_files: List[str] = []
@@ -69,18 +105,138 @@ def stage_textscan_hits(query: str, k: int, *, max_time_ms: int | None = 250) ->
             text = ""
         if not text:
             return False
-        low = text.lower()
-        if not any(t.lower() in low for t in toks):
-            return False
-        # Small window as preview; snippet builder will expand to full scope later for Python
-        a, b, snip = find_line_window(text, toks, around=12)
-        # If multiple occurrences across the file, escalate meta to whole-file range
-        multi_in_text = any(text.lower().count(t.lower()) >= 2 for t in toks)
-        ls_meta = int(a or 0)
-        le_meta = int(b or 0)
-        if multi_in_text:
-            ls_meta = 1
-            le_meta = len(text.splitlines())
+        # Try flexible phrase match first
+        ls_meta = 0
+        le_meta = 0
+        snip = ""
+        is_phrase_hit = False
+        if phrase_pat is not None:
+            # Try original text, then normalized variants while preserving line counts
+            texts_to_try: List[Tuple[str, str]] = [("orig", text)]
+            try:
+                gen_strip = _re.sub(r"\[[^\]\n]*\]", "", text)
+                texts_to_try.append(("gen_strip", gen_strip))
+            except Exception:
+                pass
+            try:
+                gen_T = _re.sub(r"\[[^\]\n]*\]", "T", text)
+                texts_to_try.append(("gen_T", gen_T))
+            except Exception:
+                pass
+            # Remove underscores to match 'QueueT' vs 'Queue_T'
+            try:
+                no_unders = text.replace("_", " ")
+                texts_to_try.append(("no_unders", no_unders))
+            except Exception:
+                pass
+            # Remove most punctuation (keep newlines) for typo-tolerant matching in comments/docstrings
+            try:
+                no_punct = _re.sub(r"[^\w\s]", " ", text)
+                texts_to_try.append(("no_punct", no_punct))
+            except Exception:
+                pass
+            for _kind, src in texts_to_try:
+                m = phrase_pat.search(src)
+                if m:
+                    pos0, pos1 = m.start(), m.end()
+                    pre = src[:pos0]
+                    ls = pre.count("\n") + 1
+                    le = ls + max(1, src[pos0:pos1].count("\n"))
+                    lines_all = text.splitlines()
+                    a = max(1, ls - 12)
+                    b = min(len(lines_all), le + 12)
+                    snip = "\n".join(lines_all[a-1:b]).strip()
+                    ls_meta, le_meta = a, b
+                    is_phrase_hit = True
+                    break
+        # Fallback: token-based match, then approximate line-level match
+        if not (ls_meta and le_meta):
+            low = text.lower()
+            if any(t.lower() in low for t in toks):
+                a, b, snip2 = find_line_window(text, toks, around=12)
+                if a or b:
+                    snip = snip or snip2 or text[:300].strip()
+                    ls_meta = int(a or 0)
+                    le_meta = int(b or 0)
+            # Approximate match (typo-tolerant) if still not found
+            if not (ls_meta and le_meta):
+                try:
+                    import difflib as _df
+                except Exception:
+                    _df = None  # type: ignore
+                if _df is not None:
+                    # Use top few longest tokens as anchors
+                    anchors = sorted({t for t in toks if t and len(t) >= 5}, key=len, reverse=True)[:3]
+                    if anchors:
+                        lines_all = text.splitlines()
+                        # Bound work: check up to N lines and bail if time budget exceeds
+                        max_lines = min(len(lines_all), 1200)
+                        best = (0.0, 0, 0)
+                        for idx in range(max_lines):
+                            if max_time_ms is not None and (time.perf_counter() - t0) * 1000.0 > max_time_ms:
+                                break
+                            ln = lines_all[idx]
+                            ln_low = ln.lower()
+                            for a_tok in anchors:
+                                r = _df.SequenceMatcher(None, a_tok.lower(), ln_low).ratio()
+                                if r >= 0.86 and r > best[0]:
+                                    a = max(1, idx + 1 - 12)
+                                    b = min(len(lines_all), idx + 1 + 12)
+                                    best = (r, a, b)
+                        if best[0] >= 0.86:
+                            _, a, b = best
+                            snip = snip or "\n".join(lines_all[a-1:b]).strip()
+                            ls_meta = a
+                            le_meta = b
+        # Final fallback: fuzzy full-query vs individual lines (very tolerant)
+        if not (ls_meta and le_meta):
+            try:
+                from rapidfuzz import fuzz as _rf_fuzz  # type: ignore
+            except Exception:  # pragma: no cover - optional
+                _rf_fuzz = None  # type: ignore
+            try:
+                import difflib as _df2
+            except Exception:
+                _df2 = None  # type: ignore
+            def _norm(s: str) -> str:
+                s2 = (s or "").lower()
+                try:
+                    s2 = _re.sub(r"[^\w\s]", " ", s2)
+                except Exception:
+                    pass
+                s2 = s2.replace("_", " ")
+                s2 = " ".join(s2.split())
+                return s2
+            nq = _norm(q)
+            if nq and len(nq) >= 3:
+                lines_all = text.splitlines()
+                max_lines = min(len(lines_all), 1500)
+                best_score = 0.0
+                best_idx = -1
+                for idx in range(max_lines):
+                    if max_time_ms is not None and (time.perf_counter() - t0) * 1000.0 > max_time_ms:
+                        break
+                    ln = _norm(lines_all[idx])
+                    score = 0.0
+                    if _rf_fuzz is not None:
+                        try:
+                            score = float(_rf_fuzz.token_set_ratio(nq, ln)) / 100.0
+                        except Exception:
+                            score = 0.0
+                    elif _df2 is not None:
+                        try:
+                            score = _df2.SequenceMatcher(None, nq, ln).ratio()
+                        except Exception:
+                            score = 0.0
+                    if score > best_score:
+                        best_score = score
+                        best_idx = idx
+                if best_idx >= 0 and best_score >= 0.78:
+                    a = max(1, best_idx + 1 - 12)
+                    b = min(len(lines_all), best_idx + 1 + 12)
+                    snip = snip or "\n".join(lines_all[a-1:b]).strip()
+                    ls_meta = a
+                    le_meta = b
         obj = {
             "embedding": [],
             "meta": {
@@ -90,10 +246,13 @@ def stage_textscan_hits(query: str, k: int, *, max_time_ms: int | None = 250) ->
                 "line_end": le_meta,
             },
         }
-        hits.append((0.98, rel_p, obj))
+        # Slightly prioritize phrase hits over token hits
+        score = 0.99 if is_phrase_hit else 0.98
+        hits.append((score, rel_p, obj))
         if len(hits) >= k:
             return True
         return False
+
     # Scan embeddings-known files first
     for rel_p in rel_files:
         abs_p = os.path.join(ROOT, rel_p)

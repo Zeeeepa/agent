@@ -4,14 +4,16 @@ import io
 import os
 import contextlib
 import traceback
-from typing import Any, Optional
+import multiprocessing  # needed for type annotations resolution
+from multiprocessing.managers import DictProxy as MPDictProxy
+from typing import Any, Optional, TextIO, cast
 from jinx.text_service import slice_fuse
 
 
 def blast_zone(
     x: str,
     stack: dict[str, Any],
-    shrap: "multiprocessing.managers.DictProxy",
+    shrap: MPDictProxy,
     log_path: Optional[str] = None,
 ) -> None:
     """Execute code in a clean globals dict and capture output/errors.
@@ -26,15 +28,41 @@ def blast_zone(
             buf = io.StringIO()
             # Tee output to both file (for full history) and buffer (for summary)
             class Tee(io.TextIOBase):
+                def __init__(self, file_obj: io.TextIOBase, buffer: io.StringIO, encoding: str = "utf-8") -> None:
+                    self._file = file_obj
+                    self._buf = buffer
+                    self._enc = encoding
+
+                # IO[str] protocol methods
                 def write(self, s: str) -> int:  # type: ignore[override]
-                    f.write(s)
-                    return buf.write(s)
+                    self._file.write(s)
+                    return self._buf.write(s)
 
                 def flush(self) -> None:  # type: ignore[override]
-                    f.flush()
-                    buf.flush()
+                    self._file.flush()
+                    self._buf.flush()
 
-            tee = Tee()
+                @property
+                def encoding(self) -> str:  # type: ignore[override]
+                    return self._enc
+
+                def readable(self) -> bool:  # type: ignore[override]
+                    return False
+
+                def writable(self) -> bool:  # type: ignore[override]
+                    return True
+
+                def seekable(self) -> bool:  # type: ignore[override]
+                    return False
+
+                def close(self) -> None:  # type: ignore[override]
+                    try:
+                        self._file.flush()
+                        self._buf.flush()
+                    except Exception:
+                        pass
+
+            tee: TextIO = cast(TextIO, Tee(f, buf))
             with contextlib.redirect_stdout(tee), contextlib.redirect_stderr(tee):
                 try:
                     exec(x, stack)
