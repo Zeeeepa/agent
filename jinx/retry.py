@@ -29,14 +29,16 @@ async def detonate_payload(
     delay : float
         Delay in seconds between attempts.
     """
-    for attempt in range(retries):
+    # Guarantee at least one attempt
+    attempts = max(1, int(retries))
+    for attempt in range(attempts):
         try:
             if timeout is not None:
                 return await asyncio.wait_for(pyro(), timeout=timeout)
             return await pyro()
         except Exception as e:
             await bomb_log(f"Spiking the loop: Detonating again: {e} (attempt {attempt + 1})")
-            if attempt < retries - 1:
+            if attempt < attempts - 1:
                 # Apply optional jitter to reduce thundering herd
                 if jitter > 0:
                     sleep_for = max(0.0, delay + random.uniform(-jitter, jitter))
@@ -46,3 +48,5 @@ async def detonate_payload(
             else:
                 await bomb_log("System fracturing: Max retries burned.")
                 raise
+    # Should be unreachable, but satisfies type checker
+    raise RuntimeError("detonate_payload: no attempts executed")

@@ -11,6 +11,7 @@ import asyncio
 import importlib
 import contextlib
 from jinx.bootstrap import ensure_optional
+from typing import Any, cast
 from jinx.state import boom_limit
 from jinx.logging_service import blast_mem, bomb_log
 from jinx.log_paths import TRIGGER_ECHOES, BLUE_WHISPERS
@@ -76,11 +77,11 @@ async def neon_input(qe: asyncio.Queue[str]) -> None:
     watch_task = asyncio.create_task(kaboom_watch())
     try:
         prompt_task: asyncio.Task[str] | None = None
-        shutdown_task: asyncio.Task[None] | None = None
+        shutdown_task: asyncio.Task[bool] | None = None  # Event.wait() resolves to True
         while True:
             try:
                 # Race the prompt against a shutdown signal to exit promptly
-                prompt_task = asyncio.create_task(sess.prompt_async("\n"))
+                pt: asyncio.Task[str] = asyncio.create_task(sess.prompt_async("\n"))
                 # Ensure any exception (including BaseException like KeyboardInterrupt) is retrieved
                 def _swallow_task_exc(t: asyncio.Task) -> None:
                     try:
@@ -88,10 +89,11 @@ async def neon_input(qe: asyncio.Queue[str]) -> None:
                         _ = t.result()
                     except BaseException:
                         pass
-                prompt_task.add_done_callback(_swallow_task_exc)
-                shutdown_task = asyncio.create_task(jx_state.shutdown_event.wait())
-                done, _ = await asyncio.wait({prompt_task, shutdown_task}, return_when=asyncio.FIRST_COMPLETED)
-                if shutdown_task in done:
+                pt.add_done_callback(_swallow_task_exc)
+                st: asyncio.Task[bool] = asyncio.create_task(jx_state.shutdown_event.wait())
+                tasks: set[asyncio.Future[Any]] = {cast(asyncio.Future[Any], pt), cast(asyncio.Future[Any], st)}
+                done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                if st in done:
                     # Politely ask prompt_toolkit to exit instead of cancelling the task
                     try:
                         sess.app.exit(exception=EOFError())
@@ -99,17 +101,19 @@ async def neon_input(qe: asyncio.Queue[str]) -> None:
                         pass
                     # Ensure prompt_task finishes and swallow any BaseException (e.g., KeyboardInterrupt)
                     with contextlib.suppress(BaseException):
-                        await prompt_task
+                        await pt
                     break
                 # Got user input
-                if shutdown_task is not None:
-                    shutdown_task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await shutdown_task
-                v: str = prompt_task.result()
+                st.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await st
+                v: str = pt.result()
                 if v.strip():
                     await bomb_log(v, TRIGGER_ECHOES)
                     await qe.put(v.strip())
+                # expose tasks for final cleanup
+                prompt_task = pt
+                shutdown_task = st
             except (EOFError, KeyboardInterrupt):
                 # Treat both as a clean exit of input loop
                 if prompt_task is not None:
@@ -128,10 +132,14 @@ async def neon_input(qe: asyncio.Queue[str]) -> None:
         # Force-close prompt_toolkit app and consume any leftover tasks
         with contextlib.suppress(Exception):
             sess.app.exit(exception=EOFError())
-        if prompt_task is not None and not prompt_task.done():
-            with contextlib.suppress(BaseException):
-                await prompt_task
-        if shutdown_task is not None and not shutdown_task.done():
-            shutdown_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await shutdown_task
+        if prompt_task is not None:
+            pt2 = cast(asyncio.Task[Any], prompt_task)
+            if not pt2.done():
+                with contextlib.suppress(BaseException):
+                    await pt2
+        if shutdown_task is not None:
+            st2 = cast(asyncio.Task[Any], shutdown_task)
+            if not st2.done():
+                st2.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await st2

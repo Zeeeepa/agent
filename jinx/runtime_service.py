@@ -37,14 +37,9 @@ async def pulse_core() -> None:
             asyncio.create_task(_frame_shift(q)),
             start_embeddings_task(),
             start_memory_optimizer_task(),
+            # Always start project-wide embeddings generator by default
+            start_project_embeddings_task(),
         ]
-        # Optionally start project-wide embeddings generator if enabled
-        try:
-            _enable_proj = os.getenv("EMBED_PROJECT_ENABLE", "0").strip().lower() in {"1", "true", "yes", "on"}
-            if _enable_proj:
-                jobs.append(start_project_embeddings_task())
-        except Exception:
-            pass
         shutdown_task: asyncio.Task | None = None
         try:
             # Race the running jobs against a shutdown signal

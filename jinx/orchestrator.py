@@ -22,7 +22,14 @@ def main() -> None:
     # Ensure environment variables (e.g., OPENAI_API_KEY) are loaded from .env
     load_env()
     # Ensure runtime optional deps are present before importing runtime_service
-    ensure_optional(["aiofiles"])
+    ensure_optional([
+        "aiofiles",      # async file IO used by runtime
+        "regex",         # fuzzy regex stage
+        "rapidfuzz",     # fuzzy line matching
+        "jedi",          # Python identifier references
+        "libcst",        # CST structural patterns
+        "astunparse",    # pretty-printing annotations (optional)
+    ])
 
     # Defer import until after dependencies are ensured to avoid early import errors
     from jinx.runtime_service import pulse_core

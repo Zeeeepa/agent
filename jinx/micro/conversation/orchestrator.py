@@ -43,13 +43,20 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
             base_ctx = await build_context_for(x or synth or "")
         except Exception:
             base_ctx = ""
-        # Build project context whenever enabled; retrieval can scan files directly even before emb/ exists
+        # Always build project context; retrieval enforces its own tight budgets
         proj_ctx = ""
-        if PROJ_EMB_ENABLE:
-            try:
-                proj_ctx = await build_project_context_for(x or synth or "")
-            except Exception:
-                proj_ctx = ""
+        try:
+            _q = (x or synth or "")
+            qlow = _q.lower()
+            codey = any(sym in _q for sym in "=[](){}.:,") or any(kw in qlow for kw in ["def ", "class ", "import ", "from ", "return ", "async ", "await ", " for ", " in ", " = "])
+            # If code-like, give a bit more budget on first attempt
+            first_budget = 1200 if codey else None
+            proj_ctx = await build_project_context_for(_q, max_time_ms=first_budget)
+            if not proj_ctx:
+                # Cold-start fallback: retry with a larger time budget
+                proj_ctx = await build_project_context_for(_q, max_time_ms=2000)
+        except Exception:
+            proj_ctx = ""
         ctx = "\n".join([c for c in [base_ctx, proj_ctx] if c])
         # 2) <memory> from transcript (exclude the latest user input line and sanitize)
         mem_text = sanitize_transcript_for_memory(synth or "", (x or "").strip())

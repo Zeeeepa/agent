@@ -49,31 +49,61 @@ def stage_textscan_hits(query: str, k: int, *, max_time_ms: int | None = 250) ->
         s = (s or "").strip()
         if len(s) < 3:
             return None
-        parts = [p for p in s.split() if p]
+        # Try to extract a code-core from the query (e.g., "a = func(x)" inside a NL sentence)
+        def _extract_code_core(src: str) -> str | None:
+            try:
+                import re as __re, ast as __ast
+                # Candidates consisting mostly of code characters
+                cands = list(__re.finditer(r'[A-Za-z0-9_\./:\-+*<>=!"\'\[\]\(\)\{\),\s]+', src))
+                def _can_parse(sn: str) -> bool:
+                    s = sn.strip()
+                    if len(s) < 3:
+                        return False
+                    try:
+                        __ast.parse(s, mode='exec')
+                        return True
+                    except Exception:
+                        pass
+                    try:
+                        __ast.parse(s, mode='eval')
+                        return True
+                    except Exception:
+                        pass
+                    try:
+                        __ast.parse(f'({s})', mode='eval')
+                        return True
+                    except Exception:
+                        return False
+                best = ""
+                best_len = 0
+                for m in cands:
+                    frag = (m.group(0) or "").strip()
+                    if len(frag) < 6:
+                        continue
+                    if _can_parse(frag) and len(frag) > best_len:
+                        best = frag
+                        best_len = len(frag)
+                if best:
+                    return best
+                # Fallback: choose the longest candidate if nothing parses
+                if cands:
+                    frag2 = max((m.group(0) or '').strip() for m in cands if (m.group(0) or '').strip())
+                    return frag2 or None
+                return None
+            except Exception:
+                return None
+        s_eff = _extract_code_core(s) or s
+        parts = [p for p in s_eff.split() if p]
         if not parts:
             return None
-        esc_parts: List[str] = []
-        for p in parts:
-            e = _re.escape(p)
-            e = e.replace(r"\(", r"\s*\(\s*")
-            e = e.replace(r"\)", r"\s*\)\s*")
-            e = e.replace(r"\=", r"\s*=\s*")
-            e = e.replace(r"\,", r"\s*,\s*")
-            e = e.replace(r"\:", r"\s*:\s*")
-            e = e.replace(r"\.", r"\s*\.\s*")
-            e = e.replace(r"\-", r"[\-\s]*")
-            e = e.replace("_", r"[_\s]*")
-            e = e.replace(r"\[", r"\s*\[\s*")
-            e = e.replace(r"\]", r"\s*\]\s*")
-            e = e.replace(r"\{", r"\s*\{\s*")
-            e = e.replace(r"\}", r"\s*\}\s*")
-            e = e.replace("<", r"\s*<\s*")
-            e = e.replace(">", r"\s*>\s*")
-            esc_parts.append(e)
-        pat = r"\s*".join(esc_parts)
+        # Build fuzzy phrase using 'regex' library (auto-installed at startup)
         try:
-            return _re.compile(pat, _re.IGNORECASE | _re.DOTALL)
+            import regex as _rx  # type: ignore
+            needle = " ".join(parts)
+            err = max(1, min(6, len(needle) // 10))
+            return _rx.compile(f"({_rx.escape(needle)}){{e<={err}}}", _rx.BESTMATCH | _rx.IGNORECASE | _rx.DOTALL)
         except Exception:
+            # If 'regex' is unavailable for any reason, let later stages handle matching
             return None
 
     phrase_pat = _flex_phrase_pattern(q)
@@ -207,7 +237,24 @@ def stage_textscan_hits(query: str, k: int, *, max_time_ms: int | None = 250) ->
                 s2 = s2.replace("_", " ")
                 s2 = " ".join(s2.split())
                 return s2
-            nq = _norm(q)
+            # Prefer fuzzy on the code core if present
+            def _extract_code_core2(src: str) -> str | None:
+                try:
+                    m = _re.search(r"([A-Za-z_][A-Za-z0-9_\.]*\s*[=]\s*.+)$", src)
+                    if m:
+                        return (m.group(1) or "").strip()
+                except Exception:
+                    pass
+                try:
+                    # Fallback: look for a call-like pattern
+                    m2 = _re.search(r"([A-Za-z_][A-Za-z0-9_\.]*)\s*\(.*\)", src)
+                    if m2:
+                        return (m2.group(0) or "").strip()
+                except Exception:
+                    pass
+                return None
+            core_q = _extract_code_core2(q) or q
+            nq = _norm(core_q)
             if nq and len(nq) >= 3:
                 lines_all = text.splitlines()
                 max_lines = min(len(lines_all), 1500)

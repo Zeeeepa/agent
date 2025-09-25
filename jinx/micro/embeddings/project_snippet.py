@@ -2,18 +2,23 @@ from __future__ import annotations
 
 import os
 from typing import Any, Dict, List, Tuple
+import re
 
 from .project_config import ROOT
 from .project_retrieval_config import (
     PROJ_SNIPPET_AROUND,
     PROJ_SNIPPET_PER_HIT_CHARS,
     PROJ_SCOPE_MAX_CHARS,
+    PROJ_EXPAND_CALLEES_TOP_N,
+    PROJ_EXPAND_CALLEE_MAX_CHARS,
 )
 from .project_line_window import find_line_window
 from .project_identifiers import extract_identifiers
 from .project_lang import lang_for_file
 from .project_py_scope import find_python_scope, get_python_symbol_at_line
+from .project_callees import extract_callees_from_scope, find_def_scope_in_project
 from .project_query_tokens import expand_strong_tokens, codeish_tokens
+from .project_query_core import extract_code_core
 
 
 def _read_file(rel_path: str) -> str:
@@ -32,6 +37,7 @@ def build_snippet(
     *,
     max_chars: int,
     prefer_full_scope: bool = True,
+    expand_callees: bool = True,
 ) -> Tuple[str, str, int, int, bool]:
     """Build a minimal header + code block snippet for a hit.
 
@@ -66,9 +72,31 @@ def build_snippet(
                 if span:
                     body = span
         else:
-            # Locate by identifiers from query
-            q_toks = sorted(extract_identifiers(query or "", max_items=24), key=len, reverse=True)
-            a, b, snip = find_line_window(file_text, q_toks, around=PROJ_SNIPPET_AROUND)
+            # Prefer an exact window by code-core if present
+            core = extract_code_core(query or "")
+            a = b = 0
+            snip = ""
+            if core:
+                try:
+                    # Build flexible regex: escape and normalize spaces
+                    esc = re.escape(core)
+                    esc = esc.replace(r"\ ", r"\s+")
+                    pat = re.compile(esc, re.DOTALL)
+                    m = pat.search(file_text)
+                    if m:
+                        pre = file_text[: m.start()]
+                        ls = pre.count("\n") + 1
+                        le = ls + max(1, file_text[m.start(): m.end()].count("\n"))
+                        lines_all = file_text.splitlines()
+                        a = max(1, ls - PROJ_SNIPPET_AROUND)
+                        b = min(len(lines_all), le + PROJ_SNIPPET_AROUND)
+                        snip = "\n".join(lines_all[a-1:b]).strip()
+                except Exception:
+                    pass
+            if not (a or b):
+                # Fallback: locate by identifiers from query
+                q_toks = sorted(extract_identifiers(query or "", max_items=24), key=len, reverse=True)
+                a, b, snip = find_line_window(file_text, q_toks, around=PROJ_SNIPPET_AROUND)
             if a or b:
                 body = snip or body
                 local_ls, local_le = a, b
@@ -128,6 +156,42 @@ def build_snippet(
     except Exception:
         pass
 
+    # Optional: expand a couple of direct callees for Python full-scope snippets
     lang = lang_for_file(file_rel)
-    code_block = f"```{lang}\n{body}\n```" if lang else f"```\n{body}\n```"
+    final_body = body
+    try:
+        if expand_callees and is_full_scope and file_rel.endswith('.py') and PROJ_EXPAND_CALLEES_TOP_N > 0:
+            callees = extract_callees_from_scope(body, max_items=PROJ_EXPAND_CALLEES_TOP_N * 2)
+            appended: list[str] = []
+            used = 0
+            for nm in callees:
+                if used >= PROJ_EXPAND_CALLEES_TOP_N:
+                    break
+                defs = find_def_scope_in_project(nm, prefer_rel=file_rel, limit=1)
+                if not defs:
+                    continue
+                fr, s, e = defs[0]
+                try:
+                    abs_p = os.path.join(ROOT, fr)
+                    with open(abs_p, 'r', encoding='utf-8', errors='ignore') as _cf:
+                        src = _cf.read()
+                    lines_all = src.splitlines()
+                    s_i = max(1, s) - 1
+                    e_i = min(len(lines_all), e) - 1
+                    seg = "\n".join(lines_all[s_i:e_i+1]).strip()
+                    if not seg:
+                        continue
+                    if PROJ_EXPAND_CALLEE_MAX_CHARS > 0 and len(seg) > PROJ_EXPAND_CALLEE_MAX_CHARS:
+                        seg = seg[:PROJ_EXPAND_CALLEE_MAX_CHARS]
+                    header_line = f"# callee: {nm} [{fr}:{s}-{e}]"
+                    appended.append(f"{header_line}\n{seg}")
+                    used += 1
+                except Exception:
+                    continue
+            if appended:
+                final_body = f"{body}\n\n# ---- expanded callees ----\n" + "\n\n".join(appended)
+    except Exception:
+        pass
+
+    code_block = f"```{lang}\n{final_body}\n```" if lang else f"```\n{final_body}\n```"
     return header, code_block, int(local_ls or 0), int(local_le or 0), bool(is_full_scope)

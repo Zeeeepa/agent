@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 
 # Environment-driven tunables for project retrieval
-PROJ_DEFAULT_TOP_K = int(os.getenv("EMBED_PROJECT_TOP_K", "6"))
+PROJ_DEFAULT_TOP_K = int(os.getenv("EMBED_PROJECT_TOP_K", "20"))
 PROJ_SCORE_THRESHOLD = float(os.getenv("EMBED_PROJECT_SCORE_THRESHOLD", "0.22"))
 PROJ_MIN_PREVIEW_LEN = int(os.getenv("EMBED_PROJECT_MIN_PREVIEW_LEN", "12"))
 PROJ_MAX_FILES = int(os.getenv("EMBED_PROJECT_MAX_FILES", "2000"))
@@ -12,7 +12,7 @@ PROJ_QUERY_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 
 # Snippet shaping
 PROJ_SNIPPET_AROUND = int(os.getenv("EMBED_PROJECT_SNIPPET_AROUND", "12"))
-PROJ_SNIPPET_PER_HIT_CHARS = int(os.getenv("EMBED_PROJECT_SNIPPET_PER_HIT_CHARS", "900"))
+PROJ_SNIPPET_PER_HIT_CHARS = int(os.getenv("EMBED_PROJECT_SNIPPET_PER_HIT_CHARS", "1600"))
 
 # Always include full Python function/class scope when possible
 def _env_bool(name: str, default: bool) -> bool:
@@ -30,11 +30,32 @@ PROJ_TOTAL_CODE_BUDGET = int(os.getenv("EMBED_PROJECT_TOTAL_CODE_BUDGET", "20000
 # Limit the number of hits that expand to full Python scope; others will use windowed snippets (<=0 = unlimited)
 PROJ_FULL_SCOPE_TOP_N = int(os.getenv("EMBED_PROJECT_FULL_SCOPE_TOP_N", "0"))
 
+# Optional: expand a couple of direct callees for Python full-scope snippets
+PROJ_EXPAND_CALLEES_TOP_N = int(os.getenv("EMBED_PROJECT_EXPAND_CALLEES_TOP_N", "2"))
+PROJ_EXPAND_CALLEE_MAX_CHARS = int(os.getenv("EMBED_PROJECT_EXPAND_CALLEE_MAX_CHARS", "1200"))
+PROJ_USAGE_REFS_LIMIT = int(os.getenv("EMBED_PROJECT_USAGE_REFS_LIMIT", "6"))
+
+# Exhaustive and budget overrides (use with care)
+PROJ_EXHAUSTIVE_MODE = _env_bool("EMBED_PROJECT_EXHAUSTIVE", True)
+PROJ_NO_STAGE_BUDGETS = _env_bool("EMBED_PROJECT_NO_STAGE_BUDGETS", True)
+PROJ_NO_CODE_BUDGET = _env_bool("EMBED_PROJECT_NO_CODE_BUDGET", True)
+
 # Per-stage time budgets (ms). Applied as an upper bound per stage; subject to overall max_time_ms.
 PROJ_STAGE_PYAST_MS = int(os.getenv("EMBED_PROJECT_STAGE_PYAST_MS", "200"))
 PROJ_STAGE_JEDI_MS = int(os.getenv("EMBED_PROJECT_STAGE_JEDI_MS", "220"))
 PROJ_STAGE_PYDOC_MS = int(os.getenv("EMBED_PROJECT_STAGE_PYDOC_MS", "200"))
 PROJ_STAGE_REGEX_MS = int(os.getenv("EMBED_PROJECT_STAGE_REGEX_MS", "220"))
+PROJ_STAGE_PYFLOW_MS = int(os.getenv("EMBED_PROJECT_STAGE_PYFLOW_MS", "200"))
+PROJ_STAGE_LIBCST_MS = int(os.getenv("EMBED_PROJECT_STAGE_LIBCST_MS", "220"))
+PROJ_STAGE_PYDEF_MS = int(os.getenv("EMBED_PROJECT_STAGE_PYDEF_MS", "180"))
+PROJ_STAGE_TB_MS = int(os.getenv("EMBED_PROJECT_STAGE_TB_MS", "120"))
+PROJ_STAGE_PYLITERALS_MS = int(os.getenv("EMBED_PROJECT_STAGE_PYLITERALS_MS", "200"))
+PROJ_STAGE_FASTSUBSTR_MS = int(os.getenv("EMBED_PROJECT_STAGE_FASTSUBSTR_MS", "200"))
+PROJ_STAGE_LINETOKENS_MS = int(os.getenv("EMBED_PROJECT_STAGE_LINETOKENS_MS", "140"))
+PROJ_STAGE_LINEEXACT_MS = int(os.getenv("EMBED_PROJECT_STAGE_LINEEXACT_MS", "160"))
+PROJ_STAGE_ASTMATCH_MS = int(os.getenv("EMBED_PROJECT_STAGE_ASTMATCH_MS", "220"))
+PROJ_STAGE_RAPIDFUZZ_MS = int(os.getenv("EMBED_PROJECT_STAGE_RAPIDFUZZ_MS", "240"))
+PROJ_STAGE_TOKENMATCH_MS = int(os.getenv("EMBED_PROJECT_STAGE_TOKENMATCH_MS", "200"))
 PROJ_STAGE_PRE_MS = int(os.getenv("EMBED_PROJECT_STAGE_PRE_MS", "220"))
 PROJ_STAGE_EXACT_MS = int(os.getenv("EMBED_PROJECT_STAGE_EXACT_MS", "200"))
 PROJ_STAGE_VECTOR_MS = int(os.getenv("EMBED_PROJECT_STAGE_VECTOR_MS", "250"))
