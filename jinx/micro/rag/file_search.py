@@ -8,6 +8,10 @@ ENV_OPENAI_VECTOR_STORE_ID: str = "OPENAI_VECTOR_STORE_ID"
 ENV_OPENAI_FORCE_FILE_SEARCH: str = "OPENAI_FORCE_FILE_SEARCH"
 
 
+def _is_on(val: str | None) -> bool:
+    return (val or "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _parse_vector_store_ids(raw: str) -> List[str]:
     """Parse a comma-separated list of vector store IDs.
 
@@ -33,8 +37,8 @@ def build_file_search_tools() -> Dict[str, Any]:
     raw_ids = os.getenv(ENV_OPENAI_VECTOR_STORE_ID, "")
     vector_store_ids = _parse_vector_store_ids(raw_ids)
 
-    # Set to "true" (case-insensitive) to force File Search; anything else -> off
-    force_file_search = os.getenv(ENV_OPENAI_FORCE_FILE_SEARCH, "").strip().lower() == "true"
+    # Force File Search by default when vector_store_ids are present; can be disabled via env
+    force_file_search = _is_on(os.getenv(ENV_OPENAI_FORCE_FILE_SEARCH, "1"))
 
     if not vector_store_ids:
         return {}

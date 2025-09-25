@@ -8,7 +8,8 @@ def _is_on(val: str | None) -> bool:
 
 
 # Core toggles and parameters
-ENABLE = _is_on(os.getenv("EMBED_PROJECT_ENABLE"))
+# Default to enabled if the env var is absent, so embeddings are always on by default
+ENABLE = _is_on(os.getenv("EMBED_PROJECT_ENABLE", "1"))
 ROOT = os.getenv("EMBED_PROJECT_ROOT", os.getcwd())
 SCAN_INTERVAL_MS = int(os.getenv("EMBED_PROJECT_SCAN_INTERVAL_MS", "2500"))
 MAX_CONCURRENCY = int(os.getenv("EMBED_PROJECT_MAX_CONCURRENCY", "2"))

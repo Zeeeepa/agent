@@ -123,6 +123,16 @@ async def retrieve_project_top_k(query: str, k: int | None = None, *, max_time_m
             hits = []
         return (hits[:k_eff]) if hits else None
 
+    async def _run_sync_stage(stage_fn, query: str, k_arg: int, cap_ms: int):
+        rem = _bounded(_time_left(), cap_ms)
+        def _call():
+            try:
+                return stage_fn(query, k_arg, max_time_ms=rem)
+            except Exception:
+                return []
+        hits = await asyncio.to_thread(_call)
+        return (hits[:k_arg]) if hits else None
+
     # Prefer embeddings by default: start vector similarity immediately (in parallel)
     try:
         rem_vec0 = _bounded(_time_left(), PROJ_STAGE_VECTOR_MS)
@@ -131,77 +141,59 @@ async def retrieve_project_top_k(query: str, k: int | None = None, *, max_time_m
         vec_task = asyncio.create_task(asyncio.sleep(0.0))  # type: ignore
 
     # Stage -2.5: Python token-sequence exact subsequence match (very precise)
-    try:
-        rem_tm = _bounded(_time_left(), PROJ_STAGE_TOKENMATCH_MS)
-        tm_hits = stage_tokenmatch_hits(q_core, (k_eff if accumulate else 1), max_time_ms=rem_tm)
-    except Exception:
-        tm_hits = []
+    tm_hits = await _run_sync_stage(stage_tokenmatch_hits, q_core, (k_eff if accumulate else 1), PROJ_STAGE_TOKENMATCH_MS)
     if tm_hits:
         if accumulate:
             _merge(tm_hits)
         else:
             return tm_hits[:1]
+    await asyncio.sleep(0)
 
     # Stage -2.4: whitespace-insensitive literal line match (precise)
-    try:
-        rem_le = _bounded(_time_left(), PROJ_STAGE_LINEEXACT_MS)
-        le_hits = stage_lineexact_hits(q_core, (k_eff if accumulate else 1), max_time_ms=rem_le)
-    except Exception:
-        le_hits = []
+    le_hits = await _run_sync_stage(stage_lineexact_hits, q_core, (k_eff if accumulate else 1), PROJ_STAGE_LINEEXACT_MS)
     if le_hits:
         if accumulate:
             _merge(le_hits)
         else:
             return le_hits[:1]
+    await asyncio.sleep(0)
 
     # Stage -2.3: AST shape matching (precise structure)
-    try:
-        rem_am = _bounded(_time_left(), PROJ_STAGE_ASTMATCH_MS)
-        am_hits = stage_astmatch_hits(q_core, (k_eff if accumulate else 1), max_time_ms=rem_am)
-    except Exception:
-        am_hits = []
+    am_hits = await _run_sync_stage(stage_astmatch_hits, q_core, (k_eff if accumulate else 1), PROJ_STAGE_ASTMATCH_MS)
     if am_hits:
         if accumulate:
             _merge(am_hits)
         else:
             return am_hits[:1]
+    await asyncio.sleep(0)
 
     # Stage -2.25: RapidFuzz approximate match (robust, still precise-ish)
-    try:
-        rem_rf = _bounded(_time_left(), PROJ_STAGE_RAPIDFUZZ_MS)
-        rf_hits = stage_rapidfuzz_hits(q_core, (k_eff if accumulate else 1), max_time_ms=rem_rf)
-    except Exception:
-        rf_hits = []
+    rf_hits = await _run_sync_stage(stage_rapidfuzz_hits, q_core, (k_eff if accumulate else 1), PROJ_STAGE_RAPIDFUZZ_MS)
     if rf_hits:
         if accumulate:
             _merge(rf_hits)
         else:
             return rf_hits[:1]
+    await asyncio.sleep(0)
 
     # Stage -2.2: fast substring search using code-core/anchors (very cheap)
     # Use k=1 normally; allow more in exhaustive mode
-    try:
-        rem_fs = _bounded(_time_left(), PROJ_STAGE_FASTSUBSTR_MS)
-        fs_hits = stage_fastsubstr_hits(q, (k_eff if accumulate else 1), max_time_ms=rem_fs)
-    except Exception:
-        fs_hits = []
+    fs_hits = await _run_sync_stage(stage_fastsubstr_hits, q, (k_eff if accumulate else 1), PROJ_STAGE_FASTSUBSTR_MS)
     if fs_hits:
         if accumulate:
             _merge(fs_hits)
         else:
             return fs_hits[:1]
+    await asyncio.sleep(0)
 
     # Stage -2.15: line-level all-anchors match (very cheap)
-    try:
-        rem_lt = _bounded(_time_left(), PROJ_STAGE_LINETOKENS_MS)
-        lt_hits = stage_linetokens_hits(q, (k_eff if accumulate else 1), max_time_ms=rem_lt)
-    except Exception:
-        lt_hits = []
+    lt_hits = await _run_sync_stage(stage_linetokens_hits, q, (k_eff if accumulate else 1), PROJ_STAGE_LINETOKENS_MS)
     if lt_hits:
         if accumulate:
             _merge(lt_hits)
         else:
             return lt_hits[:1]
+    await asyncio.sleep(0)
 
     # Quick router: if query looks like an assignment/comprehension, try PyFlow early
     try:
@@ -214,16 +206,13 @@ async def retrieve_project_top_k(query: str, k: int | None = None, *, max_time_m
         assign_like = False
         comp_like = False
     if assign_like or comp_like:
-        try:
-            rem_pf = _bounded(_time_left(), PROJ_STAGE_PYFLOW_MS)
-            pf0 = stage_pyflow_hits(q_core, (k_eff if accumulate else 1), max_time_ms=rem_pf)
-        except Exception:
-            pf0 = []
+        pf0 = await _run_sync_stage(stage_pyflow_hits, q_core, (k_eff if accumulate else 1), PROJ_STAGE_PYFLOW_MS)
         if pf0:
             if accumulate:
                 _merge(pf0)
             else:
                 return pf0[:1]
+        await asyncio.sleep(0)
 
     # Await embeddings vector search and prefer its hits if present
     try:
@@ -235,95 +224,106 @@ async def retrieve_project_top_k(query: str, k: int | None = None, *, max_time_m
             _merge(vec_hits0)
         else:
             return vec_hits0[:k_eff]
+    await asyncio.sleep(0)
 
     # Stage -3: parse traceback-like text for exact file/line windows (fast and precise)
-    tb_hits = _run(stage_traceback_hits, PROJ_STAGE_TB_MS)
+    tb_hits = await _run_sync_stage(stage_traceback_hits, q, k_eff, PROJ_STAGE_TB_MS)
     if tb_hits:
         if accumulate:
             _merge(tb_hits)
         else:
             return tb_hits
+    await asyncio.sleep(0)
 
     # Stage -2: Python AST-driven call-site detection (very precise for Python queries)
-    ast_hits = _run(stage_pyast_hits, PROJ_STAGE_PYAST_MS)
+    ast_hits = await _run_sync_stage(stage_pyast_hits, q, k_eff, PROJ_STAGE_PYAST_MS)
     if ast_hits:
         if accumulate:
             _merge(ast_hits)
         else:
             return ast_hits
+    await asyncio.sleep(0)
 
     # Stage -1.8: Python docstring scan (precise for doc/comment queries)
-    pydoc_hits = _run(stage_pydoc_hits, PROJ_STAGE_PYDOC_MS)
+    pydoc_hits = await _run_sync_stage(stage_pydoc_hits, q, k_eff, PROJ_STAGE_PYDOC_MS)
     if pydoc_hits:
         if accumulate:
             _merge(pydoc_hits)
         else:
             return pydoc_hits
+    await asyncio.sleep(0)
 
     # Stage -1.75: Python string literals (error/log/message fragments, f-strings)
-    pl_hits = _run(stage_pyliterals_hits, PROJ_STAGE_PYLITERALS_MS)
+    pl_hits = await _run_sync_stage(stage_pyliterals_hits, q, k_eff, PROJ_STAGE_PYLITERALS_MS)
     if pl_hits:
         if accumulate:
             _merge(pl_hits)
         else:
             return pl_hits
+    await asyncio.sleep(0)
 
     # Stage -1.7: Python return/call flow patterns (e.g., 'return db.get(rel_path)')
-    pyflow_hits = _run(stage_pyflow_hits, PROJ_STAGE_PYFLOW_MS)
+    pyflow_hits = await _run_sync_stage(stage_pyflow_hits, q, k_eff, PROJ_STAGE_PYFLOW_MS)
     if pyflow_hits:
         if accumulate:
             _merge(pyflow_hits)
         else:
             return pyflow_hits
+    await asyncio.sleep(0)
 
     # Stage -1.6: libcst structural patterns (broad Python constructs)
-    cst_hits = _run(stage_libcst_hits, PROJ_STAGE_LIBCST_MS)
+    cst_hits = await _run_sync_stage(stage_libcst_hits, q, k_eff, PROJ_STAGE_LIBCST_MS)
     if cst_hits:
         if accumulate:
             _merge(cst_hits)
         else:
             return cst_hits
+    await asyncio.sleep(0)
 
     # Stage -1.5: optional Jedi-driven identifier/reference discovery (Python)
-    jedi_hits = _run(stage_jedi_hits, PROJ_STAGE_JEDI_MS)
+    jedi_hits = await _run_sync_stage(stage_jedi_hits, q, k_eff, PROJ_STAGE_JEDI_MS)
     if jedi_hits:
         if accumulate:
             _merge(jedi_hits)
         else:
             return jedi_hits
+    await asyncio.sleep(0)
 
     # Stage -1.4: fuzzy regex phrase matching (optional dependency 'regex')
-    rx_hits = _run(stage_regex_hits, PROJ_STAGE_REGEX_MS)
+    rx_hits = await _run_sync_stage(stage_regex_hits, q, k_eff, PROJ_STAGE_REGEX_MS)
     if rx_hits:
         if accumulate:
             _merge(rx_hits)
         else:
             return rx_hits
+    await asyncio.sleep(0)
 
     # Stage -1: direct text scan in files (fast path for identifiers not present in previews/terms)
     # Dynamic cap for pre-scan based on code-ish query
     low_q = q.lower()
     codey = any(sym in q for sym in "=[](){}.:,") or any(kw in low_q for kw in ["def ", "class ", "import ", "from ", "return ", "async ", "await "])
     cap_pre = int(PROJ_STAGE_PRE_MS * 2) if codey else PROJ_STAGE_PRE_MS
-    txt_hits = _run(stage_textscan_hits, cap_pre)
+    txt_hits = await _run_sync_stage(stage_textscan_hits, q, k_eff, cap_pre)
     if txt_hits:
         if accumulate:
             _merge(txt_hits)
         else:
             return txt_hits
+    await asyncio.sleep(0)
 
     # Stage 0: exact/identifier substring hits (fast)
-    exact = _run(stage_exact_hits, PROJ_STAGE_EXACT_MS)
+    exact = await _run_sync_stage(stage_exact_hits, q, k_eff, PROJ_STAGE_EXACT_MS)
     if exact:
         if accumulate:
             _merge(exact)
         else:
             return exact
+    await asyncio.sleep(0)
 
     # (Vector similarity already awaited above.)
 
     # Stage 2: keyword/substring fallback
-    kw = _run(stage_keyword_hits, PROJ_STAGE_KEYWORD_MS) or []
+    kw = (await _run_sync_stage(stage_keyword_hits, q, k_eff, PROJ_STAGE_KEYWORD_MS)) or []
     if accumulate:
         _merge(kw)
         # Return deduped, score-sorted
@@ -352,7 +352,7 @@ async def build_project_context_for(query: str, *, k: int | None = None, max_cha
     full_scope_used = 0
     qlow = (query or "").lower()
     codey_query = any(sym in (query or "") for sym in "=[](){}.:,") or any(kw in qlow for kw in ["def ", "class ", "import ", "from ", "return ", "async ", "await ", " for ", " in ", " = "])
-    for score, file_rel, obj in hits_sorted:
+    for idx, (score, file_rel, obj) in enumerate(hits_sorted):
         meta = obj.get("meta", {})
         pv = (meta.get("text_preview") or "").strip()
         if pv and pv in seen:
@@ -363,13 +363,16 @@ async def build_project_context_for(query: str, *, k: int | None = None, max_cha
         prefer_full = PROJ_ALWAYS_FULL_PY_SCOPE and (
             PROJ_FULL_SCOPE_TOP_N <= 0 or (full_scope_used < PROJ_FULL_SCOPE_TOP_N)
         )
-        header, code_block, use_ls, use_le, is_full_scope = build_snippet(
-            file_rel,
-            meta,
-            query,
-            max_chars=PROJ_SNIPPET_PER_HIT_CHARS,
-            prefer_full_scope=prefer_full,
-            expand_callees=True,
+        # Build snippet off the event loop (file reads, scope detection)
+        header, code_block, use_ls, use_le, is_full_scope = await asyncio.to_thread(
+            lambda: build_snippet(
+                file_rel,
+                meta,
+                query,
+                max_chars=PROJ_SNIPPET_PER_HIT_CHARS,
+                prefer_full_scope=prefer_full,
+                expand_callees=True,
+            )
         )
         snippet_text = f"{header}\n{code_block}"
         # Dedupe snippets by header only (permit identical code bodies from different files)
@@ -388,28 +391,42 @@ async def build_project_context_for(query: str, *, k: int | None = None, max_cha
         parts.append(snippet_text)
         if is_full_scope:
             full_scope_used += 1
+        # Periodically yield while assembling snippets
+        if (idx % 2) == 1:
+            await asyncio.sleep(0)
 
         # Optionally add a couple of usage references for the enclosing symbol (Python only), minimal format
         try:
-            # Load file text for symbol resolution
-            file_text = ""
-            try:
-                with open(os.path.join(ROOT, file_rel), 'r', encoding='utf-8', errors='ignore') as _f:
-                    file_text = _f.read()
-            except Exception:
-                file_text = ""
-            if file_rel.endswith('.py') and file_text:
-                cand_line = int((use_ls + use_le) // 2) if (use_ls and use_le) else int(use_ls or use_le or 0)
-                sym_name, sym_kind = get_python_symbol_at_line(file_text, cand_line)  # noqa: F841
-                if sym_name:
-                    usages = find_usages_in_project(sym_name, file_rel, limit=PROJ_USAGE_REFS_LIMIT, around=PROJ_SNIPPET_AROUND)
-                    for fr, ua, ub, usnip, ulang in usages:
-                        hdr = f"[{fr}:{ua}-{ub}]"
-                        if hdr in refs_headers_seen:
-                            continue
-                        refs_headers_seen.add(hdr)
-                        block = f"```{ulang}\n{usnip}\n```" if ulang else f"```\n{usnip}\n```"
-                        refs_parts.append(f"{hdr}\n{block}")
+            async def _collect_usages() -> list[tuple[str, str]]:
+                def _work() -> list[tuple[str, str]]:
+                    out: list[tuple[str, str]] = []
+                    try:
+                        file_text = ""
+                        try:
+                            with open(os.path.join(ROOT, file_rel), 'r', encoding='utf-8', errors='ignore') as _f:
+                                file_text = _f.read()
+                        except Exception:
+                            file_text = ""
+                        if file_rel.endswith('.py') and file_text:
+                            cand_line = int((use_ls + use_le) // 2) if (use_ls and use_le) else int(use_ls or use_le or 0)
+                            sym_name, sym_kind = get_python_symbol_at_line(file_text, cand_line)  # noqa: F841
+                            if sym_name:
+                                usages = find_usages_in_project(sym_name, file_rel, limit=PROJ_USAGE_REFS_LIMIT, around=PROJ_SNIPPET_AROUND)
+                                for fr, ua, ub, usnip, ulang in usages:
+                                    hdr = f"[{fr}:{ua}-{ub}]"
+                                    block = f"```{ulang}\n{usnip}\n```" if ulang else f"```\n{usnip}\n```"
+                                    out.append((hdr, block))
+                    except Exception:
+                        return out
+                    return out
+                return await asyncio.to_thread(_work)
+
+            pairs = await _collect_usages()
+            for hdr, block in pairs:
+                if hdr in refs_headers_seen:
+                    continue
+                refs_headers_seen.add(hdr)
+                refs_parts.append(f"{hdr}\n{block}")
         except Exception:
             pass
         # Do not hard-break here; total budget enforced above
