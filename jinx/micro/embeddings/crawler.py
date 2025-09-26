@@ -6,6 +6,7 @@ from typing import Callable, Awaitable, Dict, Set
 
 from jinx.log_paths import SANDBOX_DIR
 import time
+from jinx.async_utils.rt import rt_section
 
 # Max lines per second per sandbox file to process (others dropped). Tunable via env.
 _SANDBOX_MAX_LPS = int(os.getenv("EMBED_SANDBOX_MAX_LPS", "5"))
@@ -90,24 +91,29 @@ async def _tail_file(path: str, *, source: str, cb: Callback) -> None:
         # Rate limiting state per file
         win_start = time.time()
         processed = 0
-        while True:
-            line = f.readline()
-            if not line:
-                await asyncio.sleep(0.2)
-                continue
-            line = line.strip()
-            if line:
-                # Apply simple token bucket for sandbox sources
-                if source.startswith("sandbox/") and _SANDBOX_MAX_LPS > 0:
-                    now = time.time()
-                    if now - win_start >= 1.0:
-                        win_start = now
-                        processed = 0
-                    if processed >= _SANDBOX_MAX_LPS:
-                        # Drop extra lines in the current 1s window
-                        continue
-                    processed += 1
-                await cb(line, source, "line")
+        budget_ms = int(os.getenv("JINX_HARD_RT_BUDGET_MS", "40"))
+        async with rt_section(budget_ms) as rt:
+            while True:
+                line = f.readline()
+                if not line:
+                    await asyncio.sleep(0.2)
+                    await rt.tick()
+                    continue
+                line = line.strip()
+                if line:
+                    # Apply simple token bucket for sandbox sources
+                    if source.startswith("sandbox/") and _SANDBOX_MAX_LPS > 0:
+                        now = time.time()
+                        if now - win_start >= 1.0:
+                            win_start = now
+                            processed = 0
+                        if processed >= _SANDBOX_MAX_LPS:
+                            # Drop extra lines in the current 1s window
+                            await rt.tick()
+                            continue
+                        processed += 1
+                    await cb(line, source, "line")
+                await rt.tick()
 
 
 async def _watch_sandbox(cb: Callback) -> None:
@@ -122,33 +128,37 @@ async def _watch_sandbox(cb: Callback) -> None:
         tasks[p] = asyncio.create_task(_tail_file(p, source=f"sandbox/{os.path.basename(p)}", cb=cb))
 
     try:
-        while True:
-            try:
-                entries = [
-                    os.path.join(SANDBOX_DIR, x)
-                    for x in os.listdir(SANDBOX_DIR)
-                    if x.lower().endswith(".log")
-                ]
-            except FileNotFoundError:
-                entries = []
-
-            for p in entries:
+        budget_ms = int(os.getenv("JINX_HARD_RT_BUDGET_MS", "40"))
+        async with rt_section(budget_ms) as rt:
+            while True:
                 try:
-                    st = os.stat(p)
-                    mtime = int(st.st_mtime)
+                    entries = [
+                        os.path.join(SANDBOX_DIR, x)
+                        for x in os.listdir(SANDBOX_DIR)
+                        if x.lower().endswith(".log")
+                    ]
                 except FileNotFoundError:
-                    continue
-                if p not in known or known[p] != mtime:
-                    known[p] = mtime
-                    await spawn_tail(p)
+                    entries = []
 
-            # Reap finished
-            dead = [k for k, t in tasks.items() if t.done()]
-            for k in dead:
-                tasks.pop(k, None)
-                tailed.discard(k)
+                for p in entries:
+                    try:
+                        st = os.stat(p)
+                        mtime = int(st.st_mtime)
+                    except FileNotFoundError:
+                        await rt.tick()
+                        continue
+                    if p not in known or known[p] != mtime:
+                        known[p] = mtime
+                        await spawn_tail(p)
+                    await rt.tick()
 
-            await asyncio.sleep(0.7)
+                # Reap finished
+                dead = [k for k, t in tasks.items() if t.done()]
+                for k in dead:
+                    tasks.pop(k, None)
+                    tailed.discard(k)
+                await asyncio.sleep(0.7)
+                await rt.tick()
     finally:
         for t in tasks.values():
             t.cancel()

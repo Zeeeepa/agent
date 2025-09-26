@@ -4,6 +4,7 @@ import asyncio
 import os
 import time
 from typing import Dict, List, Tuple
+import jinx.state as jx_state
 
 from .project_paths import ensure_project_dirs, PROJECT_INDEX_DIR, safe_rel_path
 from .project_hashdb import load_hash_db, save_hash_db, get_record
@@ -93,6 +94,8 @@ class ProjectEmbeddingsService:
                     except Exception:
                         pass
             await asyncio.sleep(0)
+            if jx_state.throttle_event.is_set():
+                await asyncio.sleep(0.02)
         # Final drain
         if pending:
             for t in asyncio.as_completed(pending):
@@ -126,6 +129,8 @@ class ProjectEmbeddingsService:
                 while True:
                     # Batch events for a short period to coalesce bursts
                     await asyncio.sleep(0.15)
+                    if jx_state.throttle_event.is_set():
+                        await asyncio.sleep(0.02)
                     drained = drain_queue(changes_q)
                     mutated = False
                     # Periodic reconcile even if queue is empty
@@ -249,6 +254,8 @@ class ProjectEmbeddingsService:
                             except Exception:
                                 pass
                     await asyncio.sleep(0)
+                    if jx_state.throttle_event.is_set():
+                        await asyncio.sleep(0.02)
                 if scan_pending:
                     for t in asyncio.as_completed(scan_pending):
                         try:
@@ -264,6 +271,8 @@ class ProjectEmbeddingsService:
                 elapsed_ms = (time.perf_counter() - t0) * 1000.0
                 wait_ms = max(50.0, SCAN_INTERVAL_MS - elapsed_ms)
                 await asyncio.sleep(wait_ms / 1000.0)
+                if jx_state.throttle_event.is_set():
+                    await asyncio.sleep(0.02)
 
 
 def start_project_embeddings_task(root: str | None = None) -> asyncio.Task[None]:

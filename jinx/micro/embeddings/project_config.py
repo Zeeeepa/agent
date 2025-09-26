@@ -7,12 +7,18 @@ def _is_on(val: str | None) -> bool:
     return (val or "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _auto_max_concurrency() -> int:
+    cpus = os.cpu_count() or 2
+    # Scale modestly with CPU to reduce IO/memory pressure
+    return max(1, min(8, cpus // 2))
+
+
 # Core toggles and parameters
 # Default to enabled if the env var is absent, so embeddings are always on by default
 ENABLE = _is_on(os.getenv("EMBED_PROJECT_ENABLE", "1"))
 ROOT = os.getenv("EMBED_PROJECT_ROOT", os.getcwd())
 SCAN_INTERVAL_MS = int(os.getenv("EMBED_PROJECT_SCAN_INTERVAL_MS", "2500"))
-MAX_CONCURRENCY = int(os.getenv("EMBED_PROJECT_MAX_CONCURRENCY", "2"))
+MAX_CONCURRENCY = int(os.getenv("EMBED_PROJECT_MAX_CONCURRENCY", str(_auto_max_concurrency())))
 USE_WATCHDOG = _is_on(os.getenv("EMBED_PROJECT_USE_WATCHDOG", "1"))
 MAX_FILE_BYTES = int(os.getenv("EMBED_PROJECT_MAX_FILE_BYTES", str(1_500_000)))
 RECONCILE_SEC = int(os.getenv("EMBED_PROJECT_RECONCILE_SEC", "60"))

@@ -25,3 +25,6 @@ OPENAI_REQUESTS_DIR_GENERAL: str = os.path.join("log", "openai", "general")
 
 # Directory for memory optimizer OpenAI request dumps (one file per request)
 OPENAI_REQUESTS_DIR_MEMORY: str = os.path.join("log", "openai", "memory")
+
+# Autotune persisted state
+AUTOTUNE_STATE: str = os.path.join("log", "autotune_state.json")

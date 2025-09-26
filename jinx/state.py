@@ -19,3 +19,7 @@ boom_limit: int = int(os.getenv("TIMEOUT", "30"))
 
 # Global shutdown event set when pulse depletes or an emergency stop is requested
 shutdown_event: asyncio.Event = asyncio.Event()
+
+# Throttle event used by autotune to signal system saturation.
+# Components may slow down or defer heavy work while this is set.
+throttle_event: asyncio.Event = asyncio.Event()

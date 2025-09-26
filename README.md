@@ -26,7 +26,7 @@ Enterprise standards. Minimal surface area. Maximum signal. Licensed under MIT.
 - Usage Notes
 - Architecture Overview
 - Safety Model
-- Runtime Flow
+- **Runtime Flow**
 - Development Guide
 - License
 - Security & Compliance
@@ -101,11 +101,6 @@ From a local clone:
 python jinx.py
 ```
 
-Alternatively:
-```
-python -m jinx
-```
-
 ## 📚 Usage Notes
 
 - Place your OpenAI API key in `.env` or system env before start
@@ -154,10 +149,11 @@ The runtime is layered, async-first, and auditable:
 
 ### Runtime Flow
 
-1. Input received; embeddings context built for the query.
+1. Input received into a bounded queue; optional priority dispatcher preserves responsiveness.
 2. Header assembled: `<embeddings_context>` + `<evergreen>` + `<memory>` + optional `<task>/<error>`.
-3. Model called; outputs are parsed for executable blocks.
+3. Model called; outputs are parsed for executable blocks. Blocking calls run in a sized threadpool.
 4. Code runs in sandbox; outputs and tails are surfaced; error pulse decays on failures.
+5. Background workers supervised with auto-restart and bounded backoff.
 
 ## 🛠️ Development Guide
 
