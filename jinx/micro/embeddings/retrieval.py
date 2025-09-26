@@ -91,7 +91,8 @@ async def retrieve_top_k(query: str, k: int | None = None, *, max_time_ms: int |
         return scored[:k_eff]
 
     # 2) Fallback: scan persisted files (bounded and time-guarded)
-    for src, obj in _iter_items():
+    items = await asyncio.to_thread(_iter_items)
+    for idx, (src, obj) in enumerate(items):
         vec = obj.get("embedding") or []
         meta = obj.get("meta", {})
         src_l = (src or "").strip().lower()
@@ -118,6 +119,9 @@ async def retrieve_top_k(query: str, k: int | None = None, *, max_time_ms: int |
             break
         if max_time_ms is not None and (time.perf_counter() - t0) * 1000.0 > max_time_ms:
             break
+        # Periodically yield to keep event loop responsive
+        if (idx % 50) == 49:
+            await asyncio.sleep(0)
     scored.sort(key=lambda x: x[0], reverse=True)
     return scored[:k_eff]
 

@@ -43,32 +43,59 @@ class ProjectEmbeddingsService:
         # Initial delay to let app start
         await asyncio.sleep(0.2)
 
-        # One initial full scan to build baseline
+        # One initial full scan to build baseline (cooperative batching)
         mutated = False
-        tasks0: List[asyncio.Task] = []
-        for abs_p, rel_p in iter_candidate_files(
+        pending: set[asyncio.Task] = set()
+        def _next_batch(root: str, nmax: int):
+            it = iter_candidate_files(
+                root,
+                include_exts=INCLUDE_EXTS,
+                exclude_dirs=EXCLUDE_DIRS,
+                max_file_bytes=MAX_FILE_BYTES,
+            )
+            out = []
+            for _ in range(nmax):
+                try:
+                    out.append(next(it))
+                except StopIteration:
+                    break
+            return it, out
+        # Use a manual iteration to allow yielding between batches
+        it = iter_candidate_files(
             self.root,
             include_exts=INCLUDE_EXTS,
             exclude_dirs=EXCLUDE_DIRS,
             max_file_bytes=MAX_FILE_BYTES,
-        ):
-            # Prefilter by mtime to avoid unnecessary tasks
-            try:
-                st = os.stat(abs_p)
-                mtime = float(st.st_mtime)
-            except FileNotFoundError:
-                continue
-            rec = get_record(db, rel_p) or {}
-            prev_m = float(rec.get("mtime", 0.0) or 0.0)
-            # Also schedule if artifacts missing
-            safe = safe_rel_path(rel_p)
-            index_path = os.path.join(PROJECT_INDEX_DIR, f"{safe}.json")
-            artifacts_ok = os.path.exists(index_path)
-            if prev_m >= mtime and rec.get("sha") and artifacts_ok:
-                continue
-            tasks0.append(asyncio.create_task(embed_if_changed(db, abs_p, rel_p, sem=sem)))
-        if tasks0:
-            for t in asyncio.as_completed(tasks0):
+        )
+        async def _get_batch(gen, nmax: int):
+            def _pull(gen_local, n_local):
+                out_local = []
+                for _ in range(n_local):
+                    try:
+                        out_local.append(next(gen_local))
+                    except StopIteration:
+                        break
+                return out_local
+            return await asyncio.to_thread(_pull, gen, 256)
+        while True:
+            batch = await _get_batch(it, 256)
+            if not batch:
+                break
+            for abs_p, rel_p in batch:
+                pending.add(asyncio.create_task(embed_if_changed(db, abs_p, rel_p, sem=sem)))
+            # Drain some tasks to avoid unbounded growth
+            while len(pending) > 64:
+                done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                for t in done:
+                    try:
+                        if await t:
+                            mutated = True
+                    except Exception:
+                        pass
+            await asyncio.sleep(0)
+        # Final drain
+        if pending:
+            for t in asyncio.as_completed(pending):
                 try:
                     if await t:
                         mutated = True
@@ -147,28 +174,30 @@ class ProjectEmbeddingsService:
 
                     # Reconcile pass (scan mtime & missing artifacts) on schedule
                     if need_reconcile:
-                        recon_tasks: List[asyncio.Task] = []
-                        for abs_p, rel_p in iter_candidate_files(
+                        recon_pending: set[asyncio.Task] = set()
+                        it2 = iter_candidate_files(
                             self.root,
                             include_exts=INCLUDE_EXTS,
                             exclude_dirs=EXCLUDE_DIRS,
                             max_file_bytes=MAX_FILE_BYTES,
-                        ):
-                            try:
-                                st = os.stat(abs_p)
-                                mtime = float(st.st_mtime)
-                            except FileNotFoundError:
-                                continue
-                            rec = get_record(db, rel_p) or {}
-                            prev_m = float(rec.get("mtime", 0.0) or 0.0)
-                            safe = safe_rel_path(rel_p)
-                            index_path = os.path.join(PROJECT_INDEX_DIR, f"{safe}.json")
-                            artifacts_ok = os.path.exists(index_path)
-                            if prev_m >= mtime and rec.get("sha") and artifacts_ok:
-                                continue
-                            recon_tasks.append(asyncio.create_task(embed_if_changed(db, abs_p, rel_p, sem=sem)))
-                        if recon_tasks:
-                            for t in asyncio.as_completed(recon_tasks):
+                        )
+                        while True:
+                            batch2 = await asyncio.to_thread(lambda g, n: [next(g) for _ in range(n) if not hasattr(g, '__exhausted__')], it2, 128)
+                            if not batch2:
+                                break
+                            for abs_p, rel_p in batch2:
+                                recon_pending.add(asyncio.create_task(embed_if_changed(db, abs_p, rel_p, sem=sem)))
+                            while len(recon_pending) > 64:
+                                done, recon_pending = await asyncio.wait(recon_pending, return_when=asyncio.FIRST_COMPLETED)
+                                for t in done:
+                                    try:
+                                        if await t:
+                                            mutated = True
+                                    except Exception:
+                                        pass
+                            await asyncio.sleep(0)
+                        if recon_pending:
+                            for t in asyncio.as_completed(recon_pending):
                                 try:
                                     if await t:
                                         mutated = True
@@ -188,28 +217,40 @@ class ProjectEmbeddingsService:
             while True:
                 t0 = time.perf_counter()
                 mutated = False
-                scan_tasks: List[asyncio.Task] = []
-                for abs_p, rel_p in iter_candidate_files(
+                scan_pending: set[asyncio.Task] = set()
+                it3 = iter_candidate_files(
                     self.root,
                     include_exts=INCLUDE_EXTS,
                     exclude_dirs=EXCLUDE_DIRS,
                     max_file_bytes=MAX_FILE_BYTES,
-                ):
-                    try:
-                        st = os.stat(abs_p)
-                        mtime = float(st.st_mtime)
-                    except FileNotFoundError:
-                        continue
-                    rec = get_record(db, rel_p) or {}
-                    prev_m = float(rec.get("mtime", 0.0) or 0.0)
-                    safe = safe_rel_path(rel_p)
-                    index_path = os.path.join(PROJECT_INDEX_DIR, f"{safe}.json")
-                    artifacts_ok = os.path.exists(index_path)
-                    if prev_m >= mtime and rec.get("sha") and artifacts_ok:
-                        continue
-                    scan_tasks.append(asyncio.create_task(embed_if_changed(db, abs_p, rel_p, sem=sem)))
-                if scan_tasks:
-                    for t in asyncio.as_completed(scan_tasks):
+                )
+                async def _pull_batch(gen, nmax: int):
+                    def _pull_local(g, n):
+                        out = []
+                        for _ in range(n):
+                            try:
+                                out.append(next(g))
+                            except StopIteration:
+                                break
+                        return out
+                    return await asyncio.to_thread(_pull_local, gen, 256)
+                while True:
+                    batch3 = await _pull_batch(it3, 256)
+                    if not batch3:
+                        break
+                    for abs_p, rel_p in batch3:
+                        scan_pending.add(asyncio.create_task(embed_if_changed(db, abs_p, rel_p, sem=sem)))
+                    while len(scan_pending) > 64:
+                        done, scan_pending = await asyncio.wait(scan_pending, return_when=asyncio.FIRST_COMPLETED)
+                        for t in done:
+                            try:
+                                if await t:
+                                    mutated = True
+                            except Exception:
+                                pass
+                    await asyncio.sleep(0)
+                if scan_pending:
+                    for t in asyncio.as_completed(scan_pending):
                         try:
                             if await t:
                                 mutated = True

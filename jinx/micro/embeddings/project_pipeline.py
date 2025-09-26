@@ -93,9 +93,12 @@ async def embed_file(abs_path: str, rel_path: str, *, file_sha: str, prune_old: 
     file_dir = os.path.join(PROJECT_FILES_DIR, safe)
     os.makedirs(file_dir, exist_ok=True)
 
+    # Read file off the event loop
     try:
-        with open(abs_path, "r", encoding="utf-8", errors="ignore") as f:
-            text = f.read()
+        def _read_file() -> str:
+            with open(abs_path, "r", encoding="utf-8", errors="ignore") as f:
+                return f.read()
+        text = await asyncio.to_thread(_read_file)
     except Exception:
         # If unreadable, write an empty index and return
         index_path = os.path.join(PROJECT_INDEX_DIR, f"{safe}.json")
@@ -108,13 +111,15 @@ async def embed_file(abs_path: str, rel_path: str, *, file_sha: str, prune_old: 
             "file_terms": [],
         }
         try:
-            write_json_atomic(index_path, data)
+            await asyncio.to_thread(write_json_atomic, index_path, data)
         except Exception:
             pass
         return data
 
-    chunk_items: List[Chunk] = _chunk_text(text)
-    file_terms = _file_terms(text)
+    # Chunking and term extraction can be CPU-heavy; offload
+    def _chunk_and_terms(t: str) -> Tuple[List[Chunk], List[str]]:
+        return _chunk_text(t), _file_terms(t)
+    chunk_items, file_terms = await asyncio.to_thread(_chunk_and_terms, text)
 
     # Prepare unique chunks and batch-embed
     unique_inputs: List[Tuple[int, str, str, int, int]] = []  # (i, text, sha, line_start, line_end)
@@ -158,28 +163,30 @@ async def embed_file(abs_path: str, rel_path: str, *, file_sha: str, prune_old: 
     for _, payload in results:
         payload.get("meta", {})["chunks_total"] = total_unique
 
-    # Write new chunk files (atomic replace)
+    # Write new chunk files (atomic replace) off the event loop
+    write_tasks: List[asyncio.Task] = []
     for csha, payload in results:
         p = os.path.join(file_dir, f"{csha}.json")
-        try:
-            write_json_atomic(p, payload)
-        except Exception:
-            pass
+        write_tasks.append(asyncio.create_task(asyncio.to_thread(write_json_atomic, p, payload)))
+    if write_tasks:
+        await asyncio.gather(*write_tasks, return_exceptions=True)
 
     # Optionally prune old chunk files so we only keep current set
     if prune_old:
-        try:
-            keep = {f"{csha}.json" for csha, _ in results}
-            for fn in os.listdir(file_dir):
-                if fn.endswith(".json") and fn not in keep:
-                    try:
-                        os.remove(os.path.join(file_dir, fn))
-                    except Exception:
-                        pass
-        except FileNotFoundError:
-            pass
-        except Exception:
-            pass
+        keep = {f"{csha}.json" for csha, _ in results}
+        def _prune(dir_path: str, keep_names: set[str]) -> None:
+            try:
+                for fn in os.listdir(dir_path):
+                    if fn.endswith(".json") and fn not in keep_names:
+                        try:
+                            os.remove(os.path.join(dir_path, fn))
+                        except Exception:
+                            pass
+            except FileNotFoundError:
+                return
+            except Exception:
+                return
+        await asyncio.to_thread(_prune, file_dir, keep)
 
     # Write/overwrite index file
     index_path = os.path.join(PROJECT_INDEX_DIR, f"{safe}.json")
@@ -204,7 +211,7 @@ async def embed_file(abs_path: str, rel_path: str, *, file_sha: str, prune_old: 
     }
 
     try:
-        write_json_atomic(index_path, index_obj)
+        await asyncio.to_thread(write_json_atomic, index_path, index_obj)
     except Exception:
         pass
 

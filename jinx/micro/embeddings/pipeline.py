@@ -42,7 +42,13 @@ async def embed_text(text: str, *, source: str, kind: str = "text") -> Dict[str,
     if os.path.exists(item_path):
         # Already embedded; still record a touch in index
         try:
-            cached_obj = json.loads(open(item_path, "r", encoding="utf-8").read())
+            def _read_cached() -> dict | None:
+                try:
+                    with open(item_path, "r", encoding="utf-8") as r:
+                        return json.load(r)
+                except Exception:
+                    return None
+            cached_obj = await asyncio.to_thread(_read_cached)
         except Exception:
             cached_obj = None
         else:
@@ -55,10 +61,11 @@ async def embed_text(text: str, *, source: str, kind: str = "text") -> Dict[str,
             })
             # Also surface to recent cache for real-time retrieval
             try:
-                _recent.appendleft(cached_obj)
+                if cached_obj:
+                    _recent.appendleft(cached_obj)
             except Exception:
                 pass
-            return {"cached": True, **cached_obj}
+            return {"cached": True, **(cached_obj or {})}
 
     # Call OpenAI embeddings through existing client; use to_thread for sync SDK
     model = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
@@ -91,8 +98,13 @@ async def embed_text(text: str, *, source: str, kind: str = "text") -> Dict[str,
         "embedding": vec,
     }
 
-    with open(item_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False)
+    def _write_payload() -> None:
+        with open(item_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+    try:
+        await asyncio.to_thread(_write_payload)
+    except Exception:
+        pass
 
     await append_index(source, {
         "ts": meta["ts"],
