@@ -62,11 +62,21 @@ async def retrieve_top_k(query: str, k: int | None = None, *, max_time_ms: int |
     t0 = time.perf_counter()
 
     # 1) Fast-path: score in-memory recent items first
+    try:
+        state_boost = max(1.0, float(os.getenv("EMBED_STATE_BOOST", "1.1")))
+    except Exception:
+        state_boost = 1.1
+    try:
+        state_rec_mult = max(0.0, float(os.getenv("EMBED_STATE_RECENCY_MULT", "0.5")))
+    except Exception:
+        state_rec_mult = 0.5
+    short_q = (qlen <= int(os.getenv("JINX_CONTINUITY_SHORTLEN", "80")))
     for obj in iter_recent_items():
         vec = obj.get("embedding") or []
         meta = obj.get("meta", {})
         src_l = (meta.get("source") or "").strip().lower()
-        if not (src_l == "dialogue" or src_l.startswith("sandbox/")):
+        # Allow dialogue, sandbox/*, and state frames
+        if not (src_l == "dialogue" or src_l.startswith("sandbox/") or src_l == "state"):
             continue
         pv = (meta.get("text_preview") or "").strip()
         if len(pv) < MIN_PREVIEW_LEN or is_noise_text(pv):
@@ -78,6 +88,8 @@ async def retrieve_top_k(query: str, k: int | None = None, *, max_time_ms: int |
         age = max(0.0, now - ts)
         rec = 0.0 if RECENCY_WINDOW_SEC <= 0 else max(0.0, 1.0 - (age / RECENCY_WINDOW_SEC))
         score = 0.8 * sim + 0.2 * rec
+        if src_l == "state" and short_q:
+            score *= state_boost * (1.0 + state_rec_mult * rec)
         scored.append((score, meta.get("source", "recent"), obj))
         if len(scored) >= k_eff:
             break
@@ -98,8 +110,8 @@ async def retrieve_top_k(query: str, k: int | None = None, *, max_time_ms: int |
         src_l = (src or "").strip().lower()
         meta_src_l = (meta.get("source") or "").strip().lower()
         allow_src = (
-            src_l == "dialogue" or src_l.startswith("sandbox/") or
-            meta_src_l == "dialogue" or meta_src_l.startswith("sandbox/")
+            src_l == "dialogue" or src_l.startswith("sandbox/") or src_l == "state" or
+            meta_src_l == "dialogue" or meta_src_l.startswith("sandbox/") or meta_src_l == "state"
         )
         if not allow_src:
             continue
@@ -114,6 +126,8 @@ async def retrieve_top_k(query: str, k: int | None = None, *, max_time_ms: int |
         age = max(0.0, now - ts)
         rec = 0.0 if RECENCY_WINDOW_SEC <= 0 else max(0.0, 1.0 - (age / RECENCY_WINDOW_SEC))
         score = 0.8 * sim + 0.2 * rec
+        if (src_l == "state" or meta_src_l == "state") and short_q:
+            score *= state_boost * (1.0 + state_rec_mult * rec)
         scored.append((score, src, obj))
         if len(scored) >= k_eff:
             break

@@ -33,3 +33,7 @@ from . import chaos_bloom  # noqa: F401
 from . import jinxed_blueprint  # noqa: F401
 from . import memory_optimizer  # noqa: F401
 from . import burning_logic_recovery  # noqa: F401
+from . import planner_minjson  # noqa: F401
+from . import planner_reflectjson  # noqa: F401
+from . import planner_advisoryjson  # noqa: F401
+from . import planner_reflectadvisoryjson  # noqa: F401

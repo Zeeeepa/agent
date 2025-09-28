@@ -1,3 +1,6 @@
+# Jinx
+.jinx/
+
 # Environment
 .env*
 !**/.env.example

@@ -11,19 +11,50 @@ from jinx.conversation import build_chains, run_blocks
 from jinx.micro.ui.output import pretty_echo
 from jinx.micro.conversation.sandbox_view import show_sandbox_tail
 from jinx.micro.conversation.error_report import corrupt_report
-from jinx.embeddings.retrieval import build_context_for
-from jinx.embeddings.project_retrieval import build_project_context_for
-from jinx.embeddings.pipeline import embed_text
+from jinx.logger.file_logger import append_line as _log_append
+from jinx.log_paths import BLUE_WHISPERS
+from jinx.micro.embeddings.retrieval import build_context_for
+from jinx.micro.embeddings.project_retrieval import build_project_context_for
+from jinx.micro.embeddings.pipeline import embed_text
 from jinx.conversation.formatting import build_header, ensure_header_block_separation
 from jinx.micro.memory.storage import read_evergreen
 from jinx.micro.conversation.memory_sanitize import sanitize_transcript_for_memory
 from jinx.micro.embeddings.project_config import ENABLE as PROJ_EMB_ENABLE
 from jinx.micro.embeddings.project_paths import PROJECT_FILES_DIR
+from jinx.micro.llm.chains import build_planner_context
+from jinx.micro.llm.chain_persist import persist_memory
+from jinx.micro.runtime.api import ensure_runtime as _ensure_runtime
+from jinx.micro.runtime.bridge import start_bridge as _start_runtime_bridge
+from jinx.micro.llm.kernel_sanitizer import sanitize_kernels as _sanitize_kernels
+from jinx.micro.exec.executor import spike_exec as _spike_exec
+from jinx.safety import chaos_taboo as _chaos_taboo
+from jinx.micro.conversation.cont import (
+    augment_query_for_retrieval as _augment_query,
+    maybe_reuse_last_context as _reuse_proj_ctx,
+    save_last_context as _save_proj_ctx,
+    augment_task_text as _augment_task,
+    extract_anchors as _extract_anchors,
+    load_last_anchors as _load_last_anchors,
+    render_continuity_block as _render_cont_block,
+    last_agent_question as _last_q,
+    last_user_query as _last_u,
+    is_short_followup as _is_short,
+    detect_topic_shift as _topic_shift,
+    maybe_compact_state_frames as _compact_frames,
+)
+from jinx.micro.conversation.cont.classify import find_semantic_question as _find_semq
+from jinx.micro.conversation.state_frame import build_state_frame
 
 
 async def shatter(x: str, err: Optional[str] = None) -> None:
     """Drive a single conversation step and optionally handle an error context."""
     try:
+        # Ensure micro-program runtime and event bridge are active before any code execution
+        try:
+            await _ensure_runtime()
+            await _start_runtime_bridge()
+        except Exception:
+            pass
         # Append the user input to the transcript first to ensure ordering
         if x and x.strip():
             await blast_mem(x.strip())
@@ -39,14 +70,45 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
         # Build standardized header blocks in a stable order before the main chains
         # 1) <embeddings_context> from recent dialogue/sandbox using current input as query,
         #    plus project code embeddings context assembled from emb/ when available
+        # Continuity: augment retrieval query on short clarifications
+        topic_shifted = False
+        reuse_for_log = False
         try:
-            base_ctx = await build_context_for(x or synth or "")
+            q_raw = (x or synth or "")
+            continuity_on = str(os.getenv("JINX_CONTINUITY_ENABLE", "1")).lower() not in ("", "0", "false", "off", "no")
+            anchors = {}
+            if continuity_on:
+                try:
+                    cur = _extract_anchors(synth or "")
+                except Exception:
+                    cur = {}
+                # Optional: boost with semantic question detector (language-agnostic)
+                try:
+                    semq = await _find_semq(synth or "")
+                    if semq:
+                        qs = [semq]
+                        for qline in (cur.get("questions") or []):
+                            if qline != semq:
+                                qs.append(qline)
+                        cur["questions"] = qs
+                except Exception:
+                    pass
+                try:
+                    prev = await _load_last_anchors()
+                except Exception:
+                    prev = {}
+                # merge anchors (current first, then previous uniques), cap lists
+                anchors = {k: list(dict.fromkeys((cur.get(k) or []) + (prev.get(k) or [])))[:10] for k in set((cur or {}).keys()) | set((prev or {}).keys())}
+                eff_q = _augment_query(x or "", synth or "", anchors=anchors)
+            else:
+                eff_q = q_raw
+            base_ctx = await build_context_for(eff_q)
         except Exception:
             base_ctx = ""
         # Always build project context; retrieval enforces its own tight budgets
         proj_ctx = ""
         try:
-            _q = (x or synth or "")
+            _q = eff_q
             qlow = _q.lower()
             codey = any(sym in _q for sym in "=[](){}.:,") or any(kw in qlow for kw in ["def ", "class ", "import ", "from ", "return ", "async ", "await ", " for ", " in ", " = "])
             # If code-like, give a bit more budget on first attempt
@@ -55,9 +117,114 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
             if not proj_ctx:
                 # Cold-start fallback: retry with a larger time budget
                 proj_ctx = await build_project_context_for(_q, max_time_ms=2000)
+            # Continuity: if still empty and this is a short clarification, reuse last cached project context
+            if not proj_ctx:
+                reuse = ""
+                try:
+                    ts_check = str(os.getenv("JINX_TOPIC_SHIFT_CHECK", "1")).lower() not in ("", "0", "false", "off", "no")
+                    if ts_check and _is_short(x or ""):
+                        shifted = await _topic_shift(_q)
+                        topic_shifted = topic_shifted or bool(shifted)
+                        if not shifted:
+                            reuse = await _reuse_proj_ctx(x or "", proj_ctx, synth or "")
+                    else:
+                        reuse = await _reuse_proj_ctx(x or "", proj_ctx, synth or "")
+                except Exception:
+                    reuse = ""
+                if reuse:
+                    proj_ctx = reuse
+                    reuse_for_log = True
         except Exception:
             proj_ctx = ""
-        ctx = "\n".join([c for c in [base_ctx, proj_ctx] if c])
+        # Persist last project context snapshot for continuity cache
+        try:
+            await _save_proj_ctx(proj_ctx or "", anchors=anchors if 'anchors' in locals() else None)
+        except Exception:
+            pass
+        # Optional: planner-enhanced context (adds at most one extra LLM call + small retrieval)
+        plan_ctx = ""
+        try:
+            plan_ctx = await build_planner_context(_q)
+        except Exception:
+            plan_ctx = ""
+        # Optional continuity block for the main brain
+        try:
+            cont_block = _render_cont_block(
+                anchors if 'anchors' in locals() else None,
+                _last_q(synth or ""),
+                _last_u(synth or ""),
+                _is_short(x or ""),
+            )
+        except Exception:
+            cont_block = ""
+        ctx = "\n".join([c for c in [base_ctx, proj_ctx, plan_ctx, cont_block] if c])
+
+        # Optional: Preload sanitized <plan_kernels> code before final execution, guarded by env
+        try:
+            if str(os.getenv("JINX_KERNELS_PRELOAD", "0")).lower() not in ("", "0", "false", "off", "no") and plan_ctx:
+                pk = []
+                s = plan_ctx
+                pos = 0
+                ltag = "<plan_kernels>"; rtag = "</plan_kernels>"
+                while True:
+                    i = s.find(ltag, pos)
+                    if i == -1:
+                        break
+                    j = s.find(rtag, i)
+                    if j == -1:
+                        break
+                    body = s[i + len(ltag): j]
+                    pos = j + len(rtag)
+                    safe = _sanitize_kernels(body)
+                    if safe:
+                        pk.append(safe)
+                if pk:
+                    async def _preload_cb(err_msg):
+                        if err_msg:
+                            await bomb_log(f"kernel preload error: {err_msg}")
+                    for code in pk:
+                        try:
+                            await _spike_exec(code, _chaos_taboo, _preload_cb)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+        # Continuity: persist a compact state frame via embeddings for next turns
+        try:
+            if str(os.getenv("JINX_STATEFRAME_ENABLE", "1")).lower() not in ("", "0", "false", "off", "no"):
+                guid = plan_ctx or ""
+                state_frame = build_state_frame(
+                    user_text=(x or ""),
+                    synth=synth or "",
+                    anchors=anchors if 'anchors' in locals() else None,
+                    guidance=guid,
+                    cont_block=cont_block,
+                    error_summary=(err.strip() if err and isinstance(err, str) else ""),
+                )
+                if state_frame and state_frame.strip():
+                    # Deduplicate by content hash to avoid drift/bloat
+                    import hashlib as _hashlib
+                    from jinx.micro.conversation.cont import load_cache_meta as _load_meta, save_last_context_with_meta as _save_meta
+                    sha = _hashlib.sha256(state_frame.encode("utf-8", errors="ignore")).hexdigest()
+                    try:
+                        meta = await _load_meta()
+                    except Exception:
+                        meta = {}
+                    if (meta.get("frame_sha") or "") != sha:
+                        await embed_text(state_frame, source="state", kind="frame")
+                        # Also update meta with the frame hash to gate future duplicates
+                        try:
+                            await _save_meta(proj_ctx or "", anchors if 'anchors' in locals() else None, frame_sha=sha)
+                        except Exception:
+                            pass
+                # Attempt periodic concept compaction (fast no-op if not time)
+                try:
+                    await _compact_frames()
+                except Exception:
+                    pass
+        except Exception:
+            pass
         # 2) <memory> from transcript (exclude the latest user input line and sanitize)
         mem_text = sanitize_transcript_for_memory(synth or "", (x or "").strip())
         # 2.5) <evergreen> persistent durable facts
@@ -65,9 +232,32 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
             evergreen_text = (await read_evergreen()) or ""
         except Exception:
             evergreen_text = ""
+        # Continuity: optionally gate evergreen by topic shift on short follow-ups to avoid bleed
+        try:
+            if str(os.getenv("JINX_EVERGREEN_TOPIC_GUARD", "1")).lower() not in ("", "0", "false", "off", "no"):
+                if _is_short(x or ""):
+                    try:
+                        shifted = await _topic_shift(_q)
+                    except Exception:
+                        shifted = False
+                    topic_shifted = topic_shifted or bool(shifted)
+                    if shifted:
+                        evergreen_text = ""
+        except Exception:
+            pass
+        # Optional: persist memory snapshot as Markdown for project embeddings ingestion
+        try:
+            if (os.getenv("JINX_PERSIST_MEMORY", "1").strip().lower() not in ("", "0", "false", "off", "no")):
+                await persist_memory(mem_text, evergreen_text, user_text=(x or ""), plan_goal="")
+        except Exception:
+            pass
         # 3) <task> reflects the immediate objective: when handling an error,
-        #    avoid copying traceback or transcript into <task>
-        task_text = ("" if (err and err.strip()) else ((x.strip() if x and x.strip() else "")))
+        #    avoid copying traceback or transcript into <task>.
+        #    Continuity: combine short follow-ups with prior question to avoid truncation.
+        if err and err.strip():
+            task_text = ""
+        else:
+            task_text = _augment_task((x or ""), synth or "")
         # Optional <error> block carries execution or prior error details
         error_text = (err.strip() if err and err.strip() else None)
 
@@ -75,6 +265,14 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
         header_text = build_header(ctx, mem_text, task_text, error_text, evergreen_text)
         if header_text:
             chains = header_text + ("\n\n" + chains if chains else "")
+        # Continuity dev echo (optional): tiny trace line for observability
+        try:
+            if str(os.getenv("JINX_CONTINUITY_DEV_ECHO", "0")).lower() not in ("", "0", "false", "off", "no"):
+                sym_n = len(anchors.get("symbols", [])) if 'anchors' in locals() else 0
+                pth_n = len(anchors.get("paths", [])) if 'anchors' in locals() else 0
+                await _log_append(BLUE_WHISPERS, f"[CONT] short={int(_is_short(x or ''))} topic_shift={int(topic_shifted)} reuse={int(reuse_for_log)} sym={sym_n} path={pth_n}")
+        except Exception:
+            pass
         # If an error is present, enforce a decay hit to drive auto-fix loop
         if err and err.strip():
             decay = max(decay, 50)

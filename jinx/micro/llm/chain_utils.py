@@ -1,0 +1,176 @@
+from __future__ import annotations
+
+import os
+from typing import Any, Dict, List
+
+
+def truthy_env(name: str, default: str = "0") -> bool:
+    v = os.getenv(name, default)
+    return str(v).lower() not in ("", "0", "false", "off", "no")
+
+
+def extract_tagged_block(text: str, key: str, block: str) -> str:
+    """Extract content between <{block}_{key}> and </{block}_{key}>. Returns empty on failure."""
+    if not text or not key:
+        return ""
+    start_tag = f"<{block}_{key}>"
+    end_tag = f"</{block}_{key}>"
+    i = text.find(start_tag)
+    if i == -1:
+        return ""
+    j = text.find(end_tag, i + len(start_tag))
+    if j == -1:
+        return ""
+    return text[i + len(start_tag) : j].strip()
+
+
+def parse_planner_block(body: str) -> Dict[str, Any]:
+    """Parse line-based planner schema from a <machine_{key}> block.
+
+    Recognized keys:
+      goal:
+      plan.N.step / plan.N.why / plan.N.criteria (N=1..3)
+      sub.M (M=1..2)
+      risk.R (R=1..3)
+      note:
+      cortex.* (optional persona hints)
+      advisory extras (optional, advisory mode):
+        advice.do.N, advice.avoid.N, clarify.N, reminder.N, assume.N, context.N
+    """
+    # Env-tunable limits (counts only; lengths are free-form)
+    try:
+        max_plan = max(1, int(os.getenv("JINX_CHAINED_MAX_STEPS", "3")))
+    except Exception:
+        max_plan = 3
+    try:
+        max_subs = max(0, int(os.getenv("JINX_CHAINED_MAX_SUBS", "2")))
+    except Exception:
+        max_subs = 2
+    try:
+        max_risks = max(0, int(os.getenv("JINX_CHAINED_MAX_RISKS", "3")))
+    except Exception:
+        max_risks = 3
+    # Advisory extras limits
+    def _lim(name: str, default: str) -> int:
+        try:
+            return max(0, int(os.getenv(name, default)))
+        except Exception:
+            return int(default)
+    max_adv = _lim("JINX_CHAINED_MAX_ADVICE", "4")
+    max_clr = _lim("JINX_CHAINED_MAX_CLARIFY", "4")
+    max_rem = _lim("JINX_CHAINED_MAX_REMIND", "4")
+    max_ctx = _lim("JINX_CHAINED_MAX_CONTEXT", "4")
+    max_asm = _lim("JINX_CHAINED_MAX_ASSUME", "4")
+
+    goal = ""
+    note = ""
+    subs: List[str] = []
+    risks: List[str] = []
+    plan_steps: Dict[int, Dict[str, str]] = {}
+    cortex: Dict[str, str] = {}
+    advice_do: List[str] = []
+    advice_avoid: List[str] = []
+    clarifiers: List[str] = []
+    reminders: List[str] = []
+    assumptions: List[str] = []
+    contexts: List[str] = []
+    for raw in (body or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        # key: value
+        if ":" not in line:
+            continue
+        k, v = line.split(":", 1)
+        k = k.strip().lower()
+        v = v.strip()
+        if k == "goal" or k == "need":
+            if not goal:
+                goal = v
+            continue
+        if k == "note":
+            if not note:
+                note = v
+            continue
+        if k.startswith("cortex."):
+            # capture optional cortex.* lines verbatim
+            field = k.split(".", 1)[1] if "." in k else ""
+            if field and field not in cortex:
+                cortex[field] = v
+            continue
+        if k.startswith("sub."):
+            if len(subs) < max_subs and v:
+                subs.append(v)
+            continue
+        if k.startswith("risk."):
+            if len(risks) < max_risks and v:
+                risks.append(v)
+            continue
+        # Advisory extras
+        if k.startswith("advice.do."):
+            if len(advice_do) < max_adv and v:
+                advice_do.append(v)
+            continue
+        if k.startswith("advice.avoid."):
+            if len(advice_avoid) < max_adv and v:
+                advice_avoid.append(v)
+            continue
+        if k.startswith("clarify."):
+            if len(clarifiers) < max_clr and v:
+                clarifiers.append(v)
+            continue
+        if k.startswith("reminder."):
+            if len(reminders) < max_rem and v:
+                reminders.append(v)
+            continue
+        if k.startswith("assume."):
+            if len(assumptions) < max_asm and v:
+                assumptions.append(v)
+            continue
+        if k.startswith("context."):
+            if len(contexts) < max_ctx and v:
+                contexts.append(v)
+            continue
+        if k.startswith("plan."):
+            # plan.N.field
+            try:
+                _, idx_s, field = k.split(".", 2)
+                idx = int(idx_s)
+            except Exception:
+                continue
+            if idx < 1 or idx > max_plan:
+                continue
+            field = field.strip()
+            bucket = plan_steps.setdefault(idx, {"step": "", "why": "", "criteria": ""})
+            if field in bucket and not bucket[field]:
+                if field == "criteria":
+                    bucket[field] = v
+                elif field == "why":
+                    bucket[field] = v
+                elif field == "step":
+                    bucket[field] = v
+    # Normalize plan order
+    plan_out: List[Dict[str, str]] = []
+    for n in sorted(plan_steps.keys()):
+        d = plan_steps[n]
+        if any(d.values()):
+            plan_out.append({
+                "step": d.get("step", ""),
+                "why": d.get("why", ""),
+                "criteria": d.get("criteria", ""),
+            })
+    return {
+        "goal": goal,
+        "plan": plan_out[:max_plan],
+        "sub_queries": subs[:max_subs],
+        "risks": risks[:max_risks],
+        "note": note,
+        "cortex": cortex,
+        # advisory extras
+        "advice_do": advice_do,
+        "advice_avoid": advice_avoid,
+        "clarifiers": clarifiers,
+        "reminders": reminders,
+        "assumptions": assumptions,
+        "context": contexts,
+    }

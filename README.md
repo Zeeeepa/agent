@@ -141,41 +141,6 @@ The runtime is layered, async-first, and auditable:
 - **Logging**: targets defined in `jinx/log_paths.py`; OpenAI request dumps under `log/openai/*`
 - **Prompts**: configured via `jinx/config.py`, defined under `jinx/prompts/`
 
-### Safety Model (Heuristic "Seatbelt")
-
-- `jinx/codeexec` enforces prompt/validator constraints before execution.
-- On any violation or by design, code runs in the sandbox (`jinx/sandbox_service.py`).
-- Modules under `jinx/safety/*` and validators reduce risk of unsafe snippets. This is not a hard security boundary.
-
-### Runtime Flow
-
-1. Input received into a bounded queue; optional priority dispatcher preserves responsiveness.
-2. Header assembled: `<embeddings_context>` + `<evergreen>` + `<memory>` + optional `<task>/<error>`.
-3. Model called; outputs are parsed for executable blocks. Blocking calls run in a sized threadpool.
-4. Code runs in sandbox; outputs and tails are surfaced; error pulse decays on failures.
-5. Background workers supervised with auto-restart and bounded backoff.
-
-## 🛠️ Development Guide
-
-- **Python**: 3.11+ recommended.
-- **Environment**: Place `OPENAI_API_KEY` in `.env` or your environment; `jinx.bootstrap.load_env()` loads it.
-- **Start**: `python jinx.py`
-- **Logging** (see `jinx/log_paths.py`):
-  - Transcript: `log/ink_smeared_diary.txt`
-  - User input & executed code: `log/trigger_echoes.txt`
-  - General logs: `log/blue_whispers.txt`
-  - Sandbox output summary: `log/clockwork_ghost.txt`
-  - Sandbox streaming dir: `log/sandbox/`
-- **Configuration**:
-  - `.env` keys (see `.env.example`): `OPENAI_API_KEY`, `PULSE`, `TIMEOUT`, `OPENAI_MODEL`, optional `PROXY`.
-  - `OPENAI_MODEL` env var overrides the default; if unset, service falls back to `gpt-5`.
-  - Optional deps are auto-ensured at runtime (e.g., `aiofiles`, `prompt_toolkit`).
- - **Code Style**: Best-effort normalization via `black`, `autopep8`, `libcst` chained in `jinx/formatters/chain.py`.
-- **Extensibility**:
-  - Add new services under `jinx/` and keep them dependency-light.
-  - Prefer pure functions with explicit inputs/outputs.
-  - Use async locks for file I/O where interleaving is a concern.
-
 ## 📄 License
 
 This project is licensed under the **MIT License**. See the [`LICENSE`](LICENSE) file for details.

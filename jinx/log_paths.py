@@ -28,3 +28,9 @@ OPENAI_REQUESTS_DIR_MEMORY: str = os.path.join("log", "openai", "memory")
 
 # Autotune persisted state
 AUTOTUNE_STATE: str = os.path.join("log", "autotune_state.json")
+
+# Planner/reflector trace (JSONL records for debugging planner chain)
+PLAN_TRACE: str = os.path.join("log", "plan_trace.jsonl")
+
+# Chain resilience persistent state (auto-disable windows, failure counters)
+CHAIN_STATE: str = os.path.join("log", "chain_state.json")
