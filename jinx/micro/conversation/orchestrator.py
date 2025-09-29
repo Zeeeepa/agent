@@ -28,6 +28,8 @@ from jinx.micro.runtime.bridge import start_bridge as _start_runtime_bridge
 from jinx.micro.llm.kernel_sanitizer import sanitize_kernels as _sanitize_kernels
 from jinx.micro.exec.executor import spike_exec as _spike_exec
 from jinx.safety import chaos_taboo as _chaos_taboo
+from jinx.micro.runtime.patcher import ensure_patcher_running as _ensure_patcher
+from jinx.micro.verify.verifier import ensure_verifier_running as _ensure_verifier
 from jinx.micro.conversation.cont import (
     augment_query_for_retrieval as _augment_query,
     maybe_reuse_last_context as _reuse_proj_ctx,
@@ -53,6 +55,16 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
         try:
             await _ensure_runtime()
             await _start_runtime_bridge()
+            # Ensure the background AutoPatchProgram is running so model code can submit edits
+            try:
+                await _ensure_patcher()
+            except Exception:
+                pass
+            # Ensure the embedding-based verifier is running for post-commit checks
+            try:
+                await _ensure_verifier()
+            except Exception:
+                pass
         except Exception:
             pass
         # Append the user input to the transcript first to ensure ordering

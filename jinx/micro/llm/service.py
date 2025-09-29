@@ -8,6 +8,7 @@ from jinx.retry import detonate_payload
 from .prompt_compose import compose_dynamic_prompt
 from .macro_registry import MacroContext, expand_dynamic_macros
 from .macro_providers import register_builtin_macros
+from .macro_plugins import load_macro_plugins
 from jinx.micro.conversation.cont import load_last_anchors
 from jinx.micro.runtime.api import list_programs
 import platform
@@ -32,6 +33,75 @@ async def spark_openai(txt: str, *, prompt_override: str | None = None) -> tuple
     # Expand dynamic prompt macros in real time (vars/env/anchors/sys/runtime/exports + custom providers)
     try:
         jx = await compose_dynamic_prompt(jx, key=tag)
+        # Auto-inject helpful embedding macros so the user doesn't need to type them
+        try:
+            auto_on = str(os.getenv("JINX_AUTOMACROS", "1")).lower() not in ("", "0", "false", "off", "no")
+        except Exception:
+            auto_on = True
+        # Heuristic: code-like queries prefer project context; otherwise dialogue
+        def _is_codey(s: str) -> bool:
+            if not s:
+                return False
+            ql = s.lower()
+            if any(kw in ql for kw in ("def ", "class ", "import ", "from ", "return ", "async ", "await ")):
+                return True
+            return any(c in s for c in "=[](){}.:,")
+        if auto_on and ("{{m:" not in jx or "{{m:emb:" not in jx):
+            lines = []
+            try:
+                use_dlg = str(os.getenv("JINX_AUTOMACRO_DIALOGUE", "1")).lower() not in ("", "0", "false", "off", "no")
+            except Exception:
+                use_dlg = True
+            try:
+                use_proj = str(os.getenv("JINX_AUTOMACRO_PROJECT", "1")).lower() not in ("", "0", "false", "off", "no")
+            except Exception:
+                use_proj = True
+            # Dynamic topK per source
+            try:
+                dlg_k = int(os.getenv("JINX_AUTOMACRO_DIALOGUE_K", "3"))
+            except Exception:
+                dlg_k = 3
+            try:
+                proj_k = int(os.getenv("JINX_AUTOMACRO_PROJECT_K", "3"))
+            except Exception:
+                proj_k = 3
+            codey = _is_codey(txt or "")
+            # Prefer project for code-like, dialogue for plain text; keep both if allowed
+            if use_dlg:
+                if codey and not use_proj:
+                    lines.append(f"Context (dialogue): {{m:emb:dialogue:{dlg_k}}}")
+                elif not codey:
+                    lines.append(f"Context (dialogue): {{m:emb:dialogue:{dlg_k}}}")
+            if use_proj:
+                if codey or not use_dlg:
+                    lines.append(f"Context (code): {{m:emb:project:{proj_k}}}")
+            if lines:
+                jx = jx + "\n" + "\n".join(lines) + "\n"
+        # Optionally include recent patch previews/commits from runtime exports
+        try:
+            include_patch = str(os.getenv("JINX_AUTOMACRO_PATCH_EXPORTS", "1")).lower() not in ("", "0", "false", "off", "no")
+        except Exception:
+            include_patch = True
+        if include_patch and ("{{export:" not in jx or "{{export:last_patch_" not in jx):
+            exp_lines = [
+                "Recent Patch Preview (may be empty): {{export:last_patch_preview:1}}",
+                "Recent Patch Commit (may be empty): {{export:last_patch_commit:1}}",
+                "Recent Patch Strategy: {{export:last_patch_strategy:1}}",
+                "Recent Patch Reason: {{export:last_patch_reason:1}}",
+            ]
+            jx = jx + "\n" + "\n".join(exp_lines) + "\n"
+        # Optionally include last verification results
+        try:
+            include_verify = str(os.getenv("JINX_AUTOMACRO_VERIFY_EXPORTS", "1")).lower() not in ("", "0", "false", "off", "no")
+        except Exception:
+            include_verify = True
+        if include_verify and ("{{export:" not in jx or "{{export:last_verify_" not in jx):
+            vlines = [
+                "Verification Score: {{export:last_verify_score:1}}",
+                "Verification Reason: {{export:last_verify_reason:1}}",
+                "Verification Files: {{export:last_verify_files:1}}",
+            ]
+            jx = jx + "\n" + "\n".join(vlines) + "\n"
         # Build macro context and expand provider macros {{m:ns:arg1:arg2}}
         try:
             anc = await load_last_anchors()
@@ -52,9 +122,13 @@ async def spark_openai(txt: str, *, prompt_override: str | None = None) -> tuple
             now_epoch=str(int(_dt.datetime.now().timestamp())),
             input_text=txt or "",
         )
-        # Ensure built-in providers are registered
+        # Ensure built-in providers and plugin macros are registered/loaded
         try:
             await register_builtin_macros()
+        except Exception:
+            pass
+        try:
+            await load_macro_plugins()
         except Exception:
             pass
         try:

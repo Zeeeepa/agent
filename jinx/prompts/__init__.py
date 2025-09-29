@@ -24,7 +24,18 @@ def get_prompt(name: str | None = None) -> str:
     if key not in _REGISTRY:
         available = ", ".join(sorted(_REGISTRY)) or "<none>"
         raise KeyError(f"Unknown prompt '{name}'. Available: {available}")
-    return _REGISTRY[key]()
+    base = _REGISTRY[key]()
+    try:
+        include = (os.getenv("JINX_INCLUDE_SYSTEM_DESC", "1").strip().lower() in {"1","true","yes","on"})
+    except Exception:
+        include = True
+    if not include:
+        return base
+    try:
+        from .system_desc import get_system_description
+        return base + "\n\n" + get_system_description()
+    except Exception:
+        return base
 
 
 # Import built-ins to register them
