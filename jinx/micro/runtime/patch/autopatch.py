@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple, List, Callable, Awaitable, Dict
 import time
 
-from jinx.micro.embeddings.project_search_api import search_project
+from jinx.micro.embeddings.search_cache import search_project_cached
 from .write_patch import patch_write
 from .line_patch import patch_line_range
 from .anchor_patch import patch_anchor_insert_after
@@ -64,6 +64,9 @@ async def autopatch(args: AutoPatchArgs) -> Tuple[bool, str, str]:
         max_ms = int(os.getenv("JINX_AUTOPATCH_MAX_MS", "800"))
     except Exception:
         max_ms = 800
+    # Exhaustive mode: disable timeboxing and search caps if enabled
+    no_budgets = _truthy("JINX_AUTOPATCH_NO_BUDGETS", "1")
+    max_ms_local = None if no_budgets else max_ms
     try:
         search_k = int(os.getenv("JINX_AUTOPATCH_SEARCH_TOPK", "3"))
     except Exception:
@@ -137,7 +140,8 @@ async def autopatch(args: AutoPatchArgs) -> Tuple[bool, str, str]:
     # 6) search-based if query provided (multi-hit)
     if not path and (args.query or ""):
         try:
-            hits = await search_project(args.query or "", k=max(1, search_k), max_time_ms=min(max_ms, 600))
+            limit_ms = None if no_budgets else min(max_ms, 600)
+            hits = await search_project_cached(args.query or "", k=max(1, search_k), max_time_ms=limit_ms)
         except Exception:
             hits = []
         for h in (hits or []):
@@ -162,8 +166,8 @@ async def autopatch(args: AutoPatchArgs) -> Tuple[bool, str, str]:
     # Timeboxed evaluation and selection
     best: Dict[str, object] | None = None
     for name, prev_factory, commit_factory in candidates:
-        # timebox
-        if (time.monotonic() - start_ts) * 1000.0 > max_ms:
+        # timebox unless disabled
+        if (max_ms_local is not None) and ((time.monotonic() - start_ts) * 1000.0 > max_ms_local):
             break
         cname, ok, diff, total = await _evaluate_candidate(name, prev_factory())
         if not ok:
@@ -181,7 +185,8 @@ async def autopatch(args: AutoPatchArgs) -> Tuple[bool, str, str]:
             ok, detail = await patch_write(path, code, preview=bool(args.preview))
             return ok, "write", detail
         if args.query:
-            hits = await search_project(args.query, k=1, max_time_ms=min(max_ms, 300))
+            limit_ms2 = None if no_budgets else min(max_ms, 300)
+            hits = await search_project_cached(args.query, k=1, max_time_ms=limit_ms2)
             if hits:
                 h = hits[0]
                 fpath = os.path.join(os.getenv("EMBED_PROJECT_ROOT", os.getcwd()), h.get("file") or "")

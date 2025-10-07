@@ -6,7 +6,6 @@ import os
 import hashlib
 from typing import Any, Dict, List, Tuple
 
-from jinx.net import get_openai_client
 from .project_paths import (
     ensure_project_dirs,
     PROJECT_FILES_DIR,
@@ -19,6 +18,7 @@ from .project_chunk_types import Chunk
 from .project_terms import extract_terms
 from .project_io import write_json_atomic
 from .util import now_ts
+from .embed_cache import embed_texts_cached, embed_text_cached
 
 
 MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
@@ -26,45 +26,19 @@ CHUNKER_KIND = os.getenv("EMBED_PROJECT_CHUNKER", "char").strip().lower()
 
 
 async def _embed_text(text: str) -> List[float]:
-    async def _call():
-        def _worker():
-            client = get_openai_client()
-            return client.embeddings.create(model=MODEL, input=text)
-        return await asyncio.to_thread(_worker)
-
     try:
-        resp = await _call()
-        return resp.data[0].embedding if getattr(resp, "data", None) else []
+        return await embed_text_cached(text, model=MODEL)
     except Exception:
         return []
 
 
 async def _embed_texts(texts: List[str]) -> List[List[float]]:
-    """Batch-create embeddings; preserves order; returns empty vectors on failure.
+    """Batch-create embeddings via shared cache layer (TTL, coalescing, limits).
 
-    Falls back to per-item empty vectors on any exception.
+    Preserves order; returns empty vectors on failure.
     """
-    if not texts:
-        return []
-
-    async def _call(batch: List[str]) -> Any:
-        def _worker() -> Any:
-            client = get_openai_client()
-            return client.embeddings.create(model=MODEL, input=batch)
-        return await asyncio.to_thread(_worker)
-
     try:
-        resp = await _call(texts)
-        data = getattr(resp, "data", None) or []
-        out: List[List[float]] = []
-        # Some SDKs return list-like; defensive access
-        for i in range(len(texts)):
-            try:
-                vec = data[i].embedding  # type: ignore[index]
-            except Exception:
-                vec = []
-            out.append(vec)
-        return out
+        return await embed_texts_cached(texts, model=MODEL)
     except Exception:
         return [[] for _ in texts]
 

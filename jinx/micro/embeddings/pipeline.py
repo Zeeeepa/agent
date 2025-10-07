@@ -6,11 +6,11 @@ import os
 from collections import deque
 from typing import Dict, Any, Deque, Iterable
 
-from jinx.net import get_openai_client
 from .paths import EMBED_ROOT, ensure_dirs
 from .util import sha256_text, now_ts
 from .text_clean import strip_known_tags, is_noise_text
 from .index_io import append_index
+from .embed_cache import embed_text_cached
 
 _RECENT_MAX = 200
 _recent: Deque[Dict[str, Any]] = deque(maxlen=_RECENT_MAX)
@@ -67,20 +67,11 @@ async def embed_text(text: str, *, source: str, kind: str = "text") -> Dict[str,
                 pass
             return {"cached": True, **(cached_obj or {})}
 
-    # Call OpenAI embeddings through existing client; use to_thread for sync SDK
+    # Call embeddings through shared cached helper (TTL, coalescing, limits, timeout)
     model = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
-
-    async def _call() -> Any:
-        def _worker() -> Any:
-            client = get_openai_client()
-            return client.embeddings.create(model=model, input=text)
-        return await asyncio.to_thread(_worker)
-
     try:
-        resp = await _call()
-        vec = resp.data[0].embedding if getattr(resp, "data", None) else []
+        vec = await embed_text_cached(text, model=model)
     except Exception:
-        # Best-effort: fallback to empty vector on API failure
         vec = []
 
     meta: Dict[str, Any] = {

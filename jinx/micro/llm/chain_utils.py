@@ -174,3 +174,36 @@ def parse_planner_block(body: str) -> Dict[str, Any]:
         "assumptions": assumptions,
         "context": contexts,
     }
+
+
+def parse_reflection_block(body: str, *, advisory: bool = True) -> Dict[str, Any]:
+    """Parse a reflection block body into a normalized dict.
+
+    Recognizes:
+      - summary: <...>
+      - nudge.N: <...> (advisory mode)
+      - next.N: <...> (directive mode)
+    Returns {"summary": str, "next_actions": [str, ...], optional "mode": "advisory"}.
+    """
+    summary = ""
+    items: List[str] = []
+    for raw in (body or "").splitlines():
+        line = raw.strip()
+        if not line or ":" not in line:
+            continue
+        k, v = line.split(":", 1)
+        k = k.strip().lower()
+        v = v.strip()
+        if k == "summary" and not summary:
+            summary = v
+            continue
+        if advisory:
+            if k.startswith("nudge.") and v and len(items) < 8:
+                items.append(v)
+        else:
+            if k.startswith("next.") and v and len(items) < 8:
+                items.append(v)
+    res: Dict[str, Any] = {"summary": summary, "next_actions": items}
+    if advisory:
+        res["mode"] = "advisory"
+    return res

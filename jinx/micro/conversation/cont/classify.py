@@ -5,7 +5,7 @@ import json
 import os
 from typing import Dict, List, Tuple
 
-from jinx.net import get_openai_client
+from jinx.micro.embeddings.embed_cache import embed_text_cached, embed_texts_cached
 
 # Cache file for prototype embeddings (per model)
 _CACHE_PATH = os.path.join(".jinx", "tmp", "cont_proto.json")
@@ -29,12 +29,9 @@ _NEG_TEXTS = [
 async def _embed(text: str) -> List[float]:
     if not text:
         return []
-    def _worker():
-        client = get_openai_client()
-        return client.embeddings.create(model=_MODEL, input=text)
     try:
-        resp = await asyncio.to_thread(_worker)
-        return resp.data[0].embedding if getattr(resp, "data", None) else []
+        # Use cached/coalesced embedding call
+        return await embed_text_cached(text, model=_MODEL)
     except Exception:
         return []
 
@@ -46,13 +43,9 @@ async def _embed_many(texts: List[str]) -> List[List[float]]:
     items = [(i, (t or "").strip()) for i, t in enumerate(texts)]
     if not any(t for _, t in items):
         return [[] for _ in texts]
-    def _worker():
-        client = get_openai_client()
-        return client.embeddings.create(model=_MODEL, input=[t for _, t in items])
     try:
-        resp = await asyncio.to_thread(_worker)
-        vecs = [d.embedding for d in getattr(resp, "data", [])]
-        # Ensure same length as inputs (best-effort)
+        batch = [t for _, t in items]
+        vecs = await embed_texts_cached(batch, model=_MODEL)
         out = [[] for _ in texts]
         for (i, _), v in zip(items, vecs):
             if i < len(out):

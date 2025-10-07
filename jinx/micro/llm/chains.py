@@ -189,7 +189,7 @@ async def build_planner_context(user_text: str) -> str:
         except Exception:
             pass
 
-    # Optional reflection block appended at the end
+    # Optional reflection: prefer using the combined prompt output to avoid a second API call
     try:
         evidence = await gather_planner_evidence(subs)
         # Trace aggregate evidence sizes
@@ -199,7 +199,12 @@ async def build_planner_context(user_text: str) -> str:
             "d_total": sum(len(x.get("dialogue", [])) for x in evidence.get("queries", [])),
             "c_total": sum(len(x.get("code", [])) for x in evidence.get("queries", [])),
         })
-        reflect = await run_reflector(user_text, plan, evidence)
+        try:
+            reflect = dict(plan.get("reflect") or {})
+        except Exception:
+            reflect = {}
+        if not reflect:
+            reflect = await run_reflector(user_text, plan, evidence)
     except Exception:
         reflect = {}
         evidence = {}

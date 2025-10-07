@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import os
-from jinx.openai_mod import build_header_and_tag, call_openai
+from jinx.openai_mod import build_header_and_tag
+from .openai_caller import call_openai
 from jinx.log_paths import OPENAI_REQUESTS_DIR_GENERAL
 from jinx.logger.openai_requests import write_openai_request_dump, write_openai_response_append
 from jinx.retry import detonate_payload

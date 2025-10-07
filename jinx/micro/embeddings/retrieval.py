@@ -6,12 +6,12 @@ import os
 from typing import List, Tuple, Dict, Any
 import hashlib
 
-from jinx.net import get_openai_client
 from jinx.micro.embeddings.pipeline import iter_recent_items
 from .paths import EMBED_ROOT
 from .util import cos
 from .text_clean import is_noise_text
 from .scan_store import iter_items as scan_iter_items
+from .embed_cache import embed_text_cached
 
 DEFAULT_TOP_K = int(os.getenv("EMBED_TOP_K", "5"))
 # Balanced defaults; adapt at runtime based on query length
@@ -21,18 +21,13 @@ MAX_FILES_PER_SOURCE = int(os.getenv("EMBED_MAX_FILES_PER_SOURCE", "500"))
 MAX_SOURCES = int(os.getenv("EMBED_MAX_SOURCES", "50"))
 QUERY_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 RECENCY_WINDOW_SEC = int(os.getenv("EMBED_RECENCY_WINDOW_SEC", str(24 * 3600)))
+EXHAUSTIVE = str(os.getenv("EMBED_EXHAUSTIVE", "1")).lower() in {"1", "true", "on", "yes"}
 
 
 async def _embed_query(text: str) -> List[float]:
-    async def _call():
-        def _worker():
-            client = get_openai_client()
-            return client.embeddings.create(model=QUERY_MODEL, input=text)
-        return await asyncio.to_thread(_worker)
-
     try:
-        resp = await _call()
-        return resp.data[0].embedding if getattr(resp, "data", None) else []
+        # Shared cached embedding call with TTL, coalescing, concurrency limit and timeout
+        return await embed_text_cached(text, model=QUERY_MODEL)
     except Exception:
         # Best-effort: return empty vector on API failure
         return []
@@ -94,11 +89,12 @@ async def retrieve_top_k(query: str, k: int | None = None, *, max_time_ms: int |
         if len(scored) >= k_eff:
             break
 
-    # Early return if we already have enough and time budget is tight
+    # Early return if мы уже набрали k; при EXHAUSTIVE=True не прерываемся по времени
     if len(scored) >= k_eff:
         scored.sort(key=lambda x: x[0], reverse=True)
         return scored[:k_eff]
-    if max_time_ms is not None and (time.perf_counter() - t0) * 1000.0 > max_time_ms:
+    eff_budget = None if EXHAUSTIVE else max_time_ms
+    if eff_budget is not None and (time.perf_counter() - t0) * 1000.0 > eff_budget:
         scored.sort(key=lambda x: x[0], reverse=True)
         return scored[:k_eff]
 
@@ -131,7 +127,7 @@ async def retrieve_top_k(query: str, k: int | None = None, *, max_time_ms: int |
         scored.append((score, src, obj))
         if len(scored) >= k_eff:
             break
-        if max_time_ms is not None and (time.perf_counter() - t0) * 1000.0 > max_time_ms:
+        if eff_budget is not None and (time.perf_counter() - t0) * 1000.0 > eff_budget:
             break
         # Periodically yield to keep event loop responsive
         if (idx % 50) == 49:

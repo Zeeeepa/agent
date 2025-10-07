@@ -35,6 +35,12 @@ from .project_retrieval_config import (
     PROJ_STAGE_EXACT_MS,
     PROJ_STAGE_VECTOR_MS,
     PROJ_STAGE_KEYWORD_MS,
+    PROJ_CALLGRAPH_ENABLED,
+    PROJ_CALLGRAPH_TOP_HITS,
+    PROJ_CALLGRAPH_CALLERS_LIMIT,
+    PROJ_CALLGRAPH_CALLEES_LIMIT,
+    PROJ_CALLGRAPH_TIME_MS,
+    PROJ_MAX_FILES,
 )
 from .project_py_scope import get_python_symbol_at_line
 from .project_refs import find_usages_in_project
@@ -58,6 +64,7 @@ from .project_stage_rapidfuzz import stage_rapidfuzz_hits
 from .project_stage_tokenmatch import stage_tokenmatch_hits
 from .project_snippet import build_snippet
 from .project_query_core import extract_code_core
+from .project_callgraph import build_symbol_graph
 
 # Tunables moved to project_retrieval_config.py
 
@@ -340,9 +347,11 @@ async def build_project_context_for(query: str, *, k: int | None = None, max_cha
     hits_sorted = sorted(hits, key=lambda h: float(h[0] or 0.0), reverse=True)
     parts: List[str] = []
     refs_parts: List[str] = []
+    graph_parts: List[str] = []
     seen: set[str] = set()  # dedupe by preview text
     headers_seen: set[str] = set()  # dedupe by [file:ls-le]
     refs_headers_seen: set[str] = set()  # dedupe refs by header
+    graph_headers_seen: set[str] = set()  # dedupe graph entries by header
     # Language detection moved to project_lang.py
 
     # Disable total code budget if configured
@@ -388,9 +397,36 @@ async def build_project_context_for(query: str, *, k: int | None = None, max_cha
                     parts.append(snippet_text)
                 break
             total_len = would
+
         parts.append(snippet_text)
         if is_full_scope:
             full_scope_used += 1
+
+        # Optional callgraph enrichment for top hits (Python only)
+        try:
+            if PROJ_CALLGRAPH_ENABLED and file_rel.endswith('.py') and idx < max(0, PROJ_CALLGRAPH_TOP_HITS):
+                def _build_graph():
+                    try:
+                        return build_symbol_graph(
+                            file_rel,
+                            use_ls or 0,
+                            use_le or 0,
+                            callers_limit=PROJ_CALLGRAPH_CALLERS_LIMIT,
+                            callees_limit=PROJ_CALLGRAPH_CALLEES_LIMIT,
+                            around=PROJ_SNIPPET_AROUND,
+                            scan_cap_files=PROJ_MAX_FILES,
+                            time_budget_ms=PROJ_CALLGRAPH_TIME_MS,
+                        )
+                    except Exception:
+                        return []
+                pairs = await asyncio.to_thread(_build_graph)
+                for hdr, block in (pairs or []):
+                    if hdr in graph_headers_seen:
+                        continue
+                    graph_headers_seen.add(hdr)
+                    graph_parts.append(f"{hdr}\n{block}")
+        except Exception:
+            pass
         # Periodically yield while assembling snippets
         if (idx % 2) == 1:
             await asyncio.sleep(0)
@@ -433,7 +469,11 @@ async def build_project_context_for(query: str, *, k: int | None = None, max_cha
     if not parts:
         return ""
     body = "\n".join(parts)
+    out_blocks: List[str] = [f"<embeddings_code>\n{body}\n</embeddings_code>"]
     if refs_parts:
         rbody = "\n".join(refs_parts)
-        return f"<embeddings_code>\n{body}\n</embeddings_code>\n\n<embeddings_refs>\n{rbody}\n</embeddings_refs>"
-    return f"<embeddings_code>\n{body}\n</embeddings_code>"
+        out_blocks.append(f"<embeddings_refs>\n{rbody}\n</embeddings_refs>")
+    if graph_parts:
+        gbody = "\n".join(graph_parts)
+        out_blocks.append(f"<embeddings_graph>\n{gbody}\n</embeddings_graph>")
+    return "\n\n".join(out_blocks)

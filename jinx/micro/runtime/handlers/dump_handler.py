@@ -14,7 +14,7 @@ from jinx.micro.runtime.source_extract import (
     find_enclosing_symbol,
 )
 from jinx.micro.embeddings.project_config import ROOT as PROJECT_ROOT
-from jinx.micro.embeddings.project_search_api import search_project
+from jinx.micro.embeddings.search_cache import search_project_cached
 
 VerifyCB = Callable[[str | None, List[str], str], Awaitable[None]]
 
@@ -147,7 +147,7 @@ async def handle_dump_by_query_global(
     try:
         await report_progress(tid, 10.0, "searching project for query")
         k = int(topk) if (topk is not None) else 3
-        hits = await search_project(query, k=max(1, k), max_time_ms=300)
+        hits = await search_project_cached(query, k=max(1, k), max_time_ms=300)
         if not hits:
             await report_result(tid, False, error="no hits for query")
             return

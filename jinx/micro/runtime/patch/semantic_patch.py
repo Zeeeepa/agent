@@ -5,7 +5,7 @@ import difflib
 from typing import Optional, Tuple, List
 
 from jinx.async_utils.fs import read_text_raw, write_text
-from jinx.micro.embeddings.project_search_api import search_project
+from jinx.micro.embeddings.search_cache import search_project_cached
 from .utils import (
     unified_diff,
     syntax_check_enabled,
@@ -41,7 +41,7 @@ def _rel_to_root(path: str) -> str:
 
 async def _best_hit_in_file(path: str, query: str, rep_lines: List[str], *, topk: int, margin: int, tol: float) -> Tuple[int, int] | None:
     rel = _rel_to_root(path)
-    hits = await search_project(query, k=max(1, topk), max_time_ms=int(os.getenv("JINX_SEMANTIC_PATCH_MS", "400")))
+    hits = await search_project_cached(query, k=max(1, topk), max_time_ms=int(os.getenv("JINX_SEMANTIC_PATCH_MS", "400")))
     # Prefer hits that are in the same file
     candidates = [h for h in (hits or []) if str(h.get("file") or "").replace("\\", "/") == rel]
     if not candidates:

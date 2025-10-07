@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from jinx.micro.runtime.program import MicroProgram
 from jinx.micro.runtime.api import on, submit_task, report_progress, report_result, spawn, list_programs
 from jinx.micro.runtime.contracts import TASK_REQUEST
-from jinx.micro.embeddings.project_search_api import search_project
+from jinx.micro.embeddings.search_cache import search_project_cached
 
 
 def _truthy(name: str, default: str = "1") -> bool:
@@ -72,7 +72,7 @@ class AutoVerifyProgram(MicroProgram):
                 await report_result(tid, False, error="goal required")
                 return
             await report_progress(tid, 10.0, "searching project")
-            hits = await search_project(goal, k=max(1, topk), max_time_ms=int(os.getenv("JINX_VERIFY_MS", "400")))
+            hits = await search_project_cached(goal, k=max(1, topk), max_time_ms=int(os.getenv("JINX_VERIFY_MS", "400")))
             # simple scoring: +0.5 if any file matches, +0.3 if multi matches, +0.2 if diff mentions headers
             score = 0.0
             matched_files: List[str] = []

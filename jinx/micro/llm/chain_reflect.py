@@ -44,11 +44,13 @@ async def run_reflector(user_text: str, plan: Dict[str, Any], evidence: Dict[str
         cont_block = ""
     if cont_block:
         txt = txt + cont_block
-    prompt_name = "planner_reflectadvisoryjson" if truthy_env("JINX_CHAINED_ADVISORY", "1") else "planner_reflectjson"
-    out, tag = await spark_openai(txt, prompt_override=prompt_name)
-    body = extract_tagged_block(out, tag, "machine")
-    # Parse lines: advisory => summary + nudge.N; otherwise summary + next.N
+    # Inject plan_mode tag so a single combined prompt can switch schemas deterministically
     is_adv = truthy_env("JINX_CHAINED_ADVISORY", "1")
+    txt = txt + f"\n\n<plan_mode>{'advisory' if is_adv else 'directive'}</plan_mode>"
+    out, tag = await spark_openai(txt, prompt_override="planner_advisorycombo")
+    # Prefer <reflect_{key}> if present (combo prompt), otherwise fallback to <machine_{key}>
+    body = extract_tagged_block(out, tag, "reflect") or extract_tagged_block(out, tag, "machine")
+    # Parse lines: advisory => summary + nudge.N; otherwise summary + next.N
     summary = ""
     items: List[str] = []
     for raw in (body or "").splitlines():

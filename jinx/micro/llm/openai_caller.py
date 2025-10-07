@@ -7,6 +7,7 @@ from typing import Any
 from jinx.logging_service import bomb_log
 from jinx.micro.rag.file_search import build_file_search_tools
 from jinx.net import get_openai_client
+from .llm_cache import call_openai_cached
 
 
 async def call_openai(instructions: str, model: str, input_text: str) -> str:
@@ -25,16 +26,14 @@ async def call_openai(instructions: str, model: str, input_text: str) -> str:
                 "</llm_disabled>"
             )
         extra_kwargs: dict[str, Any] = build_file_search_tools()
-        def _worker():
-            client = get_openai_client()
-            return client.responses.create(
-                instructions=instructions,
-                model=model,
-                input=input_text,
-                **extra_kwargs,
-            )
-        r = await asyncio.to_thread(_worker)
-        return r.output_text
+        # Use cached/coalesced LLM call to prevent duplicate concurrent requests
+        out = await call_openai_cached(
+            instructions=instructions,
+            model=model,
+            input_text=input_text,
+            extra_kwargs=extra_kwargs,
+        )
+        return out
     except Exception as e:
         await bomb_log(f"ERROR cortex exploded: {e}")
         raise

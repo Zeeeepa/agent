@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 
 from jinx.micro.llm.service import spark_openai
-from jinx.micro.llm.chain_utils import truthy_env, extract_tagged_block, parse_planner_block
+from jinx.micro.llm.chain_utils import truthy_env, extract_tagged_block, parse_planner_block, parse_reflection_block
 from jinx.micro.llm.chain_evidence import collect_pre_evidence
 from jinx.micro.llm.chain_trace import trace_plan
 from jinx.micro.llm.chain_resilience import record_success, record_failure, save_last_plan
@@ -45,12 +45,18 @@ async def run_planner(user_text: str, *, max_subqueries: Optional[int] = None, p
         cont_block = ""
     if cont_block:
         planner_input = (planner_input + "\n\n" + cont_block) if planner_input else cont_block
+    # Inject plan_mode tag so a single combined prompt can switch schemas deterministically
+    try:
+        advisory = truthy_env("JINX_CHAINED_ADVISORY", "1")
+    except Exception:
+        advisory = True
+    plan_mode_tag = f"<plan_mode>{'advisory' if advisory else 'directive'}</plan_mode>"
+    planner_input = (planner_input + "\n\n" + plan_mode_tag) if planner_input else plan_mode_tag
 
     await trace_plan({"phase": "pre", "has_evidence": bool(evid)})
     try:
-        # Advisory mode (soft influence) vs directive (legacy plan.*). Default: advisory.
-        prompt_name = "planner_advisoryjson" if truthy_env("JINX_CHAINED_ADVISORY", "1") else "planner_minjson"
-        out, tag = await spark_openai(planner_input, prompt_override=prompt_name)
+        # Use a single combined prompt with mode controlled by <plan_mode>
+        out, tag = await spark_openai(planner_input, prompt_override="planner_advisorycombo")
     except Exception:
         await trace_plan({"phase": "plan", "error": "openai_error"})
         await record_failure("openai_error")
@@ -63,6 +69,16 @@ async def run_planner(user_text: str, *, max_subqueries: Optional[int] = None, p
         return {"goal": "", "plan": [], "sub_queries": [], "risks": [], "note": "no_machine"}
 
     data = parse_planner_block(block)
+    # Optional reflection block if combined prompt was used
+    try:
+        rbody = extract_tagged_block(out, tag, "reflect")
+    except Exception:
+        rbody = ""
+    if rbody:
+        try:
+            data["reflect"] = parse_reflection_block(rbody, advisory=advisory)
+        except Exception:
+            pass
     # Optional: extract reusable helper kernels
     try:
         kernels_code = extract_tagged_block(out, tag, "plan_kernels")

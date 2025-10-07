@@ -11,8 +11,48 @@ from .program import MicroProgram
 from jinx.micro.llm.macro_registry import register_macro as _register_macro
 
 
+_bridge_started: bool = False
+_selfstudy_started: bool = False
+_bg_tasks: list[asyncio.Task] = []
+
+
 async def ensure_runtime() -> None:
+    """Ensure core runtime is up and start self-study components once.
+
+    Components:
+    - Supervisor watchdog (heartbeats)
+    - Bridge to log program/task events
+    - Project embeddings service (code indexer)
+    - Realtime embeddings service (sandbox/log tailing)
+    """
+    global _bridge_started, _selfstudy_started, _bg_tasks
     await get_supervisor().start()
+    # Start bridge once
+    if not _bridge_started:
+        try:
+            # Lazy import to avoid circulars
+            from .bridge import start_bridge  # type: ignore
+            await start_bridge()
+            _bridge_started = True
+        except Exception:
+            _bridge_started = True  # prevent repeated attempts
+    # Start self-study (embeddings services) once
+    if not _selfstudy_started:
+        try:
+            # Project code embeddings service
+            from jinx.micro.embeddings.project_service import start_project_embeddings_task  # type: ignore
+            t1 = start_project_embeddings_task(root=None)
+            _bg_tasks.append(t1)
+        except Exception:
+            pass
+        try:
+            # Realtime log tailing embeddings service
+            from jinx.micro.embeddings.service import start_embeddings_task  # type: ignore
+            t2 = start_embeddings_task()
+            _bg_tasks.append(t2)
+        except Exception:
+            pass
+        _selfstudy_started = True
 
 
 # Pub/Sub

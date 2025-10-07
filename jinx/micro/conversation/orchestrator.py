@@ -24,7 +24,6 @@ from jinx.micro.embeddings.project_paths import PROJECT_FILES_DIR
 from jinx.micro.llm.chains import build_planner_context
 from jinx.micro.llm.chain_persist import persist_memory
 from jinx.micro.runtime.api import ensure_runtime as _ensure_runtime
-from jinx.micro.runtime.bridge import start_bridge as _start_runtime_bridge
 from jinx.micro.llm.kernel_sanitizer import sanitize_kernels as _sanitize_kernels
 from jinx.micro.exec.executor import spike_exec as _spike_exec
 from jinx.safety import chaos_taboo as _chaos_taboo
@@ -54,7 +53,6 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
         # Ensure micro-program runtime and event bridge are active before any code execution
         try:
             await _ensure_runtime()
-            await _start_runtime_bridge()
             # Ensure the background AutoPatchProgram is running so model code can submit edits
             try:
                 await _ensure_patcher()
@@ -156,7 +154,8 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
         # Optional: planner-enhanced context (adds at most one extra LLM call + small retrieval)
         plan_ctx = ""
         try:
-            plan_ctx = await build_planner_context(_q)
+            if str(os.getenv("JINX_PLANNER_CTX", "1")).lower() not in ("", "0", "false", "off", "no"):
+                plan_ctx = await build_planner_context(_q)
         except Exception:
             plan_ctx = ""
         # Optional continuity block for the main brain

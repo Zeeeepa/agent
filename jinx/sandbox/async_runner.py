@@ -40,6 +40,20 @@ async def run_sandbox(code: str, callback: Callable[[str | None], Awaitable[None
             log_path = r.get("log_path")
             if out:
                 await bomb_log(out, CLOCKWORK_GHOST)
+            # Sentinel-based error detection: if the code explicitly printed an ERROR line,
+            # surface it as an error to drive the recovery loop, even without exceptions.
+            if not err and out:
+                try:
+                    for raw in out.splitlines():
+                        line = raw.strip()
+                        if not line:
+                            continue
+                        low = line.lower()
+                        if low.startswith("error:") or line == "<<JINX_ERROR>>":
+                            err = line
+                            break
+                except Exception:
+                    pass
             if err:
                 await bomb_log(err)
             if log_path:
