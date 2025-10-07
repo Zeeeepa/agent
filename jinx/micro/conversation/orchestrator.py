@@ -33,7 +33,6 @@ from jinx.micro.conversation.cont import (
     augment_query_for_retrieval as _augment_query,
     maybe_reuse_last_context as _reuse_proj_ctx,
     save_last_context as _save_proj_ctx,
-    augment_task_text as _augment_task,
     extract_anchors as _extract_anchors,
     load_last_anchors as _load_last_anchors,
     render_continuity_block as _render_cont_block,
@@ -264,11 +263,11 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
             pass
         # 3) <task> reflects the immediate objective: when handling an error,
         #    avoid copying traceback or transcript into <task>.
-        #    Continuity: combine short follow-ups with prior question to avoid truncation.
+        #    Continuity augmentation disabled: use only the current user input.
         if err and err.strip():
             task_text = ""
         else:
-            task_text = _augment_task((x or ""), synth or "")
+            task_text = (x or "").strip()
         # Optional <error> block carries execution or prior error details
         error_text = (err.strip() if err and err.strip() else None)
 

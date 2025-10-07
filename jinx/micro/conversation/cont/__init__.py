@@ -9,7 +9,6 @@ from .anchors import (
     last_user_query,
 )
 from .query import augment_query_for_retrieval
-from .task import augment_task_text
 from .render import render_continuity_block
 from .cache import (
     load_last_context,
@@ -34,7 +33,6 @@ __all__ = [
     "last_user_query",
     # query/task
     "augment_query_for_retrieval",
-    "augment_task_text",
     # render
     "render_continuity_block",
     # cache
