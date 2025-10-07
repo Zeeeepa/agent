@@ -154,7 +154,7 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
         # Optional: planner-enhanced context (adds at most one extra LLM call + small retrieval)
         plan_ctx = ""
         try:
-            if str(os.getenv("JINX_PLANNER_CTX", "1")).lower() not in ("", "0", "false", "off", "no"):
+            if str(os.getenv("JINX_PLANNER_CTX", "0")).lower() not in ("", "0", "false", "off", "no"):
                 plan_ctx = await build_planner_context(_q)
         except Exception:
             plan_ctx = ""

@@ -15,6 +15,8 @@ from .blocking_io import check_blocking_io
 from .http_safety import check_http_safety
 from .spawn_policy import check_spawn_policy
 from .import_policy import check_import_policy
+from .import_star import check_import_star
+from .deserialization_safety import check_deserialization_safety
 
 Checker = Callable[[str], Optional[str]]
 
@@ -25,10 +27,12 @@ _CHECKS: list[Checker] = [
     check_side_effect_policy,
     check_comment_only,
     check_banned_dynamic,
+    check_deserialization_safety,
     check_io_clamps,
     check_net_system_safety,
-    check_import_policy,
     check_http_safety,
+    check_import_policy,
+    check_import_star,
     check_spawn_policy,
     check_fs_safety,
     check_rt_limits,

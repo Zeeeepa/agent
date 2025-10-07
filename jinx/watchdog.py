@@ -19,8 +19,6 @@ def start_watchdog_task(settings: Settings) -> "asyncio.Task[None]":
         # Exponential moving average of lag
         ema = 0.0
         alpha = 0.25
-        # Hysteresis guard
-        was_throttled = False
         while True:
             try:
                 t0 = loop.time()
@@ -28,12 +26,12 @@ def start_watchdog_task(settings: Settings) -> "asyncio.Task[None]":
                 now = loop.time()
                 lag = max(0.0, now - (t0 + period))
                 ema = alpha * lag + (1.0 - alpha) * ema
-                if not was_throttled and ema >= on_thr:
+                # Use the current event state as truth; clear even if set elsewhere
+                currently_throttled = jx_state.throttle_event.is_set()
+                if not currently_throttled and ema >= on_thr:
                     jx_state.throttle_event.set()
-                    was_throttled = True
-                elif was_throttled and ema <= off_thr:
+                elif currently_throttled and ema <= off_thr:
                     jx_state.throttle_event.clear()
-                    was_throttled = False
             except asyncio.CancelledError:
                 raise
             except Exception:

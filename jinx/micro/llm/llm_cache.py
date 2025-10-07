@@ -149,13 +149,29 @@ async def call_openai_cached(instructions: str, model: str, input_text: str, *, 
                 _inflight.pop(key, None)
 
         task.add_done_callback(_on_done)
-        try:
-            # Try to get result within timeout
-            r = await asyncio.wait_for(task, timeout=max(0.1, _TIMEOUT_MS / 1000))
-            out = str(getattr(r, "output_text", ""))
-            # Callback will also set cache/fut and pop inflight; just return out here
-            return out
-        except asyncio.TimeoutError:
+        # Implement soft timeout without cancelling the underlying task
+        timeout_sec = max(0.1, _TIMEOUT_MS / 1000)
+        timeout_task = asyncio.create_task(asyncio.sleep(timeout_sec))
+        done, _ = await asyncio.wait({task, timeout_task}, return_when=asyncio.FIRST_COMPLETED)
+        # Clean up timeout task if still pending
+        if not timeout_task.done():
+            timeout_task.cancel()
+            try:
+                await timeout_task
+            except asyncio.CancelledError:
+                pass
+        if task in done:
+            try:
+                r = await task
+            except asyncio.CancelledError:
+                # Should not happen since we didn't cancel; treat as transient
+                soft_timeout = True
+                await _dump_line("soft_timeout_cancelled")
+            else:
+                out = str(getattr(r, "output_text", ""))
+                # Callback will also set cache/fut and pop inflight; just return out here
+                return out
+        else:
             soft_timeout = True
             await _dump_line("soft_timeout")
 
@@ -165,6 +181,6 @@ async def call_openai_cached(instructions: str, model: str, input_text: str, *, 
         try:
             res = await fut
             return str(res or "")
-        except Exception as ex:
+        except BaseException as ex:
             # Propagate the underlying error if the background task failed
             raise ex

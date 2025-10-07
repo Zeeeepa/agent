@@ -95,6 +95,14 @@ def check_net_system_safety(code: str) -> Optional[str]:
                     return f"from {mod} import {a.name} is disallowed"
         if isinstance(n, ast.Call):
             fn = getattr(n, "func", None)
+            # Explicitly ban subprocess.run by default
+            if _is_attr_name(fn, "subprocess", "run"):
+                return "subprocess.run is disallowed; use subprocess.check_call([...]) with explicit args and timeouts"
+            # Disallow shell=True for subprocess.* calls (Popen/call/check_call/check_output/run)
+            if isinstance(fn, ast.Attribute) and isinstance(fn.value, ast.Name) and fn.value.id == "subprocess":
+                for kw in (n.keywords or []):
+                    if (kw.arg or "") == "shell" and isinstance(getattr(kw, "value", None), ast.Constant) and getattr(kw.value, "value", None) is True:
+                        return "subprocess.* with shell=True is disallowed"
             # Allow safe patterns before applying bans
             if isinstance(n.func, ast.Attribute) and _is_safe_pip_install_call(n):
                 continue

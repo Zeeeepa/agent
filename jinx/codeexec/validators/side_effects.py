@@ -1,32 +1,36 @@
 from __future__ import annotations
 
 from typing import Optional
+import ast
 
+from .ast_cache import get_ast
 from .config import is_enabled
 
 
 def check_side_effect_policy(code: str) -> Optional[str]:
-    """Enforce verification for OS side effects via sentinel prints.
+    """Flag direct UI-launching OS side effects, independent of prompts.
 
-    If the code attempts OS-level side effects (open browser/app/file) using
-    common APIs but does not emit sentinel prints (OK:/ERROR: or <<JINX_ERROR>>),
-    we flag a violation so the recovery flow can correct it.
+    Disallows:
+    - webbrowser.open(...)
+    - os.startfile(...)
+
+    Rationale: these trigger system/UI actions that are not universally safe in
+    sandboxed or CI contexts. Prefer returning the target (URL/path) or using
+    higher-level runtime primitives to delegate the action.
     """
     if not is_enabled("side_effects", True):
         return None
-    c = (code or "")
-    low = c.lower()
-    # Heuristics for side-effect intents
-    uses_web = "webbrowser.open(" in c
-    uses_startfile = "os.startfile(" in c
-    # subprocess.Popen with xdg-open/open/cmd start
-    uses_popen = "subprocess.Popen(" in c and ("xdg-open" in low or " open" in low or "cmd" in low and "/c" in low and "start" in low)
-    side_effect = uses_web or uses_startfile or uses_popen
-    if not side_effect:
+    t = get_ast(code)
+    if not t:
         return None
-    # Must contain at least one sentinel print
-    has_ok = "OK:" in c
-    has_err = "ERROR:" in c or "<<JINX_ERROR>>" in c
-    if not (has_ok or has_err):
-        return "side-effect must verify with sentinel prints (OK:/ERROR:)"
+    for n in ast.walk(t):
+        if isinstance(n, ast.Call):
+            fn = getattr(n, "func", None)
+            if isinstance(fn, ast.Attribute) and isinstance(fn.value, ast.Name):
+                # webbrowser.open(...)
+                if fn.value.id == "webbrowser" and fn.attr == "open":
+                    return "UI side-effect 'webbrowser.open(...)' is disallowed; return the URL or delegate via runtime primitives"
+                # os.startfile(...)
+                if fn.value.id == "os" and fn.attr == "startfile":
+                    return "UI side-effect 'os.startfile(...)' is disallowed; return the path or delegate via runtime primitives"
     return None
