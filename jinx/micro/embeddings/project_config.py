@@ -32,9 +32,13 @@ INCLUDE_EXTS: list[str] = [x.strip().lower() for x in _INCLUDE_EXTS.split(",") i
 
 _EXCLUDE_DIRS = os.getenv(
     "EMBED_PROJECT_EXCLUDE_DIRS",
-    ".git,.hg,.svn,.venv,venv,node_modules,emb,log,__pycache__,dist,build,.idea,.vscode,.pytest_cache,.mypy_cache,.ruff_cache,__pypackages__",
+    ".git,.hg,.svn,.venv,venv,node_modules,emb,log,.jinx,__pycache__,dist,build,.idea,.vscode,.pytest_cache,.mypy_cache,.ruff_cache,__pypackages__",
 ).strip()
 EXCLUDE_DIRS: list[str] = [x.strip() for x in _EXCLUDE_DIRS.split(",") if x.strip()]
+# Always exclude internal directories even if env overrides
+for _dir in (".jinx", "log"):
+    if _dir not in EXCLUDE_DIRS:
+        EXCLUDE_DIRS.append(_dir)
 
 
 __all__ = [

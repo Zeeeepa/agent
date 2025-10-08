@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Callable, Awaitable
 
-from jinx.sandbox import blast_zone
+from jinx.sandbox.executor import blast_zone
 from jinx.sandbox.async_runner import run_sandbox
 
 

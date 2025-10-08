@@ -13,6 +13,13 @@ PROJ_QUERY_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 # Snippet shaping
 PROJ_SNIPPET_AROUND = int(os.getenv("EMBED_PROJECT_SNIPPET_AROUND", "12"))
 PROJ_SNIPPET_PER_HIT_CHARS = int(os.getenv("EMBED_PROJECT_SNIPPET_PER_HIT_CHARS", "1600"))
+PROJ_MULTI_SEGMENT_ENABLE = (str(os.getenv("EMBED_PROJECT_MULTI_SEGMENT", "1")).strip().lower() not in {"0","false","no","off"})
+PROJ_SEGMENT_HEAD_LINES = int(os.getenv("EMBED_PROJECT_SEGMENT_HEAD_LINES", "40"))
+PROJ_SEGMENT_TAIL_LINES = int(os.getenv("EMBED_PROJECT_SEGMENT_TAIL_LINES", "24"))
+PROJ_SEGMENT_MID_WINDOWS = int(os.getenv("EMBED_PROJECT_SEGMENT_MID_WINDOWS", "3"))
+PROJ_SEGMENT_MID_AROUND = int(os.getenv("EMBED_PROJECT_SEGMENT_MID_AROUND", "18"))
+PROJ_SEGMENT_STRIP_COMMENTS = (str(os.getenv("EMBED_PROJECT_SEGMENT_STRIP_COMMENTS", "1")).strip().lower() not in {"0","false","no","off"})
+PROJ_CONSOLIDATE_PER_FILE = (str(os.getenv("EMBED_PROJECT_CONSOLIDATE_PER_FILE", "1")).strip().lower() not in {"0","false","no","off"})
 
 # Always include full Python function/class scope when possible
 def _env_bool(name: str, default: bool) -> bool:

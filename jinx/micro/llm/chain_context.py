@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import List
+import os
 
 
 async def gather_context_for_subs(subs: List[str], dialog_ms: int, proj_ms: int) -> List[str]:
@@ -16,6 +17,8 @@ async def gather_context_for_subs(subs: List[str], dialog_ms: int, proj_ms: int)
     from jinx.micro.embeddings.retrieval import build_context_for as build_dialogue_ctx
     from jinx.micro.embeddings.project_retrieval import build_project_context_for as build_project_ctx
     from jinx.micro.conversation.cont import load_last_anchors as _load_last_anchors
+    from jinx.micro.memory.search import rank_memory as _rank_mem
+    from jinx.micro.memory.graph import query_graph as _qg
 
     # Continuity: pull small anchor hints (symbols/paths) to stabilize retrieval for each sub-query
     try:
@@ -39,8 +42,48 @@ async def gather_context_for_subs(subs: List[str], dialog_ms: int, proj_ms: int)
             pctx = await build_project_ctx(qp, max_time_ms=proj_ms)
         except Exception:
             pctx = ""
+        # Memory context (ranked lines)
+        try:
+            mem_on = str(os.getenv("JINX_CHAINED_MEMORY", "1")).lower() not in ("", "0", "false", "off", "no")
+        except Exception:
+            mem_on = True
+        mctx = ""
+        if mem_on:
+            try:
+                mk = int(os.getenv("JINX_CHAINED_MEMORY_K", "8"))
+            except Exception:
+                mk = 8
+            try:
+                lines = await _rank_mem(q, scope="any", k=max(1, mk), preview_chars=180)
+                if lines:
+                    body = "\n".join(lines)
+                    mctx = f"<memory_context>\n{body}\n</memory_context>"
+            except Exception:
+                mctx = ""
+        # Memory graph neighbors
+        try:
+            g_on = str(os.getenv("JINX_CHAINED_MEMGRAPH", "1")).lower() not in ("", "0", "false", "off", "no")
+        except Exception:
+            g_on = True
+        gctx = ""
+        if g_on:
+            try:
+                gk = int(os.getenv("JINX_CHAINED_MEMGRAPH_K", "6"))
+            except Exception:
+                gk = 6
+            try:
+                items = await _qg(q, k=max(1, gk))
+                if items:
+                    body = "\n".join(items)
+                    gctx = f"<memory_graph>\n{body}\n</memory_graph>"
+            except Exception:
+                gctx = ""
         if dctx:
             parts.append(dctx)
         if pctx:
             parts.append(pctx)
+        if mctx:
+            parts.append(mctx)
+        if gctx:
+            parts.append(gctx)
     return parts

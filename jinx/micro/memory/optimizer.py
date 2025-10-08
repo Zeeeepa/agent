@@ -17,9 +17,14 @@ from jinx.prompts import get_prompt
 from jinx.openai_mod import call_openai
 from jinx.retry import detonate_payload
 from jinx.micro.memory.parse import parse_output
-from jinx.micro.memory.storage import read_evergreen, write_state
+from jinx.micro.memory.storage import read_evergreen, write_state, read_token_hint
 from jinx.log_paths import OPENAI_REQUESTS_DIR_MEMORY
 from jinx.logger.openai_requests import write_openai_request_dump, write_openai_response_append
+from jinx.micro.memory.local_builder import build_local_memory
+from jinx.micro.memory.indexer import ingest_memory
+from jinx.micro.memory.graph import update_graph
+from jinx.micro.memory.topics import update_topics
+from jinx.micro.memory.history_compactor import compact_weekly
 from jinx.config import ALL_TAGS
 import jinx.state as jx_state
 import contextlib
@@ -46,6 +51,45 @@ async def _optimize_memory_impl(snapshot: str | None) -> None:
 
         if not transcript and not evergreen:
             await bomb_log("MEMORY optimize: skip (empty state)")
+            return
+
+        # Prefer local rule-based builder to avoid an extra OpenAI call.
+        def _truthy(name: str, default: str = "1") -> bool:
+            try:
+                return str(os.getenv(name, default)).strip().lower() not in ("", "0", "false", "off", "no")
+            except Exception:
+                return True
+
+        use_llm = _truthy("JINX_MEMORY_USE_LLM", "0")
+        if not use_llm:
+            # Local build: compact + evergreen from transcript and previous evergreen
+            try:
+                token_hint = await read_token_hint()
+            except Exception:
+                token_hint = 0
+            compact, durable = build_local_memory(transcript or "", evergreen or "", token_hint=token_hint)
+            await write_state(compact, durable)
+            # Best-effort background ingestion into embeddings for improved retrieval
+            try:
+                def _truthy2(name: str, default: str = "1") -> bool:
+                    try:
+                        return str(os.getenv(name, default)).strip().lower() not in ("", "0", "false", "off", "no")
+                    except Exception:
+                        return True
+                if _truthy2("JINX_MEM_EMB_ENABLE", "1"):
+                    asyncio.create_task(ingest_memory(compact, durable))
+                # Update knowledge graph (throttled internally)
+                if _truthy2("JINX_MEM_GRAPH_ENABLE", "1"):
+                    asyncio.create_task(update_graph(compact, durable))
+                # Update topics (throttled internally)
+                if durable and _truthy2("JINX_MEM_TOPICS_ENABLE", "1"):
+                    asyncio.create_task(update_topics(durable))
+                # Weekly compaction (throttled internally)
+                if _truthy2("JINX_MEM_HISTORY_COMPACT_ENABLE", "1"):
+                    asyncio.create_task(compact_weekly())
+            except Exception:
+                pass
+            await bomb_log("MEMORY optimize: done (local)")
             return
 
         instructions = get_prompt("memory_optimizer")

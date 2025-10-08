@@ -16,22 +16,8 @@ Enterprise standards. Minimal surface area. Maximum signal. Licensed under MIT.
 - **Retry/timeout** wrappers around model calls; structured OpenAI request logging
 - **Zero‑friction setup**: optional dependencies ensured at runtime
 - **Extensible prompts** via `jinx/prompts/` and configuration
-
-## 📑 Table of Contents
-
-- Features
-- Star History
-- Environment Setup
-- Quick Start
-- Usage Notes
-- Architecture Overview
-- Safety Model
-- **Runtime Flow**
-- Development Guide
-- License
-- Security & Compliance
-- Responsible AI
-- Support
+- **Real‑time snippet caching** (TTL + LRU + coalescing) with file‑watcher invalidation
+- **Micro‑modular architecture**: thin facades in `jinx/embeddings/*`, logic in `jinx/micro/*`
 
 ## ⭐ Star History
 
@@ -137,6 +123,7 @@ The runtime is layered, async-first, and auditable:
   - Compacts transcript into `<mem_compact>` and persists `<mem_evergreen>`
   - Writes state via `jinx/memory/storage.py`
 - **Embeddings**: `jinx/embeddings/pipeline.py`, `jinx/embeddings/retrieval.py`
+  - Facades live in `jinx/embeddings/*`; heavy retrieval/snippet logic in `jinx/micro/embeddings/*`
 - **Sandbox**: `jinx/sandbox/*` (separate process, non-blocking)
 - **Logging**: targets defined in `jinx/log_paths.py`; OpenAI request dumps under `log/openai/*`
 - **Prompts**: configured via `jinx/config.py`, defined under `jinx/prompts/`

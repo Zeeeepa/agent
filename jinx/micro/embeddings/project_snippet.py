@@ -11,6 +11,12 @@ from .project_retrieval_config import (
     PROJ_SCOPE_MAX_CHARS,
     PROJ_EXPAND_CALLEES_TOP_N,
     PROJ_EXPAND_CALLEE_MAX_CHARS,
+    PROJ_MULTI_SEGMENT_ENABLE,
+    PROJ_SEGMENT_HEAD_LINES,
+    PROJ_SEGMENT_TAIL_LINES,
+    PROJ_SEGMENT_MID_WINDOWS,
+    PROJ_SEGMENT_MID_AROUND,
+    PROJ_SEGMENT_STRIP_COMMENTS,
 )
 from .project_line_window import find_line_window
 from .project_identifiers import extract_identifiers
@@ -19,6 +25,16 @@ from .project_py_scope import find_python_scope, get_python_symbol_at_line
 from .project_callees import extract_callees_from_scope, find_def_scope_in_project
 from .project_query_tokens import expand_strong_tokens, codeish_tokens
 from .project_query_core import extract_code_core
+from .snippet_segments import build_multi_segment_python
+from .snippet_cache import (
+    make_snippet_cache_key,
+    get_cached_snippet,
+    put_cached_snippet,
+    file_signature,
+    coalesce_enter,
+    coalesce_exit,
+    coalesce_wait_ms,
+)
 
 
 def _read_file(rel_path: str) -> str:
@@ -38,6 +54,7 @@ def build_snippet(
     max_chars: int,
     prefer_full_scope: bool = True,
     expand_callees: bool = True,
+    extra_centers_abs: List[int] | None = None,
 ) -> Tuple[str, str, int, int, bool]:
     """Build a minimal header + code block snippet for a hit.
 
@@ -49,6 +66,51 @@ def build_snippet(
     local_ls = ls
     local_le = le
     is_full_scope = False
+    did_segment = False
+
+    # Snippet TTL cache (default-on)
+    _sig0 = None
+    try:
+        _sig0 = file_signature(file_rel)
+    except Exception:
+        _sig0 = None
+    _cache_key = make_snippet_cache_key(
+        file_rel,
+        meta,
+        query,
+        prefer_full_scope=prefer_full_scope,
+        expand_callees=expand_callees,
+        extra_centers_abs=extra_centers_abs,
+        file_sig=_sig0,
+    )
+    try:
+        _cached = get_cached_snippet(_cache_key)
+    except Exception:
+        _cached = None
+    if _cached:
+        return _cached
+
+    # Coalesce concurrent builds for the same key
+    _leader = False
+    _wait_ev = None
+    try:
+        mode, ev = coalesce_enter(_cache_key)
+        _leader = (mode == "leader")
+        _wait_ev = ev
+    except Exception:
+        _leader = False
+        _wait_ev = None
+    if (not _leader) and _wait_ev is not None:
+        try:
+            _wait_ev.wait(max(0.0, float(coalesce_wait_ms()) / 1000.0))
+        except Exception:
+            pass
+        try:
+            _cached2 = get_cached_snippet(_cache_key)
+        except Exception:
+            _cached2 = None
+        if _cached2:
+            return _cached2
 
     header = f"[{file_rel}:{ls}-{le}]" if (ls or le) else f"[{file_rel}]"
     body = pv
@@ -114,8 +176,25 @@ def build_snippet(
                     scope_text = "\n".join(lines_all[s_idx:e_idx+1]).strip()
                     if scope_text:
                         if prefer_full_scope:
-                            # Prefer entire function/class scope; if PROJ_SCOPE_MAX_CHARS <= 0 treat as unlimited
-                            if PROJ_SCOPE_MAX_CHARS > 0 and len(scope_text) > PROJ_SCOPE_MAX_CHARS:
+                            # Prefer entire function/class scope; if too large, use multi-segment composite
+                            too_large_scope = (PROJ_SCOPE_MAX_CHARS > 0 and len(scope_text) > PROJ_SCOPE_MAX_CHARS) or (len(scope_text) > PROJ_SNIPPET_PER_HIT_CHARS)
+                            if too_large_scope and PROJ_MULTI_SEGMENT_ENABLE:
+                                body = build_multi_segment_python(
+                                    lines_all,
+                                    s_scope,
+                                    e_scope,
+                                    query,
+                                    per_hit_chars=PROJ_SNIPPET_PER_HIT_CHARS,
+                                    head_lines=PROJ_SEGMENT_HEAD_LINES,
+                                    tail_lines=PROJ_SEGMENT_TAIL_LINES,
+                                    mid_windows=PROJ_SEGMENT_MID_WINDOWS,
+                                    mid_around=PROJ_SEGMENT_MID_AROUND,
+                                    strip_comments=PROJ_SEGMENT_STRIP_COMMENTS,
+                                    extra_centers=extra_centers_abs,
+                                )
+                                did_segment = True
+                                is_full_scope = False
+                            elif PROJ_SCOPE_MAX_CHARS > 0 and len(scope_text) > PROJ_SCOPE_MAX_CHARS:
                                 body = scope_text[:PROJ_SCOPE_MAX_CHARS]
                                 is_full_scope = False
                             else:
@@ -137,7 +216,7 @@ def build_snippet(
                 pass
 
     # Final cap per hit (skip if we intentionally included full scope under policy)
-    if not is_full_scope and len(body) > PROJ_SNIPPET_PER_HIT_CHARS:
+    if (not is_full_scope) and (not did_segment) and len(body) > PROJ_SNIPPET_PER_HIT_CHARS:
         body = body[:PROJ_SNIPPET_PER_HIT_CHARS]
 
     # Final header (optionally enriched with Python symbol name/kind)
@@ -160,7 +239,7 @@ def build_snippet(
     lang = lang_for_file(file_rel)
     final_body = body
     try:
-        if expand_callees and is_full_scope and file_rel.endswith('.py') and PROJ_EXPAND_CALLEES_TOP_N > 0:
+        if expand_callees and file_rel.endswith('.py') and PROJ_EXPAND_CALLEES_TOP_N > 0 and (is_full_scope or did_segment):
             callees = extract_callees_from_scope(body, max_items=PROJ_EXPAND_CALLEES_TOP_N * 2)
             appended: list[str] = []
             used = 0
@@ -194,4 +273,17 @@ def build_snippet(
         pass
 
     code_block = f"```{lang}\n{final_body}\n```" if lang else f"```\n{final_body}\n```"
-    return header, code_block, int(local_ls or 0), int(local_le or 0), bool(is_full_scope)
+    _result = (header, code_block, int(local_ls or 0), int(local_le or 0), bool(is_full_scope))
+    try:
+        _sig1 = file_signature(file_rel)
+        if (_sig0 is not None) and (_sig1 == _sig0):
+            put_cached_snippet(_cache_key, _result)
+    except Exception:
+        pass
+    finally:
+        if _leader:
+            try:
+                coalesce_exit(_cache_key)
+            except Exception:
+                pass
+    return _result

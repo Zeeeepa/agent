@@ -24,6 +24,7 @@ from .project_prune import prune_deleted, prune_single
 from .project_watch import try_start_watch, drain_queue, WatchHandle
 from .project_tasks import embed_if_changed
 from .project_util import file_should_include
+from .snippet_cache import invalidate_file
 
 
 
@@ -152,6 +153,11 @@ class ProjectEmbeddingsService:
                         if rel_p in seen_paths:
                             continue
                         seen_paths.add(rel_p)
+                        # Invalidate snippet cache for this file proactively
+                        try:
+                            invalidate_file(rel_p)
+                        except Exception:
+                            pass
                         if ev == "deleted":
                             if prune_single(self.root, db, rel_p):
                                 mutated = True
@@ -191,6 +197,10 @@ class ProjectEmbeddingsService:
                             if not batch2:
                                 break
                             for abs_p, rel_p in batch2:
+                                try:
+                                    invalidate_file(rel_p)
+                                except Exception:
+                                    pass
                                 recon_pending.add(asyncio.create_task(embed_if_changed(db, abs_p, rel_p, sem=sem)))
                             while len(recon_pending) > 64:
                                 done, recon_pending = await asyncio.wait(recon_pending, return_when=asyncio.FIRST_COMPLETED)
@@ -244,6 +254,10 @@ class ProjectEmbeddingsService:
                     if not batch3:
                         break
                     for abs_p, rel_p in batch3:
+                        try:
+                            invalidate_file(rel_p)
+                        except Exception:
+                            pass
                         scan_pending.add(asyncio.create_task(embed_if_changed(db, abs_p, rel_p, sem=sem)))
                     while len(scan_pending) > 64:
                         done, scan_pending = await asyncio.wait(scan_pending, return_when=asyncio.FIRST_COMPLETED)

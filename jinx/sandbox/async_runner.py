@@ -11,6 +11,7 @@ from jinx.retry import detonate_payload
 from jinx.logging_service import bomb_log
 from jinx.log_paths import CLOCKWORK_GHOST
 from jinx.sandbox.utils import make_run_log_path, async_rename_run_log
+from jinx.micro.exec.run_exports import write_last_run
 
 
 async def run_sandbox(code: str, callback: Callable[[str | None], Awaitable[None]] | None = None) -> None:
@@ -60,6 +61,11 @@ async def run_sandbox(code: str, callback: Callable[[str | None], Awaitable[None
                 # Rename log file to Jinx-styled status name before announcing path (non-blocking)
                 log_path = await async_rename_run_log(log_path, status=("error" if err else "ok"))
                 await bomb_log(f"Sandbox stream log: {log_path}")
+            # Persist exports for prompt macros (best-effort)
+            try:
+                write_last_run(out, err, log_path, ok=(err is None))
+            except Exception:
+                pass
             if callback:
                 await callback(err)
         except Exception as e:

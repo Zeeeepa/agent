@@ -5,6 +5,7 @@ from jinx.openai_mod import build_header_and_tag
 from .openai_caller import call_openai
 from jinx.log_paths import OPENAI_REQUESTS_DIR_GENERAL
 from jinx.logger.openai_requests import write_openai_request_dump, write_openai_response_append
+from jinx.micro.memory.storage import write_token_hint
 from jinx.retry import detonate_payload
 from .prompt_compose import compose_dynamic_prompt
 from .macro_registry import MacroContext, expand_dynamic_macros
@@ -15,6 +16,7 @@ from jinx.micro.runtime.api import list_programs
 import platform
 import sys
 import datetime as _dt
+from .prompt_filters import sanitize_prompt_for_external_api
 
 
 async def code_primer(prompt_override: str | None = None) -> tuple[str, str]:
@@ -47,7 +49,7 @@ async def spark_openai(txt: str, *, prompt_override: str | None = None) -> tuple
             if any(kw in ql for kw in ("def ", "class ", "import ", "from ", "return ", "async ", "await ")):
                 return True
             return any(c in s for c in "=[](){}.:,")
-        if auto_on and ("{{m:" not in jx or "{{m:emb:" not in jx):
+        if auto_on and ("{{m:" not in jx or "{{m:emb:" not in jx or "{{m:mem:" not in jx):
             lines = []
             try:
                 use_dlg = str(os.getenv("JINX_AUTOMACRO_DIALOGUE", "1")).lower() not in ("", "0", "false", "off", "no")
@@ -67,15 +69,31 @@ async def spark_openai(txt: str, *, prompt_override: str | None = None) -> tuple
             except Exception:
                 proj_k = 3
             codey = _is_codey(txt or "")
+            # Memory automacros
+            try:
+                use_mem = str(os.getenv("JINX_AUTOMACRO_MEMORY", "1").lower()) not in ("", "0", "false", "off", "no")
+            except Exception:
+                use_mem = True
+            try:
+                mem_comp_k = int(os.getenv("JINX_AUTOMACRO_MEM_COMPACT_K", "8"))
+            except Exception:
+                mem_comp_k = 8
+            try:
+                mem_ever_k = int(os.getenv("JINX_AUTOMACRO_MEM_EVERGREEN_K", "8"))
+            except Exception:
+                mem_ever_k = 8
             # Prefer project for code-like, dialogue for plain text; keep both if allowed
             if use_dlg:
                 if codey and not use_proj:
-                    lines.append(f"Context (dialogue): {{m:emb:dialogue:{dlg_k}}}")
+                    lines.append(f"Context (dialogue): {{{{m:emb:dialogue:{dlg_k}}}}}")
                 elif not codey:
-                    lines.append(f"Context (dialogue): {{m:emb:dialogue:{dlg_k}}}")
+                    lines.append(f"Context (dialogue): {{{{m:emb:dialogue:{dlg_k}}}}}")
             if use_proj:
                 if codey or not use_dlg:
-                    lines.append(f"Context (code): {{m:emb:project:{proj_k}}}")
+                    lines.append(f"Context (code): {{{{m:emb:project:{proj_k}}}}}")
+            if use_mem:
+                # Inject routed memory (pins + graph-aligned + ranker)
+                lines.append(f"Memory (routed): {{{{m:memroute:{max(mem_comp_k, mem_ever_k)}}}}}")
             if lines:
                 jx = jx + "\n" + "\n".join(lines) + "\n"
         # Optionally include recent patch previews/commits from runtime exports
@@ -103,6 +121,22 @@ async def spark_openai(txt: str, *, prompt_override: str | None = None) -> tuple
                 "Verification Files: {{export:last_verify_files:1}}",
             ]
             jx = jx + "\n" + "\n".join(vlines) + "\n"
+        # Optionally include last sandbox run artifacts (stdout/stderr/status) via macros
+        try:
+            include_run = str(os.getenv("JINX_AUTOMACRO_RUN_EXPORTS", "1")).lower() not in ("", "0", "false", "off", "no")
+        except Exception:
+            include_run = True
+        if include_run and ("{{m:run:" not in jx):
+            try:
+                run_chars = max(24, int(os.getenv("JINX_MACRO_MEM_PREVIEW_CHARS", "160")))
+            except Exception:
+                run_chars = 160
+            rlines = [
+                f"Last Run Status: {{{{m:run:status}}}}",
+                f"Last Run Stdout: {{{{m:run:stdout:3:chars={run_chars}}}}}",
+                f"Last Run Stderr: {{{{m:run:stderr:2:chars={run_chars}}}}}",
+            ]
+            jx = jx + "\n" + "\n".join(rlines) + "\n"
         # Build macro context and expand provider macros {{m:ns:arg1:arg2}}
         try:
             anc = await load_last_anchors()
@@ -137,23 +171,32 @@ async def spark_openai(txt: str, *, prompt_override: str | None = None) -> tuple
         except Exception:
             max_exp = 50
         jx = await expand_dynamic_macros(jx, ctx, max_expansions=max_exp)
+        # Best-effort token hint (chars/4 heuristic) for dynamic memory budgets
+        try:
+            est_tokens = max(0, (len(jx) + len(txt or "")) // 4)
+            await write_token_hint(est_tokens)
+        except Exception:
+            pass
     except Exception:
         pass
     model = os.getenv("OPENAI_MODEL", "gpt-5")
 
     async def openai_task() -> tuple[str, str]:
         req_path: str = ""
+        # Sanitize prompts to avoid leaking internal .jinx paths/content
+        sx = sanitize_prompt_for_external_api(jx)
+        stxt = sanitize_prompt_for_external_api(txt or "")
         try:
             req_path = await write_openai_request_dump(
                 target_dir=OPENAI_REQUESTS_DIR_GENERAL,
                 kind="GENERAL",
-                instructions=jx,
-                input_text=txt,
+                instructions=sx,
+                input_text=stxt,
                 model=model,
             )
         except Exception:
             pass
-        out = await call_openai(jx, model, txt)
+        out = await call_openai(sx, model, stxt)
         try:
             await write_openai_response_append(req_path, "GENERAL", out)
         except Exception:

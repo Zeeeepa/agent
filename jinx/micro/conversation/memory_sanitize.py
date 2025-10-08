@@ -15,11 +15,18 @@ def sanitize_transcript_for_memory(mem_text: str, last_user_line: str) -> str:
     """
     t = mem_text or ""
     try:
-        if last_user_line and t.strip().endswith(last_user_line):
+        if last_user_line:
             lines = [ln for ln in t.splitlines()]
-            if lines and lines[-1].strip() == last_user_line:
-                lines = lines[:-1]
-            t = "\n".join(lines)
+            if lines:
+                last = lines[-1].strip()
+                # consider both labeled and unlabeled forms
+                if (
+                    last == last_user_line
+                    or last == f"User: {last_user_line}".strip()
+                    or (last.lower().startswith("user:") and last[5:].strip() == last_user_line)
+                ):
+                    lines = lines[:-1]
+                    t = "\n".join(lines)
     except Exception:
         pass
     try:

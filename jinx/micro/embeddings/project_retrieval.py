@@ -3,8 +3,19 @@ from __future__ import annotations
 import os
 import time
 import asyncio
+import re
 from typing import Any, Dict, List, Tuple
+from jinx.micro.common.internal_paths import is_restricted_path
 
+_PRJ_CACHE: Dict[str, Tuple[int, List[Tuple[float, str, Dict[str, Any]]]]] = {}
+_PRJ_MULTI_CACHE: Dict[str, Tuple[int, List[Tuple[float, str, Dict[str, Any]]]]] = {}
+try:
+    _PRJ_TTL_MS = int(os.getenv("JINX_PROJ_RETR_TTL_MS", "800"))
+except Exception:
+    _PRJ_TTL_MS = 800
+
+
+from .project_rerank import rerank_hits
 from .project_config import ROOT
 from .project_retrieval_config import (
     PROJ_DEFAULT_TOP_K,
@@ -41,6 +52,7 @@ from .project_retrieval_config import (
     PROJ_CALLGRAPH_CALLEES_LIMIT,
     PROJ_CALLGRAPH_TIME_MS,
     PROJ_MAX_FILES,
+    PROJ_CONSOLIDATE_PER_FILE,
 )
 from .project_py_scope import get_python_symbol_at_line
 from .project_refs import find_usages_in_project
@@ -74,6 +86,15 @@ async def retrieve_project_top_k(query: str, k: int | None = None, *, max_time_m
     if not q:
         return []
     k_eff = k or PROJ_DEFAULT_TOP_K
+    # TTL cache
+    try:
+        now_ms = int(time.time() * 1000)
+    except Exception:
+        now_ms = 0
+    ck = f"{k_eff}|{q}"
+    ent = _PRJ_CACHE.get(ck)
+    if ent and (_PRJ_TTL_MS <= 0 or (now_ms - ent[0]) <= _PRJ_TTL_MS):
+        return list(ent[1])[:k_eff]
     t0 = time.perf_counter()
     accumulate = bool(PROJ_EXHAUSTIVE_MODE)
     # Extract Python code-core from natural language query if present
@@ -334,8 +355,15 @@ async def retrieve_project_top_k(query: str, k: int | None = None, *, max_time_m
     if accumulate:
         _merge(kw)
         # Return deduped, score-sorted
-        return sorted(collected, key=lambda h: float(h[0] or 0.0), reverse=True)[:k_eff]
-    return kw[:k_eff]
+        out_hits = sorted(collected, key=lambda h: float(h[0] or 0.0), reverse=True)[:k_eff]
+    else:
+        out_hits = kw[:k_eff]
+    # store cache
+    try:
+        _PRJ_CACHE[ck] = (now_ms, list(out_hits))
+    except Exception:
+        pass
+    return out_hits
 
 
 async def build_project_context_for(query: str, *, k: int | None = None, max_chars: int | None = None, max_time_ms: int | None = 300) -> str:
@@ -343,8 +371,8 @@ async def build_project_context_for(query: str, *, k: int | None = None, max_cha
     hits = await retrieve_project_top_k(query, k=k, max_time_ms=max_time_ms)
     if not hits:
         return ""
-    # Sort by score desc to surface the most relevant first
-    hits_sorted = sorted(hits, key=lambda h: float(h[0] or 0.0), reverse=True)
+    # Rerank to prioritize path/preview token matches with the query
+    hits_sorted = rerank_hits(hits, query)
     parts: List[str] = []
     refs_parts: List[str] = []
     graph_parts: List[str] = []
@@ -352,8 +380,21 @@ async def build_project_context_for(query: str, *, k: int | None = None, max_cha
     headers_seen: set[str] = set()  # dedupe by [file:ls-le]
     refs_headers_seen: set[str] = set()  # dedupe refs by header
     graph_headers_seen: set[str] = set()  # dedupe graph entries by header
+    included_files: set[str] = set()
     # Language detection moved to project_lang.py
 
+    # Build per-file centers from all hits to allow multi-segment snippets to include other hotspots
+    file_hit_centers: Dict[str, List[int]] = {}
+    for sc, fr, obj in hits_sorted:
+        try:
+            m = (obj.get("meta") or {})
+            ls = int(m.get("line_start") or 0)
+            le = int(m.get("line_end") or 0)
+            c = int((ls + le) // 2) if (ls and le) else int(ls or le or 0)
+            if c > 0:
+                file_hit_centers.setdefault(fr, []).append(c)
+        except Exception:
+            continue
     # Disable total code budget if configured
     budget = None if PROJ_NO_CODE_BUDGET else (PROJ_TOTAL_CODE_BUDGET if (max_chars is None) else max_chars)
     total_len = 0
@@ -362,6 +403,12 @@ async def build_project_context_for(query: str, *, k: int | None = None, max_cha
     qlow = (query or "").lower()
     codey_query = any(sym in (query or "") for sym in "=[](){}.:,") or any(kw in qlow for kw in ["def ", "class ", "import ", "from ", "return ", "async ", "await ", " for ", " in ", " = "])
     for idx, (score, file_rel, obj) in enumerate(hits_sorted):
+        # Skip restricted files defensively (.jinx, log, etc.)
+        try:
+            if is_restricted_path(str(file_rel or "")):
+                continue
+        except Exception:
+            pass
         meta = obj.get("meta", {})
         pv = (meta.get("text_preview") or "").strip()
         if pv and pv in seen:
@@ -369,10 +416,19 @@ async def build_project_context_for(query: str, *, k: int | None = None, max_cha
         if pv:
             seen.add(pv)
         # Build minimal header + code block snippet via micro-module
+        if PROJ_CONSOLIDATE_PER_FILE and file_rel in included_files:
+            continue
         prefer_full = PROJ_ALWAYS_FULL_PY_SCOPE and (
             PROJ_FULL_SCOPE_TOP_N <= 0 or (full_scope_used < PROJ_FULL_SCOPE_TOP_N)
         )
         # Build snippet off the event loop (file reads, scope detection)
+        # Prepare extra centers for this file (dedup)
+        if PROJ_CONSOLIDATE_PER_FILE and file_rel in included_files:
+            continue
+        try:
+            extra_centers_abs = sorted({int(x) for x in (file_hit_centers.get(file_rel) or []) if int(x) > 0})
+        except Exception:
+            extra_centers_abs = []
         header, code_block, use_ls, use_le, is_full_scope = await asyncio.to_thread(
             lambda: build_snippet(
                 file_rel,
@@ -381,6 +437,7 @@ async def build_project_context_for(query: str, *, k: int | None = None, max_cha
                 max_chars=PROJ_SNIPPET_PER_HIT_CHARS,
                 prefer_full_scope=prefer_full,
                 expand_callees=True,
+                extra_centers_abs=extra_centers_abs,
             )
         )
         snippet_text = f"{header}\n{code_block}"
@@ -399,6 +456,8 @@ async def build_project_context_for(query: str, *, k: int | None = None, max_cha
             total_len = would
 
         parts.append(snippet_text)
+        if PROJ_CONSOLIDATE_PER_FILE:
+            included_files.add(file_rel)
         if is_full_scope:
             full_scope_used += 1
 
@@ -466,6 +525,222 @@ async def build_project_context_for(query: str, *, k: int | None = None, max_cha
         except Exception:
             pass
         # Do not hard-break here; total budget enforced above
+    if not parts:
+        return ""
+    body = "\n".join(parts)
+    out_blocks: List[str] = [f"<embeddings_code>\n{body}\n</embeddings_code>"]
+    if refs_parts:
+        rbody = "\n".join(refs_parts)
+        out_blocks.append(f"<embeddings_refs>\n{rbody}\n</embeddings_refs>")
+    if graph_parts:
+        gbody = "\n".join(graph_parts)
+        out_blocks.append(f"<embeddings_graph>\n{gbody}\n</embeddings_graph>")
+    return "\n\n".join(out_blocks)
+
+
+# --- Advanced: multi-query aggregation ---
+
+async def retrieve_project_multi_top_k(queries: List[str], *, per_query_k: int, max_time_ms: int | None = 300) -> List[Tuple[float, str, Dict[str, Any]]]:
+    """Run project retrieval for several queries and merge top hits.
+
+    - Splits a coarse time budget across queries (best-effort), runs with limited concurrency.
+    - Dedupe by (file_rel, line_start, line_end).
+    """
+    qs = [q.strip() for q in (queries or []) if (q or "").strip()]
+    if not qs:
+        return []
+    # TTL cache
+    try:
+        now_ms = int(time.time() * 1000)
+    except Exception:
+        now_ms = 0
+    ck = f"{per_query_k}|{' || '.join(qs)}"
+    ent = _PRJ_MULTI_CACHE.get(ck)
+    if ent and (_PRJ_TTL_MS <= 0 or (now_ms - ent[0]) <= _PRJ_TTL_MS):
+        return list(ent[1])
+    # Conservative per-query budget
+    if max_time_ms is None:
+        per_budget = None
+    else:
+        per_budget = max(50, int(max_time_ms // max(1, len(qs))))
+    sem = asyncio.Semaphore(3)
+    results: List[Tuple[float, str, Dict[str, Any]]] = []
+
+    async def _run_one(q: str) -> None:
+        async with sem:
+            try:
+                hits = await retrieve_project_top_k(q, k=per_query_k, max_time_ms=per_budget)
+            except Exception:
+                hits = []
+            if hits:
+                results.extend(hits)
+
+    await asyncio.gather(*[asyncio.create_task(_run_one(q)) for q in qs])
+    # Dedupe by (file_rel, ls, le)
+    seen: set[tuple] = set()
+    merged: List[Tuple[float, str, Dict[str, Any]]] = []
+    for sc, rel, obj in sorted(results, key=lambda h: float(h[0] or 0.0), reverse=True):
+        m = (obj.get("meta") or {})
+        key = (str(m.get("file_rel") or rel), int(m.get("line_start") or 0), int(m.get("line_end") or 0))
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append((sc, rel, obj))
+    out = merged[: (per_query_k * len(qs))]
+    try:
+        _PRJ_MULTI_CACHE[ck] = (now_ms, list(out))
+    except Exception:
+        pass
+    return out
+
+
+async def build_project_context_multi_for(queries: List[str], *, k: int | None = None, max_chars: int | None = None, max_time_ms: int | None = 300) -> str:
+    """Build code/ref context by aggregating hits from multiple sub-queries.
+
+    Reuses the same snippet construction logic as single-query builder.
+    """
+    k_eff = k or PROJ_DEFAULT_TOP_K
+    per_query_k = max(1, int((k_eff + max(1, len(queries)) - 1) // max(1, len(queries))))
+    hits = await retrieve_project_multi_top_k(queries, per_query_k=per_query_k, max_time_ms=max_time_ms)
+    if not hits:
+        return ""
+    # Re-rank across all hits by combined query string
+    hits_sorted = rerank_hits(hits, " ".join(queries))
+    parts: List[str] = []
+    refs_parts: List[str] = []
+    graph_parts: List[str] = []
+    seen: set[str] = set()
+    headers_seen: set[str] = set()
+    refs_headers_seen: set[str] = set()
+    graph_headers_seen: set[str] = set()
+    included_files: set[str] = set()
+    budget = None if PROJ_NO_CODE_BUDGET else (PROJ_TOTAL_CODE_BUDGET if (max_chars is None) else max_chars)
+    total_len = 0
+
+    full_scope_used = 0
+    # Build per-file centers from all hits to allow multi-segment snippets to include other hotspots
+    file_hit_centers: Dict[str, List[int]] = {}
+    for sc, fr, obj in hits_sorted:
+        try:
+            m = (obj.get("meta") or {})
+            ls = int(m.get("line_start") or 0)
+            le = int(m.get("line_end") or 0)
+            c = int((ls + le) // 2) if (ls and le) else int(ls or le or 0)
+            if c > 0:
+                file_hit_centers.setdefault(fr, []).append(c)
+        except Exception:
+            continue
+
+    for idx, (score, file_rel, obj) in enumerate(hits_sorted):
+        # Skip restricted files defensively (.jinx, log, etc.)
+        try:
+            if is_restricted_path(str(file_rel or "")):
+                continue
+        except Exception:
+            pass
+        meta = obj.get("meta", {})
+        pv = (meta.get("text_preview") or "").strip()
+        if pv and pv in seen:
+            continue
+        if pv:
+            seen.add(pv)
+        prefer_full = PROJ_ALWAYS_FULL_PY_SCOPE and (
+            PROJ_FULL_SCOPE_TOP_N <= 0 or (full_scope_used < PROJ_FULL_SCOPE_TOP_N)
+        )
+        if PROJ_CONSOLIDATE_PER_FILE and file_rel in included_files:
+            continue
+        try:
+            extra_centers_abs = sorted({int(x) for x in (file_hit_centers.get(file_rel) or []) if int(x) > 0})
+        except Exception:
+            extra_centers_abs = []
+        header, code_block, use_ls, use_le, is_full_scope = await asyncio.to_thread(
+            lambda: build_snippet(
+                file_rel,
+                meta,
+                " ".join(queries)[:512],
+                max_chars=PROJ_SNIPPET_PER_HIT_CHARS,
+                prefer_full_scope=prefer_full,
+                expand_callees=True,
+                extra_centers_abs=extra_centers_abs,
+            )
+        )
+        snippet_text = f"{header}\n{code_block}"
+        if header in headers_seen:
+            continue
+        headers_seen.add(header)
+        if budget is not None:
+            would = total_len + len(snippet_text)
+            if (not is_full_scope or not PROJ_ALWAYS_FULL_PY_SCOPE) and would > budget:
+                if not parts:
+                    parts.append(snippet_text)
+                break
+            total_len = would
+        parts.append(snippet_text)
+        if PROJ_CONSOLIDATE_PER_FILE:
+            included_files.add(file_rel)
+        if is_full_scope:
+            full_scope_used += 1
+        try:
+            if PROJ_CALLGRAPH_ENABLED and file_rel.endswith('.py') and idx < max(0, PROJ_CALLGRAPH_TOP_HITS):
+                def _build_graph():
+                    try:
+                        return build_symbol_graph(
+                            file_rel,
+                            use_ls or 0,
+                            use_le or 0,
+                            callers_limit=PROJ_CALLGRAPH_CALLERS_LIMIT,
+                            callees_limit=PROJ_CALLGRAPH_CALLEES_LIMIT,
+                            around=PROJ_SNIPPET_AROUND,
+                            scan_cap_files=PROJ_MAX_FILES,
+                            time_budget_ms=PROJ_CALLGRAPH_TIME_MS,
+                        )
+                    except Exception:
+                        return []
+                pairs = await asyncio.to_thread(_build_graph)
+                for hdr, block in (pairs or []):
+                    if hdr in graph_headers_seen:
+                        continue
+                    graph_headers_seen.add(hdr)
+                    graph_parts.append(f"{hdr}\n{block}")
+        except Exception:
+            pass
+        if (idx % 2) == 1:
+            await asyncio.sleep(0)
+        # Usages
+        try:
+            async def _collect_usages() -> list[tuple[str, str]]:
+                def _work() -> list[tuple[str, str]]:
+                    out: list[tuple[str, str]] = []
+                    try:
+                        file_text = ""
+                        try:
+                            with open(os.path.join(ROOT, file_rel), 'r', encoding='utf-8', errors='ignore') as _f:
+                                file_text = _f.read()
+                        except Exception:
+                            file_text = ""
+                        if file_rel.endswith('.py') and file_text:
+                            cand_line = int((use_ls + use_le) // 2) if (use_ls and use_le) else int(use_ls or use_le or 0)
+                            sym_name, sym_kind = get_python_symbol_at_line(file_text, cand_line)  # noqa: F841
+                            if sym_name:
+                                usages = find_usages_in_project(sym_name, file_rel, limit=PROJ_USAGE_REFS_LIMIT, around=PROJ_SNIPPET_AROUND)
+                                for fr, ua, ub, usnip, ulang in usages:
+                                    hdr = f"[{fr}:{ua}-{ub}]"
+                                    block = f"```{ulang}\n{usnip}\n```" if ulang else f"```\n{usnip}\n```"
+                                    out.append((hdr, block))
+                    except Exception:
+                        return out
+                    return out
+                return await asyncio.to_thread(_work)
+
+            pairs = await _collect_usages()
+            for hdr, block in pairs:
+                if hdr in refs_headers_seen:
+                    continue
+                refs_headers_seen.add(hdr)
+                refs_parts.append(f"{hdr}\n{block}")
+        except Exception:
+            pass
+
     if not parts:
         return ""
     body = "\n".join(parts)
