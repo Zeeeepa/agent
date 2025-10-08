@@ -1,4 +1,4 @@
-<img width="1024" height="1536" alt="124" src="https://github.com/user-attachments/assets/fdc54016-7f86-4aa7-893c-68df0dff7093" />
+<img width="1024" height="1536" alt="01" src="https://github.com/user-attachments/assets/3032cb55-f086-4fae-bdc5-826a9a7ebb2c" />
 
 # Jinx — Autonomous Engineering Agent
 
