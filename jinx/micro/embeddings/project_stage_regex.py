@@ -9,6 +9,8 @@ except Exception:  # pragma: no cover - optional dependency
     _rx = None  # type: ignore[assignment]
 
 from .project_config import ROOT, INCLUDE_EXTS, EXCLUDE_DIRS, MAX_FILE_BYTES
+from .project_query_core import extract_code_core
+from jinx.micro.text.heuristics import is_code_like as _is_code_like
 from .project_iter import iter_candidate_files
 
 
@@ -41,7 +43,9 @@ def stage_regex_hits(query: str, k: int, *, max_time_ms: int | None = 250) -> Li
     q = (query or "").strip()
     if not q:
         return []
-    pat = _make_fuzzy_pattern(q)
+    # Prefer code-core for building the fuzzy pattern to improve robustness on code fragments
+    q_eff = extract_code_core(q) or q
+    pat = _make_fuzzy_pattern(q_eff)
     if pat is None:
         return []
 
@@ -51,9 +55,11 @@ def stage_regex_hits(query: str, k: int, *, max_time_ms: int | None = 250) -> Li
     def time_up() -> bool:
         return max_time_ms is not None and (time.perf_counter() - t0) * 1000.0 > max_time_ms
 
+    codey = _is_code_like(q)
+    include_exts = ["py"] if codey else INCLUDE_EXTS
     for abs_p, rel_p in iter_candidate_files(
         ROOT,
-        include_exts=INCLUDE_EXTS,
+        include_exts=include_exts,
         exclude_dirs=EXCLUDE_DIRS,
         max_file_bytes=MAX_FILE_BYTES,
     ):

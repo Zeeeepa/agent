@@ -13,6 +13,8 @@ from jinx.micro.memory.graph import query_graph as _query_graph
 from jinx.micro.memory.pin_store import load_pins as _pins_load, save_pins as _pins_save
 from jinx.micro.memory.router import assemble_memroute as _memroute
 from jinx.micro.exec.run_exports import read_last_stdout as _run_stdout, read_last_stderr as _run_stderr, read_last_status as _run_status
+from jinx.micro.llm.macro_cache import memoized_call
+from jinx.micro.memory.turns import parse_active_turns as _parse_turns, get_user_message as _turn_user, get_jinx_reply_to as _turn_jinx
 
 _registered = False
 
@@ -222,11 +224,76 @@ async def _memroute_handler(args: List[str], ctx: MacroContext) -> str:
             q = (ctx.anchors.get("questions") or [""])[-1].strip()
         except Exception:
             q = ""
+    # TTL memoization to avoid recomputation within a short window
     try:
-        lines = await _memroute(q, k=n, preview_chars=lim)
+        ttl_ms = int(os.getenv("JINX_MACRO_PROVIDER_TTL_MS", "1500"))
     except Exception:
-        lines = []
-    return " | ".join(lines[:n])
+        ttl_ms = 1500
+    key = f"memroute|{n}|{lim}|{q}"
+    async def _call() -> str:
+        try:
+            lines = await _memroute(q, k=n, preview_chars=lim)
+        except Exception:
+            lines = []
+        return " | ".join(lines[:n])
+    return await memoized_call(key, ttl_ms, _call)
+
+
+async def _turns_handler(args: List[str], ctx: MacroContext) -> str:
+    """Turns provider: {{m:turns:kind:n[:chars=lim]}}
+
+    kind: user|jinx|pair (default user)
+    n: 1-based turn index
+    chars: optional clamp (defaults to JINX_MACRO_TURNS_PREVIEW_CHARS or JINX_MACRO_MEM_PREVIEW_CHARS)
+    """
+    try:
+        kind = (args[0] if args else "user").strip().lower()
+    except Exception:
+        kind = "user"
+    n = 0
+    clamp = None
+    for a in (args[1:] if len(args) > 1 else []):
+        aa = (a or "").strip()
+        if not aa:
+            continue
+        if aa.startswith("chars="):
+            try:
+                clamp = int(aa.split("=",1)[1])
+            except Exception:
+                pass
+            continue
+        try:
+            n = int(aa)
+        except Exception:
+            pass
+    if n <= 0:
+        return ""
+    try:
+        lim = int(os.getenv("JINX_MACRO_TURNS_PREVIEW_CHARS", os.getenv("JINX_MACRO_MEM_PREVIEW_CHARS", "160")))
+        lim = max(24, lim)
+    except Exception:
+        lim = 160
+    if clamp is not None:
+        try:
+            lim = max(24, int(clamp))
+        except Exception:
+            pass
+    if kind == "user":
+        s = await _turn_user(n)
+        return (s or "")[:lim]
+    if kind == "jinx":
+        s = await _turn_jinx(n)
+        return (s or "")[:lim]
+    if kind == "pair":
+        turns = await _parse_turns()
+        if n <= 0 or n > len(turns):
+            return ""
+        t = turns[n-1]
+        u = (t.get("user") or "").strip()
+        a = (t.get("jinx") or "").strip()
+        out = (f"User: {u}\nJinx: {a}").strip()
+        return out[:lim]
+    return ""
 
 
 async def _run_handler(args: List[str], ctx: MacroContext) -> str:
@@ -274,13 +341,21 @@ async def _run_handler(args: List[str], ctx: MacroContext) -> str:
             lim = max(24, int(os.getenv("JINX_MACRO_MEM_PREVIEW_CHARS", "160")))
         except Exception:
             lim = 160
-    if kind == "stdout":
-        return _run_stdout(n, lim, ttl_ms)
-    if kind == "stderr":
-        return _run_stderr(n, lim, ttl_ms)
-    if kind == "status":
-        return _run_status(ttl_ms)
-    return ""
+    # TTL memoization across identical macro invocations
+    try:
+        pttl = int(os.getenv("JINX_MACRO_PROVIDER_TTL_MS", "1500"))
+    except Exception:
+        pttl = 1500
+    key = f"run|{kind}|{n}|{ttl_ms}|{lim}"
+    async def _call() -> str:
+        if kind == "stdout":
+            return _run_stdout(n, lim, ttl_ms)
+        if kind == "stderr":
+            return _run_stderr(n, lim, ttl_ms)
+        if kind == "status":
+            return _run_status(ttl_ms)
+        return ""
+    return await memoized_call(key, pttl, _call)
 
 
 def _pins_enabled() -> bool:
@@ -451,6 +526,7 @@ async def register_builtin_macros() -> None:
     await register_macro("memgraph", _memgraph_handler)
     await register_macro("memtopic", _memtopic_handler)
     await register_macro("memroute", _memroute_handler)
+    await register_macro("turns", _turns_handler)
     await register_macro("run", _run_handler)
     await register_macro("pins", _pins_handler)
     await register_macro("pinadd", _pinadd_handler)

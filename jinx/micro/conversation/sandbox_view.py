@@ -8,4 +8,4 @@ async def show_sandbox_tail() -> None:
     """Print the latest sandbox log (full if short, else last N lines)."""
     content, _ = read_latest_sandbox_tail()
     if content is not None:
-        pretty_echo(content, title="Jinx")
+        pretty_echo(content, title="Sandbox")

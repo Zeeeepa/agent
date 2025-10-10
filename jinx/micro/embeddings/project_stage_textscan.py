@@ -10,6 +10,7 @@ from .project_iter import iter_candidate_files
 from .project_line_window import find_line_window
 from .project_scan_store import iter_project_chunks
 from .project_query_tokens import expand_strong_tokens, codeish_tokens
+from jinx.micro.text.heuristics import is_code_like as _is_code_like
 
 
 def _expand_tokens(q: str, max_items: int = 32) -> List[str]:
@@ -116,7 +117,9 @@ def stage_textscan_hits(query: str, k: int, *, max_time_ms: int | None = 250) ->
             rel = fr or str((obj.get("meta") or {}).get("file_rel") or "")
             if rel and rel not in seen_f:
                 seen_f.add(rel)
-                rel_files.append(rel)
+                # If query is code-like, prefer Python files only
+                if (not _is_code_like(q)) or rel.endswith('.py'):
+                    rel_files.append(rel)
     except Exception:
         rel_files = []
 
@@ -307,9 +310,11 @@ def stage_textscan_hits(query: str, k: int, *, max_time_ms: int | None = 250) ->
             return hits[:k]
 
     # Pass 2: fallback to general project walk (slower)
+    codey = _is_code_like(q)
+    include_exts = ["py"] if codey else INCLUDE_EXTS
     for abs_p, rel_p in iter_candidate_files(
         ROOT,
-        include_exts=INCLUDE_EXTS,
+        include_exts=include_exts,
         exclude_dirs=EXCLUDE_DIRS,
         max_file_bytes=MAX_FILE_BYTES,
     ):

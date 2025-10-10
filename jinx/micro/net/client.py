@@ -55,3 +55,15 @@ def get_openai_client() -> Any:
     else:
         _cortex = openai.OpenAI()
     return _cortex
+
+
+def prewarm_openai_client() -> None:
+    """Instantiate the OpenAI client early to warm HTTP pool/proxy resolution.
+
+    Safe to call multiple times; returns immediately if already initialized.
+    """
+    try:
+        _ = get_openai_client()
+    except Exception:
+        # Best-effort: swallow errors — prewarm should never crash startup
+        pass

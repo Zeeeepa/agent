@@ -4,6 +4,7 @@ import traceback
 from typing import Optional
 import os
 import re
+import asyncio
 
 from jinx.logging_service import glitch_pulse, bomb_log, blast_mem
 from jinx.openai_service import spark_openai
@@ -14,6 +15,8 @@ from jinx.micro.conversation.sandbox_view import show_sandbox_tail
 from jinx.micro.conversation.error_report import corrupt_report
 from jinx.logger.file_logger import append_line as _log_append
 from jinx.log_paths import BLUE_WHISPERS
+from jinx.micro.recursor.normalizer import normalize_output_blocks
+from jinx.micro.parser.api import parse_tagged_blocks
 from jinx.micro.embeddings.retrieval import build_context_for
 from jinx.micro.embeddings.project_retrieval import build_project_context_for, build_project_context_multi_for
 from jinx.micro.embeddings.pipeline import embed_text
@@ -45,6 +48,22 @@ from jinx.micro.conversation.cont import (
 from jinx.micro.conversation.cont.classify import find_semantic_question as _find_semq
 from jinx.micro.conversation.state_frame import build_state_frame
 from jinx.micro.memory.router import assemble_memroute as _memroute
+from jinx.micro.runtime.api import ensure_runtime as _ensure_runtime
+from jinx.micro.verify.verifier import ensure_verifier_running as _ensure_verifier
+from jinx.micro.text.heuristics import is_code_like as _is_code_like
+from jinx.micro.llm.service import spark_openai as _spark_llm, spark_openai_streaming as _spark_llm_stream
+from jinx.micro.conversation.proj_context_enricher import build_project_context_enriched as _build_proj_ctx_enriched
+from jinx.micro.conversation.error_payload import attach_error_code as _attach_error_code
+from jinx.micro.memory.evergreen_select import select_evergreen_for as _select_evg
+from jinx.micro.embeddings.memory_context import build_memory_context_for as _build_mem_ctx
+from jinx.micro.memory.api_memory import build_api_memory_block as _build_api_mem, append_turn as _append_turn
+from jinx.micro.conversation.turns_infer import infer_turn_query as _infer_turn
+from jinx.micro.memory.turns import get_user_message as _turn_user, get_jinx_reply_to as _turn_jinx, parse_active_turns as _turns_all
+from jinx.micro.conversation.memory_reasoner import infer_memory_action as _infer_memsel
+from jinx.micro.memory.pin_store import load_pins as _pins_load
+from jinx.micro.conversation.prefilter import likely_memory_action as _likely_mem
+from jinx.micro.conversation.debug import log_debug
+from jinx.micro.conversation.memory_program import infer_memory_program as _mem_program
 
 
 async def shatter(x: str, err: Optional[str] = None) -> None:
@@ -68,9 +87,9 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
         # Append the user input to the transcript first to ensure ordering
         if x and x.strip():
             await blast_mem(f"User: {x.strip()}")
-            # Also embed the raw user input for retrieval (source: dialogue)
+            # Also embed the raw user input for retrieval (source: dialogue) in background
             try:
-                await embed_text(x.strip(), source="dialogue", kind="user")
+                asyncio.create_task(embed_text(x.strip(), source="dialogue", kind="user"))
             except Exception:
                 pass
         synth = await glitch_pulse()
@@ -84,7 +103,8 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
         topic_shifted = False
         reuse_for_log = False
         try:
-            q_raw = (x or synth or "")
+            # Prefer error text for retrieval if present; fallback to user text, then transcript
+            q_raw = (x or err or synth or "")
             continuity_on = str(os.getenv("JINX_CONTINUITY_ENABLE", "1")).lower() not in ("", "0", "false", "off", "no")
             anchors = {}
             if continuity_on:
@@ -109,109 +129,43 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
                     prev = {}
                 # merge anchors (current first, then previous uniques), cap lists
                 anchors = {k: list(dict.fromkeys((cur.get(k) or []) + (prev.get(k) or [])))[:10] for k in set((cur or {}).keys()) | set((prev or {}).keys())}
-                eff_q = _augment_query(x or "", synth or "", anchors=anchors)
+                eff_q = _augment_query((x or err or ""), synth or "", anchors=anchors)
             else:
                 eff_q = q_raw
-            base_ctx = await build_context_for(eff_q)
+            # Launch runtime context retrieval concurrently with project context assembly
+            base_ctx_task = asyncio.create_task(build_context_for(eff_q))
+            # Optional: embeddings-backed memory context (no evergreen), env-gated (default OFF for API)
+            mem_ctx_task = None
+            try:
+                if str(os.getenv("JINX_EMBED_MEMORY_CTX", "0")).lower() not in ("", "0", "false", "off", "no"):
+                    mem_ctx_task = asyncio.create_task(_build_mem_ctx(eff_q))
+            except Exception:
+                mem_ctx_task = None
         except Exception:
-            base_ctx = ""
+            base_ctx_task = asyncio.create_task(asyncio.sleep(0.0))  # type: ignore
         # Always build project context; retrieval enforces its own tight budgets
         proj_ctx = ""
         try:
             _q = eff_q
-            # Augment the project query with routed memory hints to bind retrieval to the user's current intent
+            # Delegate enrichment/build to the dedicated micro-module (deduplicated logic)
+            proj_ctx_task: asyncio.Task[str] = asyncio.create_task(_build_proj_ctx_enriched(_q, user_text=x or "", synth=synth or ""))
+            # Await both contexts; runtime may already be done, otherwise this overlaps work
             try:
-                mem_hints = await _memroute(_q, k=8, preview_chars=120)
+                base_ctx = await base_ctx_task
             except Exception:
-                mem_hints = []
+                base_ctx = ""
+            # Await memory context if launched (used internally only; not sent to API)
+            mem_ctx = ""
             try:
-                max_q_chars = int(os.getenv("JINX_PROJ_QUERY_MAX_CHARS", "800"))
+                if 'mem_ctx_task' in locals() and mem_ctx_task is not None:
+                    mem_ctx = await mem_ctx_task
             except Exception:
-                max_q_chars = 800
-            _q_proj = (" ".join([_q] + mem_hints)).strip()
-            if len(_q_proj) > max_q_chars:
-                _q_proj = _q_proj[:max_q_chars]
-            qlow = _q_proj.lower()
-            codey = any(sym in _q_proj for sym in "=[](){}.:,") or any(kw in qlow for kw in ["def ", "class ", "import ", "from ", "return ", "async ", "await ", " for ", " in ", " = "])
-            # If code-like, give a bit more budget on first attempt
-            first_budget = 1200 if codey else None
-            # Dynamic top-K for project hits (higher for code-like queries)
+                mem_ctx = ""
             try:
-                proj_k = int(os.getenv("JINX_PROJ_CTX_K", ("10" if codey else "6")))
+                proj_ctx = await proj_ctx_task
             except Exception:
-                proj_k = 10 if codey else 6
-            # Build multiple enriched sub-queries (task fused with individual memory hints)
-            try:
-                subq_cap = int(os.getenv("JINX_PROJ_SUBQ_MAX", "3"))
-            except Exception:
-                subq_cap = 3
-            subqs = []
-            subqs.append(_q_proj)
-            # 1) from memory hints (routed memory lines)
-            for h in (mem_hints or [])[:max(0, subq_cap)]:
-                qh = f"{_q} {h}".strip()
-                if len(qh) > max_q_chars:
-                    qh = qh[:max_q_chars]
-                if qh not in subqs:
-                    subqs.append(qh)
-            # 2) from channels: top paths and symbols (if available)
-            try:
-                ch_paths = (await _read_channel("paths") or "").splitlines()
-            except Exception:
-                ch_paths = []
-            try:
-                ch_syms = (await _read_channel("symbols") or "").splitlines()
-            except Exception:
-                ch_syms = []
-            def _extract_after(prefix: str, ln: str) -> str:
-                low = (ln or "").lower()
-                if low.startswith(prefix):
-                    return ln[len(prefix):].strip()
-                return ""
-            add_more = max(0, subq_cap - max(0, len(subqs) - 1))
-            # Prefer a path and a symbol if room allows
-            for ln in ch_paths[:2]:
-                if add_more <= 0:
-                    break
-                p = _extract_after("path: ", ln)
-                if not p:
-                    continue
-                # Skip internal memory paths like .jinx/**
-                try:
-                    pp = p.replace("\\", "/").lower()
-                    if any(seg == ".jinx" for seg in pp.split("/")):
-                        continue
-                except Exception:
-                    pass
-                qh = f"{_q} {p}".strip()
-                if len(qh) > max_q_chars:
-                    qh = qh[:max_q_chars]
-                if qh not in subqs:
-                    subqs.append(qh)
-                    add_more -= 1
-            for ln in ch_syms[:2]:
-                if add_more <= 0:
-                    break
-                s = _extract_after("symbol: ", ln)
-                if not s:
-                    continue
-                qh = f"{_q} {s}".strip()
-                if len(qh) > max_q_chars:
-                    qh = qh[:max_q_chars]
-                if qh not in subqs:
-                    subqs.append(qh)
-                    add_more -= 1
-            # Prefer multi-query aggregation when we have hints; fallback to single-query
-            if len(subqs) > 1:
-                proj_ctx = await build_project_context_multi_for(subqs, k=proj_k, max_time_ms=first_budget)
-            else:
-                proj_ctx = await build_project_context_for(_q_proj, k=proj_k, max_time_ms=first_budget)
-            if not proj_ctx:
-                # Cold-start fallback: retry with a larger time budget
-                if len(subqs) > 1:
-                    proj_ctx = await build_project_context_multi_for(subqs, k=proj_k, max_time_ms=2000)
-                if not proj_ctx:
-                    proj_ctx = await build_project_context_for(_q_proj, k=proj_k, max_time_ms=2000)
+                proj_ctx = ""
+            # _build_proj_ctx_enriched already implements its own fallback
             # Continuity: if still empty and this is a short clarification, reuse last cached project context
             if not proj_ctx:
                 reuse = ""
@@ -230,7 +184,20 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
                     proj_ctx = reuse
                     reuse_for_log = True
         except Exception:
+            # If project assembly failed early, still await runtime context task
+            try:
+                base_ctx = await base_ctx_task
+            except Exception:
+                base_ctx = ""
             proj_ctx = ""
+        # If runtime retrieval wasn't launched (fallback path), ensure base_ctx exists
+        if 'base_ctx' not in locals():
+            try:
+                base_ctx = await build_context_for(eff_q)
+            except Exception:
+                base_ctx = ""
+        if 'mem_ctx' not in locals():
+            mem_ctx = ""
         # Persist last project context snapshot for continuity cache
         try:
             await _save_proj_ctx(proj_ctx or "", anchors=anchors if 'anchors' in locals() else None)
@@ -253,7 +220,165 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
             )
         except Exception:
             cont_block = ""
-        ctx = "\n".join([c for c in [base_ctx, proj_ctx, plan_ctx, cont_block] if c])
+        # Optional: auto-turns resolver — hybrid (fast+LLM) that injects a tiny <turns> block when the user asks about Nth message
+        turns_block = ""
+        try:
+            tq = await _infer_turn(x or "")
+        except Exception:
+            tq = None
+        if tq:
+            # Confidence gating to avoid false positives
+            try:
+                conf_min = float(os.getenv("JINX_TURNS_CONF_MIN", "0.3"))
+            except Exception:
+                conf_min = 0.3
+            try:
+                kind = (tq.get("kind") or "pair").strip().lower()
+                idx = int(tq.get("index") or 0)
+                conf = float(tq.get("confidence") or 0.0)
+            except Exception:
+                kind = "pair"; idx = 0; conf = 0.0
+            if idx > 0 and conf >= conf_min:
+                try:
+                    try:
+                        cap_one = int(os.getenv("JINX_TURNS_MAX_CHARS", "800"))
+                    except Exception:
+                        cap_one = 800
+                    if kind == "user":
+                        body = (await _turn_user(idx))
+                        if body:
+                            if cap_one > 0 and len(body) > cap_one:
+                                body = body[:cap_one]
+                            turns_block = f"<turns>\n[User:{idx}]\n{body}\n</turns>"
+                    elif kind == "jinx":
+                        body = (await _turn_jinx(idx))
+                        if body:
+                            if cap_one > 0 and len(body) > cap_one:
+                                body = body[:cap_one]
+                            turns_block = f"<turns>\n[Jinx:{idx}]\n{body}\n</turns>"
+                    else:
+                        turns = await _turns_all()
+                        if 0 < idx <= len(turns):
+                            u = (turns[idx-1].get("user") or "").strip()
+                            a = (turns[idx-1].get("jinx") or "").strip()
+                            try:
+                                cap_pair = int(os.getenv("JINX_TURNS_PAIR_MAX_CHARS", "1200"))
+                            except Exception:
+                                cap_pair = 1200
+                            tiny = (u + "\n" + a).strip()
+                            if cap_pair > 0 and len(tiny) > cap_pair:
+                                tiny = tiny[:cap_pair]
+                            turns_block = f"<turns>\n[Pair:{idx}]\n{tiny}\n</turns>"
+                except Exception:
+                    turns_block = ""
+
+        # Optional: memory program — plan+execute ops (memroute/pins/topics/channels). Prefer this over simple selector.
+        memsel_block = ""
+        prog_blocks: dict[str, str] = {}
+        try:
+            if _likely_mem(x or ""):
+                prog_blocks = await _mem_program(x or "")
+        except Exception:
+            prog_blocks = {}
+        # Merge any blocks returned by program
+        if prog_blocks:
+            try:
+                if prog_blocks.get("memory_selected"):
+                    memsel_block = prog_blocks["memory_selected"].strip()
+                if prog_blocks.get("pins"):
+                    pins_block = prog_blocks["pins"].strip()
+                    memsel_block = (memsel_block + "\n\n" + pins_block).strip() if memsel_block else pins_block
+            except Exception:
+                memsel_block = memsel_block or ""
+
+        # If program produced nothing, fall back to memory reasoner — decide if routed memory or pins should be injected compactly
+        ma = None
+        if not memsel_block:
+            try:
+                if _likely_mem(x or ""):
+                    ma = await _infer_memsel(x or "")
+            except Exception:
+                ma = None
+        if (not memsel_block) and ma:
+            try:
+                mconf_min = float(os.getenv("JINX_MEMSEL_CONF_MIN", "0.4"))
+            except Exception:
+                mconf_min = 0.4
+            action = str(ma.get("action") or "").strip().lower()
+            params = ma.get("params") or {}
+            try:
+                mconf = float(ma.get("confidence") or 0.0)
+            except Exception:
+                mconf = 0.0
+            if mconf >= mconf_min:
+                try:
+                    if action == "memroute":
+                        q = str(params.get("query") or "")
+                        try:
+                            kk = int(params.get("k") or 0)
+                        except Exception:
+                            kk = 0
+                        if kk <= 0:
+                            try:
+                                kk = int(os.getenv("JINX_MEMSEL_K", "8"))
+                            except Exception:
+                                kk = 8
+                        kk = max(1, min(16, kk))
+                        try:
+                            pv = int(os.getenv("JINX_MEMSEL_PREVIEW_CHARS", os.getenv("JINX_MACRO_MEM_PREVIEW_CHARS", "160")))
+                            pv = max(24, pv)
+                        except Exception:
+                            pv = 160
+                        lines = await _memroute(q, k=kk, preview_chars=pv)
+                        body = "\n".join([ln for ln in (lines or [])[:kk] if ln])
+                        try:
+                            cap = int(os.getenv("JINX_MEMSEL_MAX_CHARS", "1200"))
+                        except Exception:
+                            cap = 1200
+                        if body and cap > 0 and len(body) > cap:
+                            body = body[:cap]
+                        if body:
+                            memsel_block = f"<memory_selected>\n{body}\n</memory_selected>"
+                    elif action == "pins":
+                        try:
+                            pins = _pins_load()
+                        except Exception:
+                            pins = []
+                        if pins:
+                            body = "\n".join(pins[:8])
+                            memsel_block = f"<pins>\n{body}\n</pins>"
+                except Exception:
+                    memsel_block = ""
+        elif _likely_mem(x or ""):
+            # Fallback path: inject a minimal memroute block using the whole question as query
+            try:
+                await log_debug("JINX_MEMSEL", "fallback_memroute")
+                try:
+                    fb_k = int(os.getenv("JINX_MEMSEL_FALLBACK_K", "4"))
+                except Exception:
+                    fb_k = 4
+                fb_k = max(1, min(8, fb_k))
+                try:
+                    pv = int(os.getenv("JINX_MEMSEL_PREVIEW_CHARS", os.getenv("JINX_MACRO_MEM_PREVIEW_CHARS", "160")))
+                    pv = max(24, pv)
+                except Exception:
+                    pv = 160
+                q = (x or "").strip()[:240]
+                lines = await _memroute(q, k=fb_k, preview_chars=pv)
+                body = "\n".join([ln for ln in (lines or [])[:fb_k] if ln])
+                if body:
+                    try:
+                        cap = int(os.getenv("JINX_MEMSEL_MAX_CHARS", "900"))
+                    except Exception:
+                        cap = 900
+                    if len(body) > cap:
+                        body = body[:cap]
+                    memsel_block = f"<memory_selected>\n{body}\n</memory_selected>"
+            except Exception:
+                pass
+
+        # Do NOT send <embeddings_memory> to API by default; keep only base/project/planner/continuity (+ optional <turns>/<memory_selected>)
+        ctx = "\n".join([c for c in [base_ctx, proj_ctx, plan_ctx, cont_block, turns_block, memsel_block] if c])
 
         # Optional: Preload sanitized <plan_kernels> code before final execution, guarded by env
         try:
@@ -321,26 +446,42 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
                     pass
         except Exception:
             pass
-        # 2) <memory> from transcript (exclude the latest user input line and sanitize)
-        mem_text = sanitize_transcript_for_memory(synth or "", (x or "").strip())
-        # 2.5) <evergreen> persistent durable facts
+        # 2) <memory> from file-based view (active.md or active.compact.md). Default ON.
         try:
-            evergreen_text = (await read_evergreen()) or ""
+            is_followup = _is_short(x or "")
+        except Exception:
+            is_followup = False
+        try:
+            mem_text = ""
+            if str(os.getenv("JINX_MEMORY_BLOCK_SEND", "1")).lower() not in ("", "0", "false", "off", "no"):
+                mem_text = await _build_api_mem(is_followup, topic_shifted)
+        except Exception:
+            mem_text = ""
+        # 2.5) <evergreen> persistent durable facts
+        # Default: do NOT include evergreen content in the LLM payload.
+        # If explicitly enabled via JINX_EVERGREEN_SEND=1, include a compact selection.
+        evergreen_text = ""
+        try:
+            send_evg = str(os.getenv("JINX_EVERGREEN_SEND", "0")).lower() not in ("", "0", "false", "off", "no")
+            if send_evg:
+                q_for_evg = _q if '_q' in locals() else (x or "")
+                evergreen_text = await _select_evg(q_for_evg, anchors=anchors if 'anchors' in locals() else None)
         except Exception:
             evergreen_text = ""
-        # Continuity: optionally gate evergreen by topic shift on short follow-ups to avoid bleed
-        try:
-            if str(os.getenv("JINX_EVERGREEN_TOPIC_GUARD", "1")).lower() not in ("", "0", "false", "off", "no"):
-                if _is_short(x or ""):
-                    try:
-                        shifted = await _topic_shift(_q)
-                    except Exception:
-                        shifted = False
-                    topic_shifted = topic_shifted or bool(shifted)
-                    if shifted:
-                        evergreen_text = ""
-        except Exception:
-            pass
+        # Continuity: optionally gate evergreen (when sending) by topic shift on short follow-ups
+        if evergreen_text:
+            try:
+                if str(os.getenv("JINX_EVERGREEN_TOPIC_GUARD", "1")).lower() not in ("", "0", "false", "off", "no"):
+                    if _is_short(x or ""):
+                        try:
+                            shifted = await _topic_shift(_q)
+                        except Exception:
+                            shifted = False
+                        topic_shifted = topic_shifted or bool(shifted)
+                        if shifted:
+                            evergreen_text = ""
+            except Exception:
+                pass
         # Optional: persist memory snapshot as Markdown for project embeddings ingestion
         try:
             if (os.getenv("JINX_PERSIST_MEMORY", "1").strip().lower() not in ("", "0", "false", "off", "no")):
@@ -378,21 +519,86 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
         chains = ensure_header_block_separation(chains)
         # Use a dedicated recovery prompt only when fixing an error; otherwise default prompt
         prompt_override = "burning_logic_recovery" if (err and err.strip()) else None
-        out, code_id = await spark_openai(chains, prompt_override=prompt_override)
+        # Streaming fast-path (env-gated): early-run on first complete code block
+        executed_early: bool = False
+        printed_tail_early: bool = False
+        stream_on = str(os.getenv("JINX_LLM_STREAM_FASTPATH", "1")).lower() not in ("", "0", "false", "off", "no")
+
+        # Early execution callback (receives code body and code_id)
+        async def _early_exec(body: str, cid: str) -> None:
+            nonlocal executed_early
+            nonlocal printed_tail_early
+            if executed_early:
+                return
+            # Heuristic guard: skip early run when the first complete block is not code-like
+            # (e.g., model emitted <python_question_...> or prose instead of executable code)
+            try:
+                if not _is_code_like(body or ""):
+                    return
+            except Exception:
+                # Fail-closed: if heuristic unavailable, do not early-execute
+                return
+            minimal = f"<python_{cid}>\n{body}\n</python_{cid}>"
+            async def _early_err(e: Optional[str]) -> None:
+                if not e:
+                    return
+                try:
+                    pretty_echo(minimal)
+                    await show_sandbox_tail()
+                except Exception:
+                    pass
+                # Attach the executed code to the error payload so recovery sees the code to fix
+                payload = _attach_error_code(e or "", None, cid, code_body=body)
+                try:
+                    await corrupt_report(payload)
+                except Exception:
+                    pass
+            try:
+                ok = await run_blocks(minimal, cid, _early_err)
+                if ok:
+                    executed_early = True
+                    await show_sandbox_tail()
+                    printed_tail_early = True
+                    try:
+                        await embed_text(minimal.strip(), source="dialogue", kind="agent")
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        if stream_on:
+            out, code_id = await _spark_llm_stream(chains, prompt_override=prompt_override, on_first_block=_early_exec)
+        else:
+            out, code_id = await _spark_llm(chains, prompt_override=prompt_override)
+        # Normalize model output to ensure exactly one <python_{code_id}> block and proper fences
+        try:
+            out = normalize_output_blocks(out, code_id)
+        except Exception:
+            pass
+        # Always show the model output box for the current turn (once)
+        printed_out_box: bool = False
+        try:
+            pretty_echo(out)
+            printed_out_box = True
+        except Exception:
+            pass
 
         # Ensure that on any execution error we also show the raw model output
         async def on_exec_error(err_msg: Optional[str]) -> None:
             # Sandbox callback sends None on success — ignore to avoid duplicate log prints
             if not err_msg:
                 return
-            pretty_echo(out)
+            # Avoid re-printing the same model box; it's already shown above
             await show_sandbox_tail()
-            await corrupt_report(err_msg)
+            # Attach the executed code to the error payload so recovery sees the code to fix
+            payload = _attach_error_code(err_msg or "", out, code_id)
+            await corrupt_report(payload)
 
-        executed = await run_blocks(out, code_id, on_exec_error)
+        # If early executed successfully, treat as executed to prevent duplicate run/print
+        executed = True if executed_early else await run_blocks(out, code_id, on_exec_error)
         if not executed:
             await bomb_log(f"No executable <python_{code_id}> block found in model output; displaying raw output.")
-            pretty_echo(out)
+            # Already printed above
             await dec_pulse(10)
             # Log a clean Jinx line (prefer question content); avoid raw tags
             try:
@@ -414,12 +620,23 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
                     qtext = (out or "").strip()
             if qtext:
                 await blast_mem(f"Jinx: {qtext}")
+            # Append turn to file-based memory (best-effort)
+            try:
+                await _append_turn((x or ""), (out or ""))
+            except Exception:
+                pass
         else:
-            # After successful execution, also surface the latest sandbox log context
-            await show_sandbox_tail()
+            # After successful execution, also surface the latest sandbox log context (avoid duplicate if already printed early)
+            if not printed_tail_early:
+                await show_sandbox_tail()
             # Also embed the agent output for retrieval (source: dialogue)
             try:
                 await embed_text(out.strip(), source="dialogue", kind="agent")
+            except Exception:
+                pass
+            # Append turn to file-based memory (best-effort)
+            try:
+                await _append_turn((x or ""), (out or ""))
             except Exception:
                 pass
     except Exception:

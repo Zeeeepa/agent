@@ -36,15 +36,24 @@ def ensure_header_block_separation(text: str) -> str:
     t = re.sub(r"(</embeddings_context>)[\s\u00A0\u2007\u202F]*(<evergreen>)", r"\1\n\n\2", t)
     t = re.sub(r"(</embeddings_context>)[\s\u00A0\u2007\u202F]*(<embeddings_code>)", r"\1\n\n\2", t)
     t = re.sub(r"(</embeddings_context>)[\s\u00A0\u2007\u202F]*(<embeddings_refs>)", r"\1\n\n\2", t)
+    t = re.sub(r"(</embeddings_context>)[\s\u00A0\u2007\u202F]*(<embeddings_memory>)", r"\1\n\n\2", t)
     t = re.sub(r"(</embeddings_context>)[\s\u00A0\u2007\u202F]*(<plan_kernels>)", r"\1\n\n\2", t)
     t = re.sub(r"(</embeddings_code>)[\s\u00A0\u2007\u202F]*(<evergreen>)", r"\1\n\n\2", t)
     t = re.sub(r"(</embeddings_code>)[\s\u00A0\u2007\u202F]*(<embeddings_refs>)", r"\1\n\n\2", t)
+    t = re.sub(r"(</embeddings_code>)[\s\u00A0\u2007\u202F]*(<embeddings_memory>)", r"\1\n\n\2", t)
     t = re.sub(r"(</embeddings_code>)[\s\u00A0\u2007\u202F]*(<plan_kernels>)", r"\1\n\n\2", t)
     t = re.sub(r"(</embeddings_refs>)[\s\u00A0\u2007\u202F]*(<evergreen>)", r"\1\n\n\2", t)
     t = re.sub(r"(</embeddings_refs>)[\s\u00A0\u2007\u202F]*(<plan_kernels>)", r"\1\n\n\2", t)
+    t = re.sub(r"(</embeddings_refs>)[\s\u00A0\u2007\u202F]*(<embeddings_memory>)", r"\1\n\n\2", t)
     t = re.sub(r"(</embeddings_code>)[\s\u00A0\u2007\u202F]*(<memory>)", r"\1\n\n\2", t)
     t = re.sub(r"(</embeddings_code>)[\s\u00A0\u2007\u202F]*(<task>)", r"\1\n\n\2", t)
     t = re.sub(r"(</embeddings_code>)[\s\u00A0\u2007\u202F]*(<error>)", r"\1\n\n\2", t)
+    t = re.sub(r"(</embeddings_memory>)[\s\u00A0\u2007\u202F]*(<evergreen>)", r"\1\n\n\2", t)
+    t = re.sub(r"(</embeddings_memory>)[\s\u00A0\u2007\u202F]*(<embeddings_code>)", r"\1\n\n\2", t)
+    t = re.sub(r"(</embeddings_memory>)[\s\u00A0\u2007\u202F]*(<embeddings_refs>)", r"\1\n\n\2", t)
+    t = re.sub(r"(</embeddings_memory>)[\s\u00A0\u2007\u202F]*(<memory>)", r"\1\n\n\2", t)
+    t = re.sub(r"(</embeddings_memory>)[\s\u00A0\u2007\u202F]*(<task>)", r"\1\n\n\2", t)
+    t = re.sub(r"(</embeddings_memory>)[\s\u00A0\u2007\u202F]*(<error>)", r"\1\n\n\2", t)
     t = re.sub(r"(</evergreen>)[\s\u00A0\u2007\u202F]*(<memory>)", r"\1\n\n\2", t)
     t = re.sub(r"(</plan_kernels>)[\s\u00A0\u2007\u202F]*(<evergreen>)", r"\1\n\n\2", t)
     t = re.sub(r"(</plan_kernels>)[\s\u00A0\u2007\u202F]*(<memory>)", r"\1\n\n\2", t)
@@ -66,12 +75,28 @@ def build_header(ctx: str | None, mem_text: str | None, task_text: str | None, e
     - Final output guarantees proper separation between blocks.
     """
     parts: List[str] = []
+
+    def _is_wrapped(s: str, tag: str) -> bool:
+        if not s:
+            return False
+        ss = s.strip()
+        return ss.startswith(f"<{tag}") and ss.endswith(f"</{tag}>")
+
+    def _wrap_if_needed(s: str, tag: str) -> str:
+        core = (s or "").strip()
+        if not core:
+            return ""
+        return core if _is_wrapped(core, tag) else f"<{tag}>\n{core}\n</{tag}>"
     if ctx:
         parts.append(ctx.rstrip() + "\n")  # ctx is already wrapped as <embeddings_context>...</embeddings_context>
     if evergreen_text and evergreen_text.strip():
-        parts.append(f"<evergreen>\n{evergreen_text.strip()}\n</evergreen>\n")
+        ev = evergreen_text.strip()
+        ev_block = ev if _is_wrapped(ev, "evergreen") else f"<evergreen>\n{ev}\n</evergreen>"
+        parts.append(ev_block + "\n")
     if mem_text and mem_text.strip():
-        parts.append(f"<memory>\n{mem_text.strip()}\n</memory>\n")
+        mt = mem_text.strip()
+        mem_block = mt if _is_wrapped(mt, "memory") else f"<memory>\n{mt}\n</memory>"
+        parts.append(mem_block + "\n")
     if task_text and task_text.strip():
         parts.append(f"<task>\n{task_text.strip()}\n</task>\n")
     if error_text and error_text.strip():
@@ -81,5 +106,20 @@ def build_header(ctx: str | None, mem_text: str | None, task_text: str | None, e
         return ""
 
     header_text = "\n".join(parts)
+
+    # Collapse accidental nested identical blocks like <memory><memory>...</memory></memory>
+    def _collapse_nested(text: str, tag: str) -> str:
+        # Repeat until no more nested patterns are found
+        pat = re.compile(rf"<{tag}[^>]*>\s*<\s*{tag}[^>]*>([\s\S]*?)</\s*{tag}\s*>\s*</\s*{tag}\s*>", re.IGNORECASE)
+        prev = None
+        cur = text
+        while prev != cur:
+            prev = cur
+            cur = pat.sub(rf"<{tag}>\\1</{tag}>", cur)
+        return cur
+
+    header_text = _collapse_nested(header_text, "memory")
+    header_text = _collapse_nested(header_text, "evergreen")
+
     header_text = ensure_header_block_separation(header_text)
     return header_text

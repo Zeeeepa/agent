@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from jinx.openai_mod import build_header_and_tag
-from .openai_caller import call_openai
+from .openai_caller import call_openai, call_openai_validated, call_openai_stream_first_block
 from jinx.log_paths import OPENAI_REQUESTS_DIR_GENERAL
 from jinx.logger.openai_requests import write_openai_request_dump, write_openai_response_append
 from jinx.micro.memory.storage import write_token_hint
@@ -17,6 +17,8 @@ import platform
 import sys
 import datetime as _dt
 from .prompt_filters import sanitize_prompt_for_external_api
+from jinx.micro.text.heuristics import is_code_like as _is_code_like
+from jinx.micro.rt.timing import timing_section
 
 
 async def code_primer(prompt_override: str | None = None) -> tuple[str, str]:
@@ -27,11 +29,8 @@ async def code_primer(prompt_override: str | None = None) -> tuple[str, str]:
     return await build_header_and_tag(prompt_override)
 
 
-async def spark_openai(txt: str, *, prompt_override: str | None = None) -> tuple[str, str]:
-    """Call OpenAI Responses API and return output text with the code tag.
-
-    Returns (output_text, code_tag_id).
-    """
+async def _prepare_request(txt: str, *, prompt_override: str | None = None) -> tuple[str, str, str, str, str]:
+    """Compose instructions and return (jx, tag, model, sx, stxt)."""
     jx, tag = await code_primer(prompt_override)
     # Expand dynamic prompt macros in real time (vars/env/anchors/sys/runtime/exports + custom providers)
     try:
@@ -41,14 +40,6 @@ async def spark_openai(txt: str, *, prompt_override: str | None = None) -> tuple
             auto_on = str(os.getenv("JINX_AUTOMACROS", "1")).lower() not in ("", "0", "false", "off", "no")
         except Exception:
             auto_on = True
-        # Heuristic: code-like queries prefer project context; otherwise dialogue
-        def _is_codey(s: str) -> bool:
-            if not s:
-                return False
-            ql = s.lower()
-            if any(kw in ql for kw in ("def ", "class ", "import ", "from ", "return ", "async ", "await ")):
-                return True
-            return any(c in s for c in "=[](){}.:,")
         if auto_on and ("{{m:" not in jx or "{{m:emb:" not in jx or "{{m:mem:" not in jx):
             lines = []
             try:
@@ -68,7 +59,7 @@ async def spark_openai(txt: str, *, prompt_override: str | None = None) -> tuple
                 proj_k = int(os.getenv("JINX_AUTOMACRO_PROJECT_K", "3"))
             except Exception:
                 proj_k = 3
-            codey = _is_codey(txt or "")
+            codey = _is_code_like(txt or "")
             # Memory automacros
             try:
                 use_mem = str(os.getenv("JINX_AUTOMACRO_MEMORY", "1").lower()) not in ("", "0", "false", "off", "no")
@@ -158,14 +149,24 @@ async def spark_openai(txt: str, *, prompt_override: str | None = None) -> tuple
             input_text=txt or "",
         )
         # Ensure built-in providers and plugin macros are registered/loaded
-        try:
-            await register_builtin_macros()
-        except Exception:
-            pass
-        try:
-            await load_macro_plugins()
-        except Exception:
-            pass
+        # Initialize macro providers/plugins once per process
+        import asyncio as _asyncio
+        _init_lock = getattr(spark_openai, "_macro_init_lock", None)
+        if _init_lock is None:
+            _init_lock = _asyncio.Lock()
+            setattr(spark_openai, "_macro_init_lock", _init_lock)
+        if not getattr(spark_openai, "_macro_inited", False):
+            async with _init_lock:
+                if not getattr(spark_openai, "_macro_inited", False):
+                    try:
+                        await register_builtin_macros()
+                    except Exception:
+                        pass
+                    try:
+                        await load_macro_plugins()
+                    except Exception:
+                        pass
+                    setattr(spark_openai, "_macro_inited", True)
         try:
             max_exp = int(os.getenv("JINX_PROMPT_MACRO_MAX", "50"))
         except Exception:
@@ -180,27 +181,85 @@ async def spark_openai(txt: str, *, prompt_override: str | None = None) -> tuple
     except Exception:
         pass
     model = os.getenv("OPENAI_MODEL", "gpt-5")
+    # Sanitize prompts to avoid leaking internal .jinx paths/content
+    sx = sanitize_prompt_for_external_api(jx)
+    stxt = sanitize_prompt_for_external_api(txt or "")
+    return jx, tag, model, sx, stxt
+
+
+async def spark_openai(txt: str, *, prompt_override: str | None = None) -> tuple[str, str]:
+    """Call OpenAI Responses API and return output text with the code tag.
+
+    Returns (output_text, code_tag_id).
+    """
+    jx, tag, model, sx, stxt = await _prepare_request(txt, prompt_override=prompt_override)
 
     async def openai_task() -> tuple[str, str]:
         req_path: str = ""
-        # Sanitize prompts to avoid leaking internal .jinx paths/content
-        sx = sanitize_prompt_for_external_api(jx)
-        stxt = sanitize_prompt_for_external_api(txt or "")
+        import asyncio as _asyncio
+        # Overlap request dump with LLM call
+        dump_task = _asyncio.create_task(write_openai_request_dump(
+            target_dir=OPENAI_REQUESTS_DIR_GENERAL,
+            kind="GENERAL",
+            instructions=sx,
+            input_text=stxt,
+            model=model,
+        ))
+        # Preferred: validated multi-sample path
         try:
-            req_path = await write_openai_request_dump(
-                target_dir=OPENAI_REQUESTS_DIR_GENERAL,
-                kind="GENERAL",
-                instructions=sx,
-                input_text=stxt,
-                model=model,
-            )
+            async with timing_section("llm.call"):
+                out = await call_openai_validated(sx, model, stxt, code_id=tag)
         except Exception:
-            pass
-        out = await call_openai(sx, model, stxt)
+            # Fallback to legacy single-sample on error
+            async with timing_section("llm.call_legacy"):
+                out = await call_openai(sx, model, stxt)
+        # Get dump path (await, then append in background)
         try:
-            await write_openai_response_append(req_path, "GENERAL", out)
+            req_path = await dump_task
+        except Exception:
+            req_path = ""
+        try:
+            _asyncio.create_task(write_openai_response_append(req_path, "GENERAL", out))
         except Exception:
             pass
         return (out, tag)
 
-    return await detonate_payload(openai_task)
+    # Avoid duplicate outbound API calls on post-call exceptions by disabling retries here.
+    # Lower-level resiliency is provided by caching/coalescing/multi-path logic.
+    return await detonate_payload(openai_task, retries=1)
+
+
+async def spark_openai_streaming(txt: str, *, prompt_override: str | None = None, on_first_block=None) -> tuple[str, str]:
+    """Streaming LLM call with early execution on first complete <python_{tag}> block.
+
+    Returns (full_output_text, code_tag_id).
+    """
+    jx, tag, model, sx, stxt = await _prepare_request(txt, prompt_override=prompt_override)
+
+    async def openai_task() -> tuple[str, str]:
+        req_path: str = ""
+        import asyncio as _asyncio
+        dump_task = _asyncio.create_task(write_openai_request_dump(
+            target_dir=OPENAI_REQUESTS_DIR_GENERAL,
+            kind="GENERAL",
+            instructions=sx,
+            input_text=stxt,
+            model=model,
+        ))
+        try:
+            async with timing_section("llm.stream"):
+                out = await call_openai_stream_first_block(sx, model, stxt, code_id=tag, on_first_block=on_first_block)
+        except Exception:
+            async with timing_section("llm.call_fallback"):
+                out = await call_openai_validated(sx, model, stxt, code_id=tag)
+        try:
+            req_path = await dump_task
+        except Exception:
+            req_path = ""
+        try:
+            _asyncio.create_task(write_openai_response_append(req_path, "GENERAL", out))
+        except Exception:
+            pass
+        return (out, tag)
+
+    return await detonate_payload(openai_task, retries=1)

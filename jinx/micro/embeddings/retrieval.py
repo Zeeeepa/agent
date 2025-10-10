@@ -8,7 +8,7 @@ import hashlib
 
 from jinx.micro.embeddings.pipeline import iter_recent_items
 from .paths import EMBED_ROOT
-from .util import cos
+from .similarity import score_cosine_batch
 from .text_clean import is_noise_text
 from .scan_store import iter_items as scan_iter_items
 from .embed_cache import embed_text_cached
@@ -22,6 +22,16 @@ MAX_SOURCES = int(os.getenv("EMBED_MAX_SOURCES", "50"))
 QUERY_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 RECENCY_WINDOW_SEC = int(os.getenv("EMBED_RECENCY_WINDOW_SEC", str(24 * 3600)))
 EXHAUSTIVE = str(os.getenv("EMBED_EXHAUSTIVE", "1")).lower() in {"1", "true", "on", "yes"}
+
+# Shared hot-store for runtime items
+try:
+    _HOT_TTL_MS = int(os.getenv("EMBED_RUNTIME_HOT_TTL_MS", "1500"))
+except Exception:
+    _HOT_TTL_MS = 1500
+from .hot_store import get_runtime_items_hot
+
+async def _load_runtime_items() -> List[Tuple[str, Dict[str, Any]]]:
+    return await asyncio.to_thread(scan_iter_items, EMBED_ROOT, MAX_FILES_PER_SOURCE, MAX_SOURCES)
 
 
 async def _embed_query(text: str) -> List[float]:
@@ -51,7 +61,10 @@ async def retrieve_top_k(query: str, k: int | None = None, *, max_time_ms: int |
         thr = max(0.2, thr)
         k_eff = max(k_eff, 6)
 
-    qv = await _embed_query(query)
+    # Overlap query embedding with a hot-store refresh to reduce wall time
+    qv_task = asyncio.create_task(_embed_query(query))
+    hot_task = asyncio.create_task(get_runtime_items_hot(_load_runtime_items, _HOT_TTL_MS))
+    qv = await qv_task
     scored: List[Tuple[float, str, Dict[str, Any]]] = []
     now = time.time()
     t0 = time.perf_counter()
@@ -66,28 +79,37 @@ async def retrieve_top_k(query: str, k: int | None = None, *, max_time_ms: int |
     except Exception:
         state_rec_mult = 0.5
     short_q = (qlen <= int(os.getenv("JINX_CONTINUITY_SHORTLEN", "80")))
+    # Collect recent items first and batch-score for lower overhead
+    _recent_objs = []
+    _recent_vecs = []
+    _recent_meta = []
     for obj in iter_recent_items():
-        vec = obj.get("embedding") or []
         meta = obj.get("meta", {})
         src_l = (meta.get("source") or "").strip().lower()
-        # Allow dialogue, sandbox/*, and state frames
         if not (src_l == "dialogue" or src_l.startswith("sandbox/") or src_l == "state"):
             continue
         pv = (meta.get("text_preview") or "").strip()
         if len(pv) < MIN_PREVIEW_LEN or is_noise_text(pv):
             continue
-        sim = cos(qv, vec)
-        if sim < thr:
-            continue
-        ts = float(meta.get("ts") or 0.0)
-        age = max(0.0, now - ts)
-        rec = 0.0 if RECENCY_WINDOW_SEC <= 0 else max(0.0, 1.0 - (age / RECENCY_WINDOW_SEC))
-        score = 0.8 * sim + 0.2 * rec
-        if src_l == "state" and short_q:
-            score *= state_boost * (1.0 + state_rec_mult * rec)
-        scored.append((score, meta.get("source", "recent"), obj))
-        if len(scored) >= k_eff:
+        _recent_objs.append(obj)
+        _recent_meta.append(meta)
+        _recent_vecs.append(obj.get("embedding") or [])
+        if len(_recent_objs) >= k_eff * 2:  # cap to a small multiple of k
             break
+    if _recent_vecs:
+        sims = score_cosine_batch(qv, _recent_vecs)
+        for obj, meta, sim in zip(_recent_objs, _recent_meta, sims):
+            if sim < thr:
+                continue
+            ts = float(meta.get("ts") or 0.0)
+            age = max(0.0, now - ts)
+            rec = 0.0 if RECENCY_WINDOW_SEC <= 0 else max(0.0, 1.0 - (age / RECENCY_WINDOW_SEC))
+            score = 0.8 * sim + 0.2 * rec
+            if (meta.get("source") or "").strip().lower() == "state" and short_q:
+                score *= state_boost * (1.0 + state_rec_mult * rec)
+            scored.append((score, meta.get("source", "recent"), obj))
+            if len(scored) >= k_eff:
+                break
 
     # Early return if мы уже набрали k; при EXHAUSTIVE=True не прерываемся по времени
     if len(scored) >= k_eff:
@@ -99,9 +121,32 @@ async def retrieve_top_k(query: str, k: int | None = None, *, max_time_ms: int |
         return scored[:k_eff]
 
     # 2) Fallback: scan persisted files (bounded and time-guarded)
-    items = await asyncio.to_thread(_iter_items)
-    for idx, (src, obj) in enumerate(items):
-        vec = obj.get("embedding") or []
+    # Use the in-memory snapshot (refreshed in the background) instead of re-reading disk
+    items = await hot_task
+    # Batch through persisted items for better throughput
+    B = 1024
+    buf_vecs: List[List[float]] = []
+    buf_meta_src: List[Tuple[str, Dict[str, Any]]] = []  # (src, obj)
+    def _flush(buf_vecs: List[List[float]], buf_meta_src: List[Tuple[str, Dict[str, Any]]]) -> None:
+        nonlocal scored
+        if not buf_vecs:
+            return
+        sims = score_cosine_batch(qv, buf_vecs)
+        for (src_i, obj_i), sim in zip(buf_meta_src, sims):
+            if sim < thr:
+                continue
+            meta_i = obj_i.get("meta", {})
+            ts = float(meta_i.get("ts") or 0.0)
+            age = max(0.0, now - ts)
+            rec = 0.0 if RECENCY_WINDOW_SEC <= 0 else max(0.0, 1.0 - (age / RECENCY_WINDOW_SEC))
+            score = 0.8 * sim + 0.2 * rec
+            src_l = (src_i or "").strip().lower()
+            meta_src_l = (meta_i.get("source") or "").strip().lower()
+            if (src_l == "state" or meta_src_l == "state") and short_q:
+                score *= state_boost * (1.0 + state_rec_mult * rec)
+            scored.append((score, src_i, obj_i))
+    idx = 0
+    for src, obj in items:
         meta = obj.get("meta", {})
         src_l = (src or "").strip().lower()
         meta_src_l = (meta.get("source") or "").strip().lower()
@@ -110,28 +155,27 @@ async def retrieve_top_k(query: str, k: int | None = None, *, max_time_ms: int |
             meta_src_l == "dialogue" or meta_src_l.startswith("sandbox/") or meta_src_l == "state"
         )
         if not allow_src:
+            idx += 1
             continue
         pv = (meta.get("text_preview") or "").strip()
-        # Filter out very short previews to avoid trivial/noisy lines
         if len(pv) < MIN_PREVIEW_LEN:
+            idx += 1
             continue
-        sim = cos(qv, vec)
-        if sim < thr:
-            continue
-        ts = float(meta.get("ts") or 0.0)
-        age = max(0.0, now - ts)
-        rec = 0.0 if RECENCY_WINDOW_SEC <= 0 else max(0.0, 1.0 - (age / RECENCY_WINDOW_SEC))
-        score = 0.8 * sim + 0.2 * rec
-        if (src_l == "state" or meta_src_l == "state") and short_q:
-            score *= state_boost * (1.0 + state_rec_mult * rec)
-        scored.append((score, src, obj))
-        if len(scored) >= k_eff:
-            break
-        if eff_budget is not None and (time.perf_counter() - t0) * 1000.0 > eff_budget:
-            break
-        # Periodically yield to keep event loop responsive
-        if (idx % 50) == 49:
-            await asyncio.sleep(0)
+        buf_vecs.append(obj.get("embedding") or [])
+        buf_meta_src.append((src, obj))
+        if len(buf_vecs) >= B:
+            _flush(buf_vecs, buf_meta_src)
+            buf_vecs = []
+            buf_meta_src = []
+            if (idx % 50) == 49:
+                await asyncio.sleep(0)
+            if len(scored) >= k_eff:
+                break
+            if eff_budget is not None and (time.perf_counter() - t0) * 1000.0 > eff_budget:
+                break
+        idx += 1
+    if buf_vecs and len(scored) < k_eff and (eff_budget is None or (time.perf_counter() - t0) * 1000.0 <= eff_budget):
+        _flush(buf_vecs, buf_meta_src)
     scored.sort(key=lambda x: x[0], reverse=True)
     return scored[:k_eff]
 

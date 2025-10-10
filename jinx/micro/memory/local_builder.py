@@ -12,6 +12,11 @@ from jinx.micro.memory.storage import ensure_nl
 from jinx.micro.embeddings.project_config import ROOT as PROJECT_ROOT
 from jinx.micro.memory.facts_store import load_facts as _facts_load, save_facts as _facts_save
 from jinx.micro.memory.pin_store import load_pins as _load_pins
+from jinx.micro.text.heuristics import (
+    is_code_like_line as _is_code_like_line,
+    extract_preference_fragments as _extract_pref_frags,
+    extract_decision_fragments as _extract_decision_frags,
+)
 
 
 # -------- Paths --------
@@ -33,35 +38,7 @@ _MEM_DIR = _memory_dir()
 _TAG_ALT = "|".join(sorted(ALL_TAGS))
 _TOOL_BLOCK_RE = re.compile(fr"<(?:{_TAG_ALT})_[^>]+>.*?</(?:{_TAG_ALT})_[^>]+>", re.DOTALL)
 _PATH_RE = re.compile(r"(?:[A-Za-z]:\\[^\r\n]+|(?:\.|\.{1,2})?/(?:[^\s/]+/)*[^\s/]+\.[A-Za-z0-9]{1,6})")
-_CODEY_RE = re.compile(r"\b(def|class|import|from|return|async|await)\b|[\[\](){}=:.,]")
-
-# Russian/English hints for preferences and decisions
-_PREF_PATTERNS = [
-    re.compile(p, re.IGNORECASE)
-    for p in [
-        r"\bprefer\b(.{0,120})",
-        r"\balways\b(.{0,120})",
-        r"\bnever\b(.{0,120})",
-        r"предпочита(ю|ем)(.{0,120})",
-        r"всегда\b(.{0,120})",
-        r"никогда\b(.{0,120})",
-        r"используй\b(.{0,120})",
-        r"не\s+используй\b(.{0,120})",
-    ]
-]
-_DEC_PATTERNS = [
-    re.compile(p, re.IGNORECASE)
-    for p in [
-        r"\bdecide(d|s)?\b(.{0,140})",
-        r"\bwe will\b(.{0,140})",
-        r"реш(ение|ено)\b(.{0,140})",
-        r"будем\b(.{0,140})",
-        r"нужно\b(.{0,140})",
-        r"надо\b(.{0,140})",
-        r"давай\b(.{0,140})",
-        r"сделаем\b(.{0,140})",
-    ]
-]
+ 
 _SET_RE = re.compile(r"\b([A-Z_]{2,})\s*=\s*([^\s,;]+)")
 
 # PII redactors
@@ -102,13 +79,7 @@ def _dedupe_consecutive(lines: List[str]) -> List[str]:
     return out
 
 
-def _is_codey_line(s: str) -> bool:
-    try:
-        if _CODEY_RE.search(s):
-            return True
-        return False
-    except Exception:
-        return False
+ 
 
 
 def _build_compact(transcript: str, max_lines: int) -> str:
@@ -170,7 +141,7 @@ def _build_compact(transcript: str, max_lines: int) -> str:
                 continue
         # Continuation or role inference
         if cur_role:
-            if cur_role == "User" and _is_codey_line(ln):
+            if cur_role == "User" and _is_code_like_line(ln):
                 # Switch to agent output if code-like content follows the user line
                 _flush()
                 cur_role = "Jinx"
@@ -179,7 +150,7 @@ def _build_compact(transcript: str, max_lines: int) -> str:
                 buf.append(ln)
         else:
             # Unknown provenance — classify by heuristics
-            if _is_codey_line(ln):
+            if _is_code_like_line(ln):
                 out.append(f"Jinx: {ln[:320]}")
             else:
                 out.append(f"Note: {ln[:320]}")
@@ -196,24 +167,7 @@ def _topn(counter: Dict[str, float], n: int) -> List[str]:
     return [k for k, _ in items[:n]]
 
 
-def _extract_pref_lines(text: str) -> List[str]:
-    out: List[str] = []
-    for pat in _PREF_PATTERNS:
-        for m in pat.finditer(text or ""):
-            frag = (m.group(0) or "").strip()
-            if frag and frag not in out:
-                out.append(frag)
-    return out
-
-
-def _extract_decision_lines(text: str) -> List[str]:
-    out: List[str] = []
-    for pat in _DEC_PATTERNS:
-        for m in pat.finditer(text or ""):
-            frag = (m.group(0) or "").strip()
-            if frag and frag not in out:
-                out.append(frag)
-    return out
+ 
 
 
 def _extract_settings(text: str) -> List[str]:
@@ -303,13 +257,13 @@ def _build_evergreen(transcript: str, evergreen_prev: str, facts_cap: int, top_p
 
     # Preferences
     prefs: Dict[str, float] = dict(facts.get("prefs", {}))
-    for frag in _extract_pref_lines(text):
+    for frag in _extract_pref_frags(text):
         prefs[frag] = float(prefs.get(frag, 0.0)) + 1.0
     facts["prefs"] = prefs
 
     # Decisions
     decs: Dict[str, float] = dict(facts.get("decisions", {}))
-    for frag in _extract_decision_lines(text):
+    for frag in _extract_decision_frags(text):
         decs[frag] = float(decs.get(frag, 0.0)) + 1.0
     facts["decisions"] = decs
 

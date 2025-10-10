@@ -9,6 +9,7 @@ import asyncio
 
 from jinx.micro.memory.storage import read_compact as _read_compact, read_evergreen as _read_evergreen, get_memory_mtimes as _get_mtimes
 from jinx.micro.memory.graph_reasoner import activate as _graph_activate
+from jinx.micro.text.heuristics import is_code_like as _is_code_like
 
 # Module-level caches keyed by memory file mtimes
 _C_MTIME: int = -1
@@ -64,8 +65,7 @@ def _is_error(ln: str) -> bool:
 
 
 def _is_codey(ln: str) -> bool:
-    low = ln.lower()
-    return any(tok in low for tok in ("def ", "class ", " import ", " return ")) or any(sym in ln for sym in ("=", "(", ")", ":", ".", "[", "]", "{", "}"))
+    return _is_code_like(ln or "")
 
 
 async def rank_memory(query: str, *, scope: str = "compact", k: int = 6, preview_chars: int = 160) -> List[str]:

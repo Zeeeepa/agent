@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from typing import Any, Awaitable, Callable, Optional
 
 from .bus import get_bus
@@ -9,10 +10,12 @@ from .supervisor import get_supervisor
 from .contracts import TASK_REQUEST, TASK_RESULT, TASK_PROGRESS, PROGRAM_SPAWN
 from .program import MicroProgram
 from jinx.micro.llm.macro_registry import register_macro as _register_macro
+from jinx.micro.net.client import prewarm_openai_client as _prewarm_openai
 
 
 _bridge_started: bool = False
 _selfstudy_started: bool = False
+_prewarmed_openai: bool = False
 _bg_tasks: list[asyncio.Task] = []
 
 
@@ -27,6 +30,19 @@ async def ensure_runtime() -> None:
     """
     global _bridge_started, _selfstudy_started, _bg_tasks
     await get_supervisor().start()
+    # One-time OpenAI HTTP pool prewarm (default enabled)
+    global _prewarmed_openai
+    if not _prewarmed_openai:
+        try:
+            on = str(os.getenv("JINX_OPENAI_PREWARM", "1")).lower() not in ("", "0", "false", "off", "no")
+        except Exception:
+            on = True
+        if on:
+            try:
+                _prewarm_openai()
+            except Exception:
+                pass
+        _prewarmed_openai = True
     # Start bridge once
     if not _bridge_started:
         try:

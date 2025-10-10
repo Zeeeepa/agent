@@ -4,7 +4,7 @@ import asyncio
 import os
 import re
 from dataclasses import dataclass
-from typing import Awaitable, Callable, Dict, List, Optional
+from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 
 try:
     from jinx.logger.file_logger import append_line as _append
@@ -51,41 +51,82 @@ async def list_namespaces() -> List[str]:
 
 
 async def expand_dynamic_macros(text: str, ctx: MacroContext, *, max_expansions: int = 50) -> str:
+    """Expand dynamic macros concurrently with per-call deduplication.
+
+    - Collects all macro occurrences first (up to max_expansions) to avoid repeated scans.
+    - Deduplicates identical (namespace, args) pairs and runs handlers concurrently under a
+      small semaphore to keep latency low while respecting RT constraints.
+    - Assembles the final text in a single pass preserving original order.
+    """
     if not text or not isinstance(text, str):
         return text
-    # fast path
     if "{{m:" not in text:
         return text
-    out = []
+
+    # 1) Find occurrences once
+    occ: List[Tuple[int, int, str, Tuple[str, ...]]] = []  # (start, end, ns, args)
     pos = 0
-    expands = 0
     while True:
         m = _GEN_RE.search(text, pos)
         if not m:
-            out.append(text[pos:])
             break
-        out.append(text[pos:m.start()])
-        ns = m.group(1).strip().lower()
+        ns = (m.group(1) or "").strip().lower()
         args_blob = m.group(2) or ""
-        args = [a for a in args_blob.split(":") if a]
-        val = ""
+        args = tuple(a for a in args_blob.split(":") if a)
+        occ.append((m.start(), m.end(), ns, args))
+        pos = m.end()
+        if len(occ) >= max_expansions:
+            break
+    if not occ:
+        return text
+
+    # 2) Snapshot registry once
+    async with _LOCK:
+        reg = dict(_REGISTRY)
+
+    # 3) Deduplicate macro calls for this pass
+    uniq_keys: List[Tuple[str, Tuple[str, ...]]] = []
+    seen: set[Tuple[str, Tuple[str, ...]]] = set()
+    for _, _, ns, args in occ:
+        key = (ns, args)
+        if key not in seen:
+            seen.add(key)
+            uniq_keys.append(key)
+
+    # 4) Run handlers concurrently under a small semaphore
+    try:
+        conc = max(1, int(os.getenv("JINX_PROMPT_MACRO_CONC", "4")))
+    except Exception:
+        conc = 4
+    sem = asyncio.Semaphore(conc)
+
+    results: Dict[Tuple[str, Tuple[str, ...]], str] = {}
+
+    async def _run_one(ns: str, args: Tuple[str, ...]) -> None:
+        h = reg.get(ns)
+        if not h:
+            results[(ns, args)] = ""
+            return
         try:
-            async with _LOCK:
-                h = _REGISTRY.get(ns)
-            if h:
-                val = await h(args, ctx)
+            async with sem:
+                val = await h(list(args), ctx)
+            results[(ns, args)] = val or ""
         except Exception as e:
-            # do not propagate provider errors
-            val = ""
+            results[(ns, args)] = ""
             if _append and os.getenv("JINX_PROMPT_MACRO_TRACE", "").lower() not in ("", "0", "false", "off", "no"):
                 try:
                     await _append(BLUE_WHISPERS, f"[MACRO:{ns}] error: {e}")
                 except Exception:
                     pass
-        out.append(val or "")
-        pos = m.end()
-        expands += 1
-        if expands >= max_expansions:
-            out.append(text[pos:])
-            break
-    return "".join(out)
+
+    await asyncio.gather(*[asyncio.create_task(_run_one(ns, args)) for ns, args in uniq_keys])
+
+    # 5) Assemble final text preserving order
+    out_parts: List[str] = []
+    last = 0
+    for start, end, ns, args in occ:
+        out_parts.append(text[last:start])
+        out_parts.append(results.get((ns, args), ""))
+        last = end
+    out_parts.append(text[last:])
+    return "".join(out_parts)

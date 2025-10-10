@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import platform, getpass, time
+import platform, getpass, time, os, uuid
 
 # Tags used by parser_service and openai_service outputs
 CODE_TAGS = {"python", "python_question"}
@@ -33,7 +33,18 @@ def neon_stat() -> dict[str, str]:
 
 
 def jinx_tag() -> tuple[str, dict[str, dict[str, str]]]:
-    """Return a unique fuse id and corresponding start/end tags for all blocks."""
-    fuse = str(int(time.time()))
+    """Return a unique fuse id and corresponding start/end tags for all blocks.
+
+    Use a high-entropy identifier to avoid collisions across rapid successive calls.
+    """
+    try:
+        # 12-hex UID: compact yet high-entropy; includes randomness and time component
+        fuse = uuid.uuid4().hex[:12]
+    except Exception:
+        # Fallback: monotonic ns + pid
+        try:
+            fuse = f"{time.monotonic_ns():x}{os.getpid():x}"[-16:]
+        except Exception:
+            fuse = str(int(time.time()))
     flames = {b: dict(start=f"<{b}_{fuse}>\n", end=f"</{b}_{fuse}>") for b in ALL_TAGS}
     return fuse, flames

@@ -8,23 +8,10 @@ from typing import Any, Dict, List, Tuple
 from .project_config import ROOT, EXCLUDE_DIRS, MAX_FILE_BYTES
 from .project_iter import iter_candidate_files
 from .project_scan_store import iter_project_chunks
+from .flex_pattern import make_flex_code_pattern_from_query
 
 
 _WS = re.compile(r"\s+", re.MULTILINE)
-
-
-def _make_flex_pattern(src: str) -> re.Pattern[str] | None:
-    s = (src or "").strip()
-    if not s:
-        return None
-    try:
-        # Collapse whitespace to a single space in query
-        s = _WS.sub(" ", s)
-        # Escape regex and replace literal spaces with flexible \s+
-        esc = re.escape(s).replace(r"\ ", r"\s+")
-        return re.compile(esc, re.DOTALL)
-    except Exception:
-        return None
 
 
 def stage_lineexact_hits(query: str, k: int, *, max_time_ms: int | None = 160) -> List[Tuple[float, str, Dict[str, Any]]]:
@@ -41,7 +28,7 @@ def stage_lineexact_hits(query: str, k: int, *, max_time_ms: int | None = 160) -
     def time_up() -> bool:
         return max_time_ms is not None and (time.perf_counter() - t0) * 1000.0 > max_time_ms
 
-    pat = _make_flex_pattern(q)
+    pat = make_flex_code_pattern_from_query(q)
     if pat is None:
         return []
 

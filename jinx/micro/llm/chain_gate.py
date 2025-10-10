@@ -4,19 +4,15 @@ import os
 import re
 
 from .chain_utils import truthy_env
+from jinx.micro.text.heuristics import is_code_like as _is_code_like
 
 
 _CODEY_RE = re.compile(r"(def\s+|class\s+|import\s+|from\s+|return\b|async\b|await\b|traceback|exception|error\b|\(|\)|\{|\}|\[|\]|\.|:)")
 
 
 def _is_codey(text: str) -> bool:
-    t = (text or "").lower()
-    if _CODEY_RE.search(t):
-        return True
-    # simple heuristics for identifiers with underscores or camelCase
-    if "_" in t or any(ch.isupper() for ch in text):
-        return True
-    return False
+    # Backward-compatible wrapper; delegate to language-agnostic heuristic
+    return _is_code_like(text or "")
 
 
 def should_run_planner(user_text: str) -> bool:

@@ -9,6 +9,7 @@ from typing import Optional, Tuple
 
 from jinx.async_utils.fs import read_text_raw, write_text
 from jinx.micro.embeddings.project_search_api import search_project
+from jinx.micro.text.heuristics import is_code_like as _is_code_like
 from jinx.micro.runtime.patch import (
     unified_diff as _unified_diff,
     diff_stats as _diff_stats,
@@ -26,15 +27,7 @@ from jinx.micro.runtime.patch import (
 
 
 def _is_codey(text: str) -> bool:
-    s = (text or "").lower()
-    if not s:
-        return False
-    kw = ("def ", "class ", "import ", "from ", "return ", "async ", "await ")
-    if any(k in s for k in kw):
-        return True
-    if any(c in text for c in "=[](){}.:,"):
-        return True
-    return False
+    return _is_code_like(text or "")
 
 
 def unified_diff(old: str, new: str, *, path: str = "") -> str:

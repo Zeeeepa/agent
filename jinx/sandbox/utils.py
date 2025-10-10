@@ -11,6 +11,12 @@ def make_run_log_path(base_dir: str = SANDBOX_DIR) -> str:
     return os.path.join(base_dir, f"pending_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.log")
 
 async def async_rename_run_log(log_path: str, status: str) -> str:
+    """Rename a pending_* log to ok_* or error_* with retries.
+
+    Handles Windows transient errors and concurrent attempts. If target exists,
+    returns it. If source is missing but a finalized log with same ts exists,
+    returns the finalized path. Otherwise returns original path.
+    """
     try:
         base = os.path.basename(log_path)
         ts = base.split("_", 1)[1][:-4] if ("_" in base and base.endswith(".log")) else datetime.now().strftime('%Y%m%d_%H%M%S_%f')
@@ -18,8 +24,23 @@ async def async_rename_run_log(log_path: str, status: str) -> str:
         new_path = os.path.join(os.path.dirname(log_path), f"{prefix}_{ts}.log")
         if os.path.abspath(new_path) == os.path.abspath(log_path):
             return log_path
-        await asyncio.to_thread(os.replace, log_path, new_path)
-        return new_path
+        # If already renamed by another task, return the finalized path
+        if os.path.exists(new_path) and not os.path.exists(log_path):
+            return new_path
+        # Retry a few times to handle transient locks
+        for _ in range(4):
+            try:
+                await asyncio.to_thread(os.replace, log_path, new_path)
+                return new_path
+            except Exception:
+                await asyncio.sleep(0.05)
+                # If during wait the file is already finalized, return it
+                if os.path.exists(new_path) and not os.path.exists(log_path):
+                    return new_path
+        # Last resort: if replace kept failing, prefer returning the finalized if present
+        if os.path.exists(new_path):
+            return new_path
+        return log_path
     except Exception:
         return log_path
 
@@ -32,14 +53,11 @@ def read_latest_sandbox_tail(max_lines: int = 80) -> tuple[str | None, bool]:
     try:
         if not os.path.isdir(SANDBOX_DIR):
             return None, False
-        logs = [
-            os.path.join(SANDBOX_DIR, f)
-            for f in os.listdir(SANDBOX_DIR)
-            if f.endswith(".log")
-        ]
-        if not logs:
+        files = [os.path.join(SANDBOX_DIR, f) for f in os.listdir(SANDBOX_DIR) if f.endswith(".log")]
+        if not files:
             return None, False
-        latest = max(logs, key=os.path.getmtime)
+        # Always show the most recently modified log (pending or finalized)
+        latest = max(files, key=os.path.getmtime)
         with open(latest, "r", encoding="utf-8", errors="replace") as fh:
             lines = fh.read().splitlines()
         if len(lines) <= max_lines:

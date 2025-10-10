@@ -115,6 +115,19 @@ async def persist_memory(mem_text: str, evergreen_text: str, *, user_text: str =
         slug = _safe_name(plan_goal or user_text or (mem_text[:40] if mem_text else ""))
         fname = f"{ts_ms}_{slug}.md"
         path = os.path.join(out_dir, fname)
+        import re as _re
+
+        def _strip_wrapped(tag: str, text: str) -> str:
+            t = (text or "").strip()
+            if not t:
+                return ""
+            # Extract inner if wrapped by <tag>...</tag>
+            m = _re.search(rf"<\s*{tag}[^>]*>([\s\S]*?)</\s*{tag}\s*>", t, _re.IGNORECASE)
+            return (m.group(1).strip() if m else t)
+
+        mem_raw = _strip_wrapped("memory", mem_text)
+        evg_raw = _strip_wrapped("evergreen", evergreen_text)
+
         lines = []
         lines.append("---")
         lines.append(f"ts_ms: {ts_ms}")
@@ -122,13 +135,13 @@ async def persist_memory(mem_text: str, evergreen_text: str, *, user_text: str =
             lines.append(f"goal: {plan_goal}")
         if user_text:
             lines.append(f"user: |\n  {user_text}")
-        if mem_text:
+        if mem_raw:
             lines.append("memory: |")
-            for ln in (mem_text.splitlines() or [mem_text]):
+            for ln in (mem_raw.splitlines() or [mem_raw]):
                 lines.append(f"  {ln}")
-        if evergreen_text:
+        if evg_raw:
             lines.append("evergreen: |")
-            for ln in (evergreen_text.splitlines() or [evergreen_text]):
+            for ln in (evg_raw.splitlines() or [evg_raw]):
                 lines.append(f"  {ln}")
         lines.append("---\n")
         body = "\n".join(lines) + "\n"

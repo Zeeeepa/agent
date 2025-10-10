@@ -29,8 +29,23 @@ async def run_sandbox(code: str, callback: Callable[[str | None], Awaitable[None
                     target=blast_zone, args=(code, {}, r, log_path)
                 )
                 proc.start()
-                # Avoid busy-spin: wait for process termination in a thread
-                await asyncio.to_thread(proc.join)
+                # Hard RT timeout for sandbox run
+                try:
+                    max_ms = int(os.getenv("JINX_SANDBOX_MAX_MS", "20000"))
+                except Exception:
+                    max_ms = 20000
+                timeout_s = max(0.1, max_ms / 1000.0)
+                # Wait with timeout in a thread to avoid blocking the loop
+                await asyncio.to_thread(proc.join, timeout_s)
+                if proc.is_alive():
+                    try:
+                        proc.terminate()
+                    except Exception:
+                        pass
+                    # Final wait to reap process
+                    await asyncio.to_thread(proc.join, 2.0)
+                    r["error"] = f"Timeout after {max_ms} ms"
+                    r.setdefault("output", "")
             except Exception as e:
                 raise Exception(f"Payload mutation error: {e}")
 

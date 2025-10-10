@@ -11,6 +11,7 @@ from jinx.micro.embeddings.project_config import ROOT as PROJECT_ROOT
 
 def _memory_dir() -> str:
     # Primary memory directory under the project root (default: .jinx/memory)
+    # Backwards compatible via env JINX_MEMORY_DIR.
     try:
         sub = os.getenv("JINX_MEMORY_DIR", os.path.join(".jinx", "memory"))
     except Exception:
@@ -30,6 +31,7 @@ _CH_PREFS = os.path.join(_MEM_DIR, "prefs.md")
 _CH_DECS = os.path.join(_MEM_DIR, "decisions.md")
 _TOPICS_DIR = os.path.join(_MEM_DIR, "topics")
 _TOKEN_HINT = os.path.join(_MEM_DIR, ".last_prompt_tokens")
+_OPEN_BUFFERS = os.path.join(_MEM_DIR, "open_buffers.jsonl")
 try:
     _HIST_KEEP = max(0, int(os.getenv("JINX_MEM_HISTORY_KEEP", "50")))
 except Exception:
@@ -43,6 +45,36 @@ def _ensure_dirs() -> None:
         os.makedirs(_TOPICS_DIR, exist_ok=True)
     except Exception:
         pass
+
+
+# Open buffer snapshot management
+async def write_open_buffers(buffers: list[dict]) -> None:
+    """Write open buffers to .jinx/memory/open_buffers.jsonl.
+
+    Each item should contain at least {"name" or "path", "text"}.
+    """
+    _ensure_dirs()
+    lines: list[str] = []
+    for obj in buffers or []:
+        try:
+            name = (obj.get("name") or obj.get("path") or "buffer").strip() or "buffer"
+            text = obj.get("text") or ""
+            if not text:
+                continue
+            import json as _json
+            lines.append(_json.dumps({"name": name, "text": text}))
+        except Exception:
+            continue
+    async with shard_lock:
+        try:
+            await write_text(_OPEN_BUFFERS, ensure_nl("\n".join(lines)))
+        except Exception:
+            pass
+
+
+def open_buffers_path() -> str:
+    """Return absolute path to the open buffers snapshot file."""
+    return _OPEN_BUFFERS
 
 
 async def write_token_hint(tokens: int) -> None:
@@ -150,6 +182,16 @@ async def read_channel(kind: str) -> str:
     }.get(k)
     if not path:
         return ""
+
+    async with shard_lock:
+        try:
+            if os.path.exists(path):
+                txt = await read_text_raw(path)
+                if txt != "":
+                    return txt
+        except Exception:
+            return ""
+    return ""
 
 
 async def read_topic(name: str) -> str:

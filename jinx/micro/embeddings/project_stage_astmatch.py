@@ -58,6 +58,32 @@ def _node_skeleton(n: ast.AST, *, include_names: bool) -> Any:
     return tuple(items)
 
 
+def _informative(node: ast.AST) -> ast.AST:
+    """Pick a more informative subnode (e.g., Call) from a larger node when possible."""
+    try:
+        # Unwrap BoolOp by preferring non-constant side
+        if isinstance(node, ast.BoolOp):
+            vals = list(getattr(node, "values", []) or [])
+            for v in vals:
+                if not isinstance(v, ast.Constant):
+                    return _informative(v)
+            return vals[0] if vals else node
+        # Prefer the call itself if present under unary/bool contexts
+        if isinstance(node, ast.UnaryOp) and isinstance(node.operand, ast.AST):
+            return _informative(node.operand)
+        if isinstance(node, ast.IfExp):
+            return _informative(node.test)
+        # If the node is a Call, it's already informative
+        if isinstance(node, ast.Call):
+            return node
+        # For Compare, pick the left (often the expression of interest)
+        if isinstance(node, ast.Compare):
+            return _informative(node.left)
+    except Exception:
+        pass
+    return node
+
+
 def _extract_query_node(query: str) -> ast.AST | None:
     q = (query or "").strip()
     if not q:
@@ -72,7 +98,41 @@ def _extract_query_node(query: str) -> ast.AST | None:
     # Try as expression
     try:
         expr = ast.parse(q, mode="eval")
-        return expr.body  # type: ignore[attr-defined]
+        return _informative(expr.body)  # type: ignore[attr-defined]
+    except Exception:
+        pass
+    # Salvage common boolean fragments like: 'and isinstance(x, T)' or 'call() and'
+    try:
+        s = q
+        # Normalize C-like operators
+        s = s.replace("&&", " and ").replace("||", " or ")
+        s_stripped = s.strip()
+        def _try_eval(src: str) -> ast.AST | None:
+            try:
+                return ast.parse(src, mode="eval").body  # type: ignore[attr-defined]
+            except Exception:
+                return None
+        # Leading boolean operator
+        if s_stripped.startswith("and ") or s_stripped.startswith("or "):
+            cand = f"True {s_stripped}"
+            node = _try_eval(cand)
+            if node is not None:
+                return _informative(node)
+        # Trailing boolean operator
+        if s_stripped.endswith(" and") or s_stripped.endswith(" or"):
+            cand = f"{s_stripped} True"
+            node = _try_eval(cand)
+            if node is not None:
+                return node
+        # If-expression context
+        try:
+            m = ast.parse(f"if {s_stripped}:\n    pass")
+            if getattr(m, "body", None):
+                test = getattr(m.body[0], "test", None)
+                if isinstance(test, ast.AST):
+                    return _informative(test)
+        except Exception:
+            pass
     except Exception:
         pass
     return None

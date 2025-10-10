@@ -50,8 +50,9 @@ PROJ_CALLGRAPH_CALLEES_LIMIT = int(os.getenv("EMBED_PROJECT_CALLEES_LIMIT", "3")
 PROJ_CALLGRAPH_TIME_MS = int(os.getenv("EMBED_PROJECT_CALLGRAPH_TIME_MS", "240"))
 
 # Exhaustive and budget overrides (use with care)
+# Defaults favor RT performance: exhaustive off, budgets ON
 PROJ_EXHAUSTIVE_MODE = _env_bool("EMBED_PROJECT_EXHAUSTIVE", True)
-PROJ_NO_STAGE_BUDGETS = _env_bool("EMBED_PROJECT_NO_STAGE_BUDGETS", True)
+PROJ_NO_STAGE_BUDGETS = _env_bool("EMBED_PROJECT_NO_STAGE_BUDGETS", False)
 PROJ_NO_CODE_BUDGET = _env_bool("EMBED_PROJECT_NO_CODE_BUDGET", True)
 
 # Per-stage time budgets (ms). Applied as an upper bound per stage; subject to overall max_time_ms.
@@ -68,9 +69,18 @@ PROJ_STAGE_FASTSUBSTR_MS = int(os.getenv("EMBED_PROJECT_STAGE_FASTSUBSTR_MS", "2
 PROJ_STAGE_LINETOKENS_MS = int(os.getenv("EMBED_PROJECT_STAGE_LINETOKENS_MS", "140"))
 PROJ_STAGE_LINEEXACT_MS = int(os.getenv("EMBED_PROJECT_STAGE_LINEEXACT_MS", "160"))
 PROJ_STAGE_ASTMATCH_MS = int(os.getenv("EMBED_PROJECT_STAGE_ASTMATCH_MS", "220"))
+PROJ_STAGE_ASTCONTAINS_MS = int(os.getenv("EMBED_PROJECT_STAGE_ASTCONTAINS_MS", "200"))
 PROJ_STAGE_RAPIDFUZZ_MS = int(os.getenv("EMBED_PROJECT_STAGE_RAPIDFUZZ_MS", "240"))
 PROJ_STAGE_TOKENMATCH_MS = int(os.getenv("EMBED_PROJECT_STAGE_TOKENMATCH_MS", "200"))
 PROJ_STAGE_PRE_MS = int(os.getenv("EMBED_PROJECT_STAGE_PRE_MS", "220"))
 PROJ_STAGE_EXACT_MS = int(os.getenv("EMBED_PROJECT_STAGE_EXACT_MS", "200"))
+PROJ_STAGE_LITERAL_MS = int(os.getenv("EMBED_PROJECT_STAGE_LITERAL_MS", "220"))
+PROJ_STAGE_COOCCUR_MS = int(os.getenv("EMBED_PROJECT_STAGE_COOCCUR_MS", "220"))
 PROJ_STAGE_VECTOR_MS = int(os.getenv("EMBED_PROJECT_STAGE_VECTOR_MS", "250"))
 PROJ_STAGE_KEYWORD_MS = int(os.getenv("EMBED_PROJECT_STAGE_KEYWORD_MS", "180"))
+
+# Optional: extra literal scan burst when no hits were found at all
+PROJ_LITERAL_BURST_MS = int(os.getenv("EMBED_PROJECT_LITERAL_BURST_MS", "800"))
+
+# Token co-occurrence distance (lines)
+PROJ_COOCCUR_MAX_DIST = int(os.getenv("EMBED_PROJECT_COOCCUR_MAX_DIST", "6"))
