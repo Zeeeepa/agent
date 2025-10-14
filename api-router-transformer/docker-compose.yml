@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  api-router:
+    build: .
+    container_name: api-router-transformer
+    ports:
+      - "${PORT:-8000}:8000"
+    environment:
+      - PORT=8000
+      - BACKEND_URL=${BACKEND_URL:-https://api.z.ai/api/anthropic}
+      - BACKEND_API_KEY=${BACKEND_API_KEY}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - CORS_ENABLED=${CORS_ENABLED:-true}
+      - REQUEST_TIMEOUT=${REQUEST_TIMEOUT:-60000}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:8000/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
