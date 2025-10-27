@@ -61,6 +61,7 @@ from .project_stage_tokenmatch import stage_tokenmatch_hits
 from .project_stage_openbuffer import stage_openbuffer_hits
 from .project_query_core import extract_code_core
 from jinx.micro.text.heuristics import is_code_like as _is_code_like
+from .rerankers.cross_encoder import cross_encoder_rerank as _ce_rerank
 
 
 async def retrieve_project_top_k(query: str, k: int | None = None, *, max_time_ms: int | None = 250) -> List[Tuple[float, str, Dict[str, Any]]]:
@@ -116,6 +117,60 @@ async def retrieve_project_top_k(query: str, k: int | None = None, *, max_time_m
         if PROJ_NO_STAGE_BUDGETS or PROJ_EXHAUSTIVE_MODE:
             return rem
         return max(1, min(rem, cap_ms))
+
+    async def _maybe_ce_rerank(hits: List[Tuple[float, str, Dict[str, Any]]]) -> List[Tuple[float, str, Dict[str, Any]]]:
+        """Optionally apply cross-encoder reranking to top-N hits and combine scores.
+
+        final = alpha * ce + (1 - alpha) * original
+        """
+        import os as _os
+        try:
+            gate = _os.getenv("EMBED_PROJECT_CE_ENABLE", "0").strip().lower() not in ("", "0", "false", "off", "no")
+        except Exception:
+            gate = False
+        if not gate or not hits:
+            return hits
+        try:
+            topn = max(1, int(_os.getenv("EMBED_PROJECT_CE_TOPN", "100")))
+        except Exception:
+            topn = 100
+        try:
+            alpha = float(_os.getenv("EMBED_PROJECT_CE_ALPHA", "0.7"))
+        except Exception:
+            alpha = 0.7
+        # Build docs from preview text
+        docs: List[str] = []
+        idxs: List[int] = []
+        for i, (_sc, _rel, obj) in enumerate(hits[:topn]):
+            try:
+                pv = (obj.get("meta", {}).get("text_preview") or "").strip()
+            except Exception:
+                pv = ""
+            if not pv:
+                continue
+            docs.append(pv)
+            idxs.append(i)
+        if not docs:
+            return hits
+        # Respect remaining overall budget if any
+        rem_ms = _time_left()
+        try:
+            scores = await _ce_rerank(q_core, docs, max_time_ms=rem_ms, top_n=len(docs))
+        except Exception:
+            return hits
+        new_hits = list(hits)
+        for pos, ce_sc in enumerate(scores):
+            i = idxs[pos] if pos < len(idxs) else None
+            if i is None or i >= len(new_hits):
+                continue
+            sc0, rel0, obj0 = new_hits[i]
+            try:
+                scn = float(alpha) * float(ce_sc or 0.0) + (1.0 - float(alpha)) * float(sc0 or 0.0)
+            except Exception:
+                scn = float(sc0 or 0.0)
+            new_hits[i] = (scn, rel0, obj0)
+        new_hits.sort(key=lambda h: float(h[0] or 0.0), reverse=True)
+        return new_hits
 
     async def _run_sync_stage(stage_fn, query: str, k_arg: int, cap_ms: int):
         rem = _bounded(_time_left(), cap_ms)
@@ -315,6 +370,11 @@ async def retrieve_project_top_k(query: str, k: int | None = None, *, max_time_m
 
         # Return deduped, score-sorted
         out_hits = sorted(collected, key=lambda h: float(h[0] or 0.0), reverse=True)[:k_eff]
+        # Optional cross-encoder reranking of the final shortlist
+        try:
+            out_hits = await _maybe_ce_rerank(out_hits)
+        except Exception:
+            pass
         try:
             _PRJ_CACHE[ck] = (now_ms, list(out_hits))
         except Exception:

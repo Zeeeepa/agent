@@ -1,13 +1,9 @@
 from __future__ import annotations
 
 import os
-import re
 
 from .chain_utils import truthy_env
 from jinx.micro.text.heuristics import is_code_like as _is_code_like
-
-
-_CODEY_RE = re.compile(r"(def\s+|class\s+|import\s+|from\s+|return\b|async\b|await\b|traceback|exception|error\b|\(|\)|\{|\}|\[|\]|\.|:)")
 
 
 def _is_codey(text: str) -> bool:

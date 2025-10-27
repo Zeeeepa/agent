@@ -12,6 +12,7 @@ from .similarity import score_cosine_batch
 from .text_clean import is_noise_text
 from .scan_store import iter_items as scan_iter_items
 from .embed_cache import embed_text_cached
+from .ann_index_runtime import search_ann_items as _search_ann_runtime
 
 DEFAULT_TOP_K = int(os.getenv("EMBED_TOP_K", "5"))
 # Balanced defaults; adapt at runtime based on query length
@@ -79,10 +80,9 @@ async def retrieve_top_k(query: str, k: int | None = None, *, max_time_ms: int |
     except Exception:
         state_rec_mult = 0.5
     short_q = (qlen <= int(os.getenv("JINX_CONTINUITY_SHORTLEN", "80")))
-    # Collect recent items first and batch-score for lower overhead
-    _recent_objs = []
-    _recent_vecs = []
-    _recent_meta = []
+    _recent_objs: List[Dict[str, Any]] = []
+    _recent_vecs: List[List[float]] = []
+    _recent_meta: List[Dict[str, Any]] = []
     for obj in iter_recent_items():
         meta = obj.get("meta", {})
         src_l = (meta.get("source") or "").strip().lower()
@@ -111,43 +111,16 @@ async def retrieve_top_k(query: str, k: int | None = None, *, max_time_ms: int |
             if len(scored) >= k_eff:
                 break
 
-    # Early return if мы уже набрали k; при EXHAUSTIVE=True не прерываемся по времени
     if len(scored) >= k_eff:
         scored.sort(key=lambda x: x[0], reverse=True)
         return scored[:k_eff]
     eff_budget = None if EXHAUSTIVE else max_time_ms
-    if eff_budget is not None and (time.perf_counter() - t0) * 1000.0 > eff_budget:
-        scored.sort(key=lambda x: x[0], reverse=True)
-        return scored[:k_eff]
 
-    # 2) Fallback: scan persisted files (bounded and time-guarded)
-    # Use the in-memory snapshot (refreshed in the background) instead of re-reading disk
-    items = await hot_task
-    # Batch through persisted items for better throughput
-    B = 1024
-    buf_vecs: List[List[float]] = []
-    buf_meta_src: List[Tuple[str, Dict[str, Any]]] = []  # (src, obj)
-    def _flush(buf_vecs: List[List[float]], buf_meta_src: List[Tuple[str, Dict[str, Any]]]) -> None:
-        nonlocal scored
-        if not buf_vecs:
-            return
-        sims = score_cosine_batch(qv, buf_vecs)
-        for (src_i, obj_i), sim in zip(buf_meta_src, sims):
-            if sim < thr:
-                continue
-            meta_i = obj_i.get("meta", {})
-            ts = float(meta_i.get("ts") or 0.0)
-            age = max(0.0, now - ts)
-            rec = 0.0 if RECENCY_WINDOW_SEC <= 0 else max(0.0, 1.0 - (age / RECENCY_WINDOW_SEC))
-            score = 0.8 * sim + 0.2 * rec
-            src_l = (src_i or "").strip().lower()
-            meta_src_l = (meta_i.get("source") or "").strip().lower()
-            if (src_l == "state" or meta_src_l == "state") and short_q:
-                score *= state_boost * (1.0 + state_rec_mult * rec)
-            scored.append((score, src_i, obj_i))
-    idx = 0
-    for src, obj in items:
-        meta = obj.get("meta", {})
+    # 2) Persisted items: filter by source and preview, then ANN overlay (fallback to batch cosine)
+    items_all = await hot_task
+    items: List[Tuple[str, Dict[str, Any]]] = []
+    for src, obj in (items_all or []):
+        meta = (obj or {}).get("meta", {})
         src_l = (src or "").strip().lower()
         meta_src_l = (meta.get("source") or "").strip().lower()
         allow_src = (
@@ -155,74 +128,107 @@ async def retrieve_top_k(query: str, k: int | None = None, *, max_time_ms: int |
             meta_src_l == "dialogue" or meta_src_l.startswith("sandbox/") or meta_src_l == "state"
         )
         if not allow_src:
-            idx += 1
             continue
         pv = (meta.get("text_preview") or "").strip()
-        if len(pv) < MIN_PREVIEW_LEN:
-            idx += 1
+        if len(pv) < MIN_PREVIEW_LEN or is_noise_text(pv):
             continue
-        buf_vecs.append(obj.get("embedding") or [])
-        buf_meta_src.append((src, obj))
-        if len(buf_vecs) >= B:
-            _flush(buf_vecs, buf_meta_src)
-            buf_vecs = []
-            buf_meta_src = []
-            if (idx % 50) == 49:
-                await asyncio.sleep(0)
+        items.append((src, obj))
+
+    # ANN candidate generation
+    try:
+        overfetch = max(k_eff * 4, int(os.getenv("EMBED_RUNTIME_ANN_OVERFETCH", str(k_eff * 6))))
+    except Exception:
+        overfetch = k_eff * 6
+    try:
+        def _rank_candidates() -> List[Tuple[int, float]]:
+            return _search_ann_runtime(qv, items, top_n=min(len(items), max(k_eff, overfetch)))
+        scored_candidates = await asyncio.to_thread(_rank_candidates)
+    except Exception:
+        scored_candidates = []  # type: ignore[name-defined]
+
+    if scored_candidates:
+        for idx_c, sim in scored_candidates:
+            if idx_c < 0 or idx_c >= len(items):
+                continue
+            src_i, obj_i = items[idx_c]
+            if float(sim or 0.0) < thr:
+                continue
+            ts = float(obj_i.get("meta", {}).get("ts") or 0.0)
+            age = max(0.0, now - ts)
+            rec = 0.0 if RECENCY_WINDOW_SEC <= 0 else max(0.0, 1.0 - (age / RECENCY_WINDOW_SEC))
+            score = 0.8 * sim + 0.2 * rec
+            if (obj_i.get("meta", {}).get("source") or "").strip().lower() == "state" and short_q:
+                score *= state_boost * (1.0 + state_rec_mult * rec)
+            scored.append((score, obj_i.get("meta", {}).get("source", "persisted"), obj_i))
             if len(scored) >= k_eff:
                 break
             if eff_budget is not None and (time.perf_counter() - t0) * 1000.0 > eff_budget:
                 break
-        idx += 1
-    if buf_vecs and len(scored) < k_eff and (eff_budget is None or (time.perf_counter() - t0) * 1000.0 <= eff_budget):
-        _flush(buf_vecs, buf_meta_src)
+    else:
+        # Batch cosine fallback
+        B = 1024
+        buf_vecs: List[List[float]] = []
+        buf_meta_src: List[Tuple[str, Dict[str, Any]]] = []
+        def _flush() -> None:
+            nonlocal scored, buf_vecs, buf_meta_src
+            if not buf_vecs:
+                return
+            sims = score_cosine_batch(qv, buf_vecs)
+            for (src_i, obj_i), sim in zip(buf_meta_src, sims):
+                if sim < thr:
+                    continue
+                ts = float(obj_i.get("meta", {}).get("ts") or 0.0)
+                age = max(0.0, now - ts)
+                rec = 0.0 if RECENCY_WINDOW_SEC <= 0 else max(0.0, 1.0 - (age / RECENCY_WINDOW_SEC))
+                score = 0.8 * sim + 0.2 * rec
+                if (obj_i.get("meta", {}).get("source") or "").strip().lower() == "state" and short_q:
+                    score *= state_boost * (1.0 + state_rec_mult * rec)
+                scored.append((score, obj_i.get("meta", {}).get("source", "persisted"), obj_i))
+            buf_vecs = []
+            buf_meta_src = []
+        for idx, (src, obj) in enumerate(items):
+            buf_vecs.append(obj.get("embedding") or [])
+            buf_meta_src.append((src, obj))
+            if len(buf_vecs) >= B:
+                _flush()
+                if (idx % 50) == 49:
+                    await asyncio.sleep(0)
+                if len(scored) >= k_eff:
+                    break
+                if eff_budget is not None and (time.perf_counter() - t0) * 1000.0 > eff_budget:
+                    break
+        if buf_vecs and len(scored) < k_eff and (eff_budget is None or (time.perf_counter() - t0) * 1000.0 <= eff_budget):
+            _flush()
+
     scored.sort(key=lambda x: x[0], reverse=True)
     return scored[:k_eff]
 
 
 async def build_context_for(query: str, *, k: int | None = None, max_chars: int = 1500, max_time_ms: int | None = 220) -> str:
-    """Build a context string from top-k similar snippets.
-
-    Pulls `text_preview` from stored metadata to remain compact.
-    """
+    """Build a compact context from top-k snippets (ordered by timestamp)."""
     k = k or DEFAULT_TOP_K
     hits = await retrieve_top_k(query, k=k, max_time_ms=max_time_ms)
     if not hits:
         return ""
-    # Deduplicate identical previews and identical content by hash while keeping order
     seen: set[str] = set()
     seen_hash: set[str] = set()
     q_hash = hashlib.sha256((query or "").strip().encode("utf-8", errors="ignore")).hexdigest() if query else ""
-    body_parts: List[str] = []
-    # Preserve chronological order in the final context to avoid semantic chaos.
-    # We first select by similarity (retrieve_top_k), then sort chosen items by their timestamp.
-    hits_sorted = sorted(
-        hits,
-        key=lambda h: float((h[2].get("meta", {}).get("ts") or 0.0)),
-    )
-    for score, src, obj in hits_sorted:
+    parts: List[str] = []
+    for score, src, obj in sorted(hits, key=lambda h: float((h[2].get("meta", {}).get("ts") or 0.0))):
         meta = obj.get("meta", {})
         pv = (meta.get("text_preview") or "").strip()
         csha = (meta.get("content_sha256") or "").strip()
-        # Skip if preview empty, duplicate text, or exactly matches the query by hash
-        if not pv or pv in seen or (q_hash and csha and csha == q_hash) or is_noise_text(pv):
+        if not pv or pv in seen or is_noise_text(pv) or (q_hash and csha and csha == q_hash):
             continue
         seen.add(pv)
         if csha:
             if csha in seen_hash:
                 continue
             seen_hash.add(csha)
-        # Keep original line breaks for readability; collapse only excessive trailing/leading space
-        if not pv:
-            continue
-        body_parts.append(pv)
-        total = sum(len(p) for p in body_parts)
-        if total > max_chars:
+        parts.append(pv)
+        if sum(len(p) for p in parts) > max_chars:
             break
-
-    if not body_parts:
+    if not parts:
         return ""
-
-    # Join with a blank line between hints for readability and add padding inside the tag
-    body = "\n".join(body_parts)
+    body = "\n".join(parts)
     return f"<embeddings_context>\n{body}\n</embeddings_context>"

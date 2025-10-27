@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from jinx.micro.llm.chain_gate import _CODEY_RE  # reuse same heuristic
+from jinx.micro.text.heuristics import is_code_like as _is_code_like
 
 
 def _is_short_reply(x: str) -> bool:
@@ -12,7 +12,7 @@ def _is_short_reply(x: str) -> bool:
         thr = max(20, int(os.getenv("JINX_CONTINUITY_SHORTLEN", "80")))
     except Exception:
         thr = 80
-    if len(t) <= thr and not _CODEY_RE.search(t.lower()):
+    if len(t) <= thr and not _is_code_like(t):
         return True
     return False
 

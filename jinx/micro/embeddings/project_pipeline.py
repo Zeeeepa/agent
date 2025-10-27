@@ -19,6 +19,9 @@ from .project_terms import extract_terms
 from .project_io import write_json_atomic
 from .util import now_ts
 from .embed_cache import embed_texts_cached, embed_text_cached
+from .project_chunk_semantic import chunk_text_semantic
+from .digest import make_digest
+from .fingerprint import simhash
 
 
 MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
@@ -52,6 +55,10 @@ def _chunk_text(text: str) -> List[Chunk]:
         toks = chunk_text_token(text)
         if toks:
             return toks
+    if CHUNKER_KIND == "semantic":
+        sems = chunk_text_semantic(text)
+        if sems:
+            return sems
     return chunk_text_char(text)
 
 
@@ -109,11 +116,16 @@ async def embed_file(abs_path: str, rel_path: str, *, file_sha: str, prune_old: 
         unique_inputs.append((i, ch, csha, ls, le))
 
     batch_texts = [t[1] for t in unique_inputs]
-    batch_vecs = await _embed_texts(batch_texts)
+    # Parallelize embeddings and digest generation
+    vec_task = asyncio.create_task(_embed_texts(batch_texts))
+    dig_task = asyncio.create_task(asyncio.gather(*[make_digest(t) for t in batch_texts]))
+    batch_vecs, batch_digests = await asyncio.gather(vec_task, dig_task)
 
     results: List[Tuple[str, Dict[str, Any]]] = []  # (chunk_sha, payload)
     for idx, (i, ch, csha, ls, le) in enumerate(unique_inputs):
         vec = batch_vecs[idx] if idx < len(batch_vecs) else []
+        digest_i = batch_digests[idx] if idx < len(batch_digests) else ""
+        fp_i = simhash(ch)
         meta: Dict[str, Any] = {
             "ts": now_ts(),
             "model": MODEL,
@@ -127,6 +139,8 @@ async def embed_file(abs_path: str, rel_path: str, *, file_sha: str, prune_old: 
             "dims": len(vec) if vec is not None else 0,
             "line_start": ls,
             "line_end": le,
+            "digest": digest_i,
+            "fingerprint": fp_i,
         }
         payload = {"meta": meta, "embedding": vec}
         results.append((csha, payload))

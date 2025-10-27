@@ -2,6 +2,18 @@ from __future__ import annotations
 
 import re
 from typing import List, Tuple
+import os as _os
+
+try:
+    # Prefer centralized multi-signal detector (assembly/hex/comments aware)
+    from jinx.micro.text.code_like import code_like_score_fast as _cl_score_fast  # type: ignore
+except Exception:
+    _cl_score_fast = None  # type: ignore
+try:
+    # Optional ML calibrated detector (weights configurable via env/file)
+    from jinx.micro.text.code_like_ml import is_code_like_ml as _cl_is_ml  # type: ignore
+except Exception:
+    _cl_is_ml = None  # type: ignore
 
 # --- Code-like detection ---
 
@@ -40,8 +52,33 @@ def code_like_score(s: str) -> float:
 
 
 def is_code_like(s: str, threshold: float = 0.58) -> bool:
+    t = s or ""
+    # Threshold override from env
     try:
-        return code_like_score(s) >= threshold
+        thr_env = _os.getenv("JINX_CODELIKE_THRESH", "").strip()
+        if thr_env:
+            threshold = float(thr_env)
+    except Exception:
+        pass
+    # Mode selection: ml | fast | basic (default: ml)
+    try:
+        mode = (_os.getenv("JINX_CODELIKE_MODE", "ml").strip().lower() or "ml")
+    except Exception:
+        mode = "ml"
+    if mode == "ml" and _cl_is_ml is not None:
+        try:
+            return bool(_cl_is_ml(t, threshold=threshold))
+        except Exception:
+            # fall back to fast
+            mode = "fast"
+    if mode == "fast" and _cl_score_fast is not None:
+        try:
+            return float(_cl_score_fast(t)) >= float(threshold)
+        except Exception:
+            pass
+    # basic fallback
+    try:
+        return code_like_score(t) >= threshold
     except Exception:
         return False
 

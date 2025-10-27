@@ -4,16 +4,9 @@ import re
 from typing import Optional
 
 from jinx.micro.conversation.turns_router import detect_turn_query as _fast_turn
+from jinx.micro.conversation.mem_intent import likely_memory_action as _mem_likely
 
 # Lightweight, zero-IO prefilters to avoid unnecessary LLM calls in hard RT.
-
-_MEM_TOKENS = [
-    # English
-    r"\bmemory\b", r"\bremember\b", r"\brecall\b", r"\bfind\b", r"\bsearch\b", r"\bpins?\b",
-    # Russian
-    r"\bпамя\w*\b", r"\bвспомн\w*\b", r"\bнайд\w*\b", r"\bпоис\w*\b", r"\bпин(?:ы|ов)?\b", r"\bзакреп\w*\b",
-]
-_MEM_RE = re.compile("|".join(_MEM_TOKENS), re.IGNORECASE)
 
 
 def likely_turn_query(text: str) -> bool:
@@ -26,11 +19,11 @@ def likely_turn_query(text: str) -> bool:
 
 
 def likely_memory_action(text: str) -> bool:
-    """True if query likely asks about memory retrieval or pins; avoids LLM otherwise."""
-    t = (text or "").strip()
-    if not t:
-        return False
-    return bool(_MEM_RE.search(t))
+    """True if query likely asks about memory retrieval or pins; language-agnostic.
+
+    Thin facade over `jinx.micro.conversation.mem_intent.likely_memory_action` (char-grams + structural signals).
+    """
+    return _mem_likely(text or "")
 
 
 __all__ = ["likely_turn_query", "likely_memory_action"]
