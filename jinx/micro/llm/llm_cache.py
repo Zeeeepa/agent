@@ -97,6 +97,29 @@ async def _dump_line(line: str) -> None:
         pass
 
 
+def _is_forbidden_region(ex: BaseException) -> bool:
+    """Detect provider 'unsupported country/region/territory' 403 errors robustly.
+
+    We rely on best-effort string and attribute checks because SDK types may vary.
+    """
+    try:
+        # Common SDKs expose http_status / status_code
+        sc = getattr(ex, "status_code", None) or getattr(ex, "http_status", None) or getattr(ex, "status", None)
+        if sc == 403:
+            s = str(ex).lower()
+            if "unsupported_country_region_territory" in s:
+                return True
+            if "request_forbidden" in s and "country" in s and "supported" in s:
+                return True
+    except Exception:
+        pass
+    # Fallback: message-only detection
+    s = str(ex).lower()
+    if "unsupported_country_region_territory" in s:
+        return True
+    return False
+
+
 async def call_openai_cached(instructions: str, model: str, input_text: str, *, extra_kwargs: Optional[Dict[str, Any]] = None) -> str:
     """Cached/coalesced wrapper for OpenAI Responses API.
 
@@ -209,6 +232,15 @@ async def call_openai_cached(instructions: str, model: str, input_text: str, *, 
                 # Should not happen since we didn't cancel; treat as transient
                 soft_timeout = True
                 await _dump_line("soft_timeout_cancelled")
+            except BaseException as ex:
+                # Convert immediate failure into soft path so we await the shared future.
+                # This ensures we 'consume' the future's exception (set by the callback)
+                # to avoid 'Future exception was never retrieved' warnings.
+                soft_timeout = True
+                if _is_forbidden_region(ex):
+                    await _dump_line("provider_forbidden_region_immediate")
+                else:
+                    await _dump_line(f"task_failed:{type(ex).__name__}")
             else:
                 out = str(getattr(r, "output_text", ""))
                 # Callback will also set cache/fut and pop inflight; just return out here
@@ -225,6 +257,14 @@ async def call_openai_cached(instructions: str, model: str, input_text: str, *, 
             return str(res or "")
         except BaseException as ex:
             # Propagate the underlying error if the background task failed
+            if _is_forbidden_region(ex):
+                # Negative cache for a short period to avoid rapid retries.
+                try:
+                    _mem[key] = (_now() + min(60.0, max(1.0, _TTL_SEC)), "")
+                except Exception:
+                    pass
+                await _dump_line("provider_forbidden_region_soft")
+                return ""
             raise ex
     
 
