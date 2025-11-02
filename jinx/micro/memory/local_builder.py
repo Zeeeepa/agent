@@ -17,6 +17,7 @@ from jinx.micro.text.heuristics import (
     extract_preference_fragments as _extract_pref_frags,
     extract_decision_fragments as _extract_decision_frags,
 )
+from jinx.micro.memory.usage_store import weight_for as _usage_weight, last_used_ms as _last_used_ms, count_for as _usage_count
 
 
 # -------- Paths --------
@@ -267,6 +268,83 @@ def _build_evergreen(transcript: str, evergreen_prev: str, facts_cap: int, top_p
         decs[frag] = float(decs.get(frag, 0.0)) + 1.0
     facts["decisions"] = decs
 
+    # Apply usage-based boost prior to capping (reinforce frequently used facts)
+    try:
+        _use_boost = str(os.getenv("JINX_MEM_USAGE_BOOST_EVG", "1")).lower() not in ("", "0", "false", "off", "no")
+    except Exception:
+        _use_boost = True
+    if _use_boost:
+        def _apply_usage_boost(bucket: Dict[str, float], prefix: str) -> Dict[str, float]:
+            if not isinstance(bucket, dict):
+                return {}
+            out: Dict[str, float] = {}
+            for k, v in bucket.items():
+                line = f"{prefix}{k}" if prefix else str(k)
+                try:
+                    w = float(_usage_weight(line))
+                except Exception:
+                    w = 1.0
+                try:
+                    out[k] = float(v) * max(0.5, min(2.0, w))
+                except Exception:
+                    out[k] = float(v) if isinstance(v, (int, float)) else 0.0
+            return out
+
+        facts["paths"] = _apply_usage_boost(facts.get("paths", {}), "path: ")
+        facts["symbols"] = _apply_usage_boost(facts.get("symbols", {}), "symbol: ")
+        facts["prefs"] = _apply_usage_boost(facts.get("prefs", {}), "pref: ")
+        facts["decisions"] = _apply_usage_boost(facts.get("decisions", {}), "decision: ")
+
+    # Drop low-weight facts prior to capping (promotion threshold)
+    try:
+        min_w = float(os.getenv("JINX_MEM_FACT_MIN_WEIGHT", "1.0"))
+    except Exception:
+        min_w = 1.0
+    if min_w > 0.0:
+        def _drop_low(d: Dict[str, float]) -> Dict[str, float]:
+            if not isinstance(d, dict):
+                return {}
+            return {k: float(v) for k, v in d.items() if float(v or 0.0) >= min_w}
+        facts["paths"] = _drop_low(facts.get("paths", {}))
+        facts["symbols"] = _drop_low(facts.get("symbols", {}))
+        facts["prefs"] = _drop_low(facts.get("prefs", {}))
+        facts["decisions"] = _drop_low(facts.get("decisions", {}))
+
+    # Age-based demotion: drop items not used in the last X days unless count >= keep threshold
+    try:
+        demote_days = float(os.getenv("JINX_MEM_DEMOTE_AGE_DAYS", "0"))
+    except Exception:
+        demote_days = 0.0
+    try:
+        keep_old_min = int(os.getenv("JINX_MEM_KEEP_OLD_MIN_COUNT", "2"))
+    except Exception:
+        keep_old_min = 2
+    if demote_days > 0.0:
+        cutoff = int((demote_days * 86400.0) * 1000.0)
+        now_ms = int(time.time() * 1000)
+        def _drop_old_age(bucket: Dict[str, float], prefix: str) -> Dict[str, float]:
+            if not isinstance(bucket, dict):
+                return {}
+            out: Dict[str, float] = {}
+            for k, v in bucket.items():
+                line = f"{prefix}{k}" if prefix else str(k)
+                try:
+                    ts = int(_last_used_ms(line))
+                except Exception:
+                    ts = 0
+                try:
+                    cnt = int(_usage_count(line))
+                except Exception:
+                    cnt = 0
+                # Keep if we have no ts info, or recent, or count above threshold
+                if ts <= 0 or (now_ms - ts) <= cutoff or cnt >= keep_old_min:
+                    out[k] = v
+            return out
+        facts["paths"] = _drop_old_age(facts.get("paths", {}), "path: ")
+        facts["symbols"] = _drop_old_age(facts.get("symbols", {}), "symbol: ")
+        facts["prefs"] = _drop_old_age(facts.get("prefs", {}), "pref: ")
+        facts["decisions"] = _drop_old_age(facts.get("decisions", {}), "decision: ")
+
     # Apply cap
     def _cap(d: Dict[str, float]) -> Dict[str, float]:
         if len(d) <= facts_cap:
@@ -409,5 +487,10 @@ def build_local_memory(transcript: str | None, evergreen_prev: str | None, token
     compact = _build_compact(t_clean, max_lines=compact_lines)
     evergreen = _build_evergreen(t_clean, eprev, facts_cap, top_paths, top_symbols, top_prefs, top_decs)
 
+    # Avoid unnecessary evergreen writes if unchanged
+    evg_norm = ensure_nl(evergreen).rstrip("\n") if evergreen else ""
+    prev_norm = ensure_nl(eprev).rstrip("\n") if eprev else ""
+    durable_out = evg_norm if evg_norm and (evg_norm != prev_norm) else None
+
     # Normalize newlines
-    return ensure_nl(compact).rstrip("\n"), ensure_nl(evergreen).rstrip("\n") if evergreen else None
+    return ensure_nl(compact).rstrip("\n"), durable_out

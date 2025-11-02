@@ -11,17 +11,20 @@ import time
 import sys
 import random
 import importlib
+import os
 
 from jinx.bootstrap import ensure_optional
 from jinx.spinner.phrases import PHRASES as phrases
 from jinx.spinner import ascii_mode as _ascii_mode, can_render as _can_render
 from jinx.spinner import get_spinner_frames, get_hearts
 import jinx.state as state
+from .spinner_util import format_activity_detail, parse_env_bool, parse_env_int
 
 # Lazy import with auto-install of prompt_toolkit
 ensure_optional(["prompt_toolkit"])  # installs if missing
 print_formatted_text = importlib.import_module("prompt_toolkit").print_formatted_text  # type: ignore[assignment]
 FormattedText = importlib.import_module("prompt_toolkit.formatted_text").FormattedText  # type: ignore[assignment]
+patch_stdout = importlib.import_module("prompt_toolkit.patch_stdout").patch_stdout  # type: ignore[assignment]
 
 
 async def sigil_spin(evt: asyncio.Event) -> None:
@@ -32,6 +35,18 @@ async def sigil_spin(evt: asyncio.Event) -> None:
     evt : asyncio.Event
         Event signaling spinner shutdown.
     """
+    mode = (os.getenv("JINX_SPINNER_MODE", "toolbar").strip().lower() or "toolbar")
+    if mode == "toolbar":
+        # Toolbar mode: do not print; let PromptSession bottom_toolbar render from state
+        try:
+            state.spin_on = True
+            state.spin_t0 = float(time.perf_counter())
+            while not evt.is_set():
+                await asyncio.sleep(0.08)
+        finally:
+            state.spin_on = False
+        return
+
     enc = getattr(sys.stdout, "encoding", None) or "utf-8"
     fx = print_formatted_text
     ft = FormattedText
@@ -42,33 +57,104 @@ async def sigil_spin(evt: asyncio.Event) -> None:
     last_change = 0.0  # seconds since t0 when phrase last changed
     # Thin circular spinner frames (Unicode) with ASCII fallback
     spin_frames = get_spinner_frames(ascii_mode, can=lambda s: _can_render(s, enc))
+    # Event loop lag EMA tracking
+    last_tick = time.perf_counter()
+    lag_ema_ms = 0.0
+    alpha = 0.3
+    # Redraw throttling and change detection
+    last_emit = t0
+    last_stage = None
+    last_tasks = None
+    last_line = ""
 
-    while not evt.is_set():
-        dt = time.perf_counter() - t0
-        pulse = state.pulse
-        clr = "ansibrightgreen"
+    # Ensure spinner writes cooperate with the active prompt by patching stdout
+    with patch_stdout(raw=True):
+        while not evt.is_set():
+            now = time.perf_counter()
+            dt = now - t0
+            pulse = state.pulse
+            clr = "ansibrightgreen"
 
-        # Change phrase a bit slower (~every 0.85s)
-        if (dt - last_change) >= 0.85:
-            phrase_idx = random.randrange(len(phrases))
-            last_change = dt
-        phrase = phrases[phrase_idx]
+            # Change phrase a bit slower (~every 0.85s)
+            if (dt - last_change) >= 0.85:
+                phrase_idx = random.randrange(len(phrases))
+                last_change = dt
+            phrase = phrases[phrase_idx]
 
-        # Loading dots cadence (0..3 dots cycling)
-        n = int(dt * 0.8) % 4
-        dd = "." * n
+            # Loading dots cadence (0..3 dots cycling)
+            n = int(dt * 0.8) % 4
+            dd = "." * n
 
-        # Pulsating heart (toggle ~1.5 Hz) with minimal size change
-        beat = int(dt * 1.5) % 2
-        heart = heart_a if beat == 0 else heart_b
-        style = clr if beat == 0 else f"{clr} bold"
+            # Pulsating heart (toggle ~1.5 Hz) with minimal size change
+            beat = int(dt * 1.5) % 2
+            heart = heart_a if beat == 0 else heart_b
+            style = clr if beat == 0 else f"{clr} bold"
 
-        # ASCII spinner right after pulse (~12 FPS)
-        sidx = int(dt * 12) % len(spin_frames)
-        spin = spin_frames[sidx]
+            # ASCII spinner right after pulse (~10–12 FPS)
+            sidx = int(dt * 10) % len(spin_frames)
+            spin = spin_frames[sidx]
 
-        fx(ft([(style, f"{heart} {pulse} {spin} {dd} {phrase} {dt:.3f}s")]), end="\r", flush=True)
-        await asyncio.sleep(0.035)
+            # Compose dynamic activity description
+            show_act = parse_env_bool("JINX_SPINNER_ACTIVITY", True)
+            desc = ""
+            if show_act:
+                try:
+                    act = (getattr(state, "activity", "") or "").strip()
+                    if act:
+                        age = 0.0
+                        try:
+                            age = max(0.0, time.perf_counter() - float(getattr(state, "activity_ts", 0.0) or 0.0))
+                        except Exception:
+                            age = 0.0
+                        desc = f" | {act} [{age:.1f}s]"
+                except Exception:
+                    desc = ""
+
+            # Compose compact detail from structured activity_detail if enabled
+            show_det = parse_env_bool("JINX_SPINNER_ACTIVITY_DETAIL", True)
+            det_str = ""
+            stage = None
+            tasks = None
+            if show_det:
+                try:
+                    det = getattr(state, "activity_detail", None)
+                    det_str2, stage2, tasks2 = format_activity_detail(det)
+                    det_str = det_str2
+                    if stage2 is not None:
+                        stage = stage2
+                    if tasks2 is not None:
+                        tasks = tasks2
+                except Exception:
+                    det_str = ""
+
+            # Compute event loop lag EMA (approximate): expected ~0.06s per tick
+            gap = now - last_tick
+            last_tick = now
+            show_lag = parse_env_bool("JINX_SPINNER_SHOW_LAG", False)
+            if show_lag:
+                # Only accumulate positive overruns over nominal interval
+                over_ms = max(0.0, (gap - 0.06) * 1000.0)
+                lag_ema_ms = alpha * over_ms + (1.0 - alpha) * lag_ema_ms
+            # Build single-line render with optional lag
+            lag_str = (f" lag:{lag_ema_ms:.1f}ms" if show_lag else "")
+            line = f"{heart} {pulse} {spin} {dd} {phrase}{desc}{det_str}{lag_str} (total {dt:.1f}s)"
+
+            # Redraw throttling: only when content changes significantly or interval elapsed
+            min_ms = parse_env_int("JINX_SPINNER_MIN_UPDATE_MS", 160)
+            redraw_on_change = parse_env_bool("JINX_SPINNER_REDRAW_ONLY_ON_CHANGE", True)
+
+            significant_change = (stage is not None and stage != last_stage) or (tasks is not None and tasks != last_tasks)
+            time_elapsed = (now - last_emit) * 1000.0 >= float(min_ms)
+            content_changed = (line != last_line)
+
+            if (not redraw_on_change and time_elapsed) or (redraw_on_change and (significant_change or (time_elapsed and content_changed))):
+                fx(ft([(style, line)]), end="\r", flush=False)
+                last_emit = now
+                last_line = line
+                last_stage = stage if stage is not None else last_stage
+                last_tasks = tasks if tasks is not None else last_tasks
+
+            await asyncio.sleep(0.06)
 
     fx(ft([("", " " * 80)]), end="\r", flush=True)
 

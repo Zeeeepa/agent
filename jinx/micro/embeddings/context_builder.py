@@ -4,7 +4,7 @@ import os
 import asyncio
 from typing import Any, Dict, List, Tuple
 
-from .project_rerank import rerank_hits
+from .project_rerank import rerank_hits_unified
 from .project_config import ROOT
 from jinx.micro.common.internal_paths import is_restricted_path
 from .project_retrieval_config import (
@@ -37,18 +37,123 @@ from .retrieval_core import (
     retrieve_project_top_k,
     retrieve_project_multi_top_k,
 )
+from jinx.micro.rt.activity import set_activity_detail as _actdet, clear_activity_detail as _actdet_clear
+from jinx.async_utils.fs import read_text_abs_thread
+from jinx.micro.memory.unified import assemble_unified_memory_lines as _mem_unified
+import jinx.state as jx_state
+from jinx.micro.brain.concepts import activate_concepts as _brain_activate
+from jinx.micro.brain.attention import record_attention as _att_rec
+from jinx.micro.brain.attention import get_attention_weights as _atten_get
+from jinx.log_paths import BLUE_WHISPERS
+from jinx.logger.file_logger import append_line as _log_append
+import re as _re
+from jinx.micro.embeddings.context_blocks import (
+    build_code_block as _build_code_block,
+    build_brain_block as _build_brain_block,
+    build_refs_block as _build_refs_block,
+    build_graph_block as _build_graph_block,
+    build_memory_block as _build_memory_block,
+    join_blocks as _join_blocks,
+)
+
+# Serialize heavy CPU under throttle
+THROTTLE_LOCK: asyncio.Lock = asyncio.Lock()
 
 
 async def build_project_context_for(query: str, *, k: int | None = None, max_chars: int | None = None, max_time_ms: int | None = 300) -> str:
     k = k or PROJ_DEFAULT_TOP_K
-    hits = await retrieve_project_top_k(query, k=k, max_time_ms=max_time_ms)
+    # Brain activation: derive unified concepts from project+memory+KG to expand query
+    try:
+        _brain_enable = os.getenv("EMBED_BRAIN_ENABLE", "1").strip().lower() not in ("", "0", "false", "off", "no")
+    except Exception:
+        _brain_enable = True
+    try:
+        _brain_topk = max(4, int(os.getenv("EMBED_BRAIN_TOP_K", "12")))
+    except Exception:
+        _brain_topk = 12
+    try:
+        _brain_expand_max = max(2, int(os.getenv("EMBED_BRAIN_EXPAND_MAX_TOKENS", "6")))
+    except Exception:
+        _brain_expand_max = 6
+
+    brain_pairs: list[tuple[str, float]] = []
+    brain_terms: list[str] = []
+    if _brain_enable:
+        try:
+            brain_pairs = await _brain_activate(query, top_k=_brain_topk)
+            # Build lightweight expansion token list from top concept terms/symbols
+            seen_bt: set[str] = set()
+            for key, sc in brain_pairs:
+                low = (key or "").lower()
+                tok = ""
+                if low.startswith("term: "):
+                    tok = low.split(": ", 1)[1]
+                elif low.startswith("symbol: "):
+                    tok = low.split(": ", 1)[1]
+                # skip path tokens in expansion to avoid over-constraining query
+                if tok and tok not in seen_bt:
+                    brain_terms.append(tok)
+                    seen_bt.add(tok)
+                if len(brain_terms) >= _brain_expand_max:
+                    break
+        except Exception:
+            brain_pairs = []
+            brain_terms = []
+
+    exp_query = (query or "").strip()
+    if brain_terms:
+        exp_query = (exp_query + " " + " ".join(brain_terms)).strip()
+
+    # In parallel, kick off memory retrieval when enabled (biased with brain tokens)
+    try:
+        _mem_enable = os.getenv("EMBED_AGG_MEM_ENABLE", "1").strip().lower() not in ("", "0", "false", "off", "no")
+    except Exception:
+        _mem_enable = True
+    try:
+        _mem_k = max(1, int(os.getenv("EMBED_AGG_MEM_K", "8")))
+    except Exception:
+        _mem_k = 8
+    mem_task: asyncio.Task | None = None
+    if _mem_enable:
+        try:
+            try:
+                _mem_preview = max(24, int(os.getenv("JINX_MACRO_MEM_PREVIEW_CHARS", "160")))
+            except Exception:
+                _mem_preview = 160
+            mem_task = asyncio.create_task(_mem_unified(exp_query, k=_mem_k, preview_chars=_mem_preview))
+        except Exception:
+            mem_task = None
+
+    # Retrieve hits for both original and expanded queries, then merge
+    hits_base = await retrieve_project_top_k(query, k=k, max_time_ms=max_time_ms)
+    hits_exp: list[tuple[float, str, dict]] = []
+    if exp_query != (query or ""):
+        try:
+            hits_exp = await retrieve_project_top_k(exp_query, k=k, max_time_ms=max_time_ms)
+        except Exception:
+            hits_exp = []
+    # Merge with dedupe by (file_rel, ls, le)
+    def _kof(h: tuple[float, str, dict]) -> tuple:
+        sc, rel, obj = h
+        m = (obj.get("meta") or {})
+        return (str(m.get("file_rel") or rel), int(m.get("line_start") or 0), int(m.get("line_end") or 0))
+    seen_k: set[tuple] = set()
+    hits: list[tuple[float, str, dict]] = []
+    for lst in (hits_base or []), (hits_exp or []):
+        for h in lst:
+            kx = _kof(h)
+            if kx in seen_k:
+                continue
+            seen_k.add(kx)
+            hits.append(h)
     if not hits:
         return ""
-    # Rerank to prioritize path/preview token matches with the query
-    hits_sorted = rerank_hits(hits, query)
+    # Unified rerank with source-aware + KG-aware boosts
+    hits_sorted = rerank_hits_unified(hits, query)
     parts: List[str] = []
     refs_parts: List[str] = []
     graph_parts: List[str] = []
+    brain_parts: List[str] = []
     seen: set[str] = set()  # dedupe by preview text
     headers_seen: set[str] = set()  # dedupe by [file:ls-le]
     refs_headers_seen: set[str] = set()  # dedupe refs by header
@@ -70,7 +175,13 @@ async def build_project_context_for(query: str, *, k: int | None = None, max_cha
 
     # Disable total code budget if configured
     budget = None if PROJ_NO_CODE_BUDGET else (PROJ_TOTAL_CODE_BUDGET if (max_chars is None) else max_chars)
+    try:
+        _actdet({"hits": len(hits_sorted), "tasks": "0/0", "budget": (budget or 0)})
+    except Exception:
+        pass
     total_len = 0
+    # Per-call cache to avoid re-reading the same file multiple times
+    file_text_cache: Dict[str, str] = {}
 
     full_scope_used = 0
     codey_query = _is_code_like(query or "")  # currently informational; future heuristics may use it
@@ -80,6 +191,12 @@ async def build_project_context_for(query: str, *, k: int | None = None, max_cha
     except Exception:
         _SNIP_CONC = 4
     sem = asyncio.Semaphore(_SNIP_CONC)
+    # Additional throttled semaphore used only when system saturation is detected
+    try:
+        _SNIP_CONC_THR = max(1, int(os.getenv("EMBED_PROJECT_SNIPPET_CONC_THR", "1")))
+    except Exception:
+        _SNIP_CONC_THR = 1
+    throttled_sem = asyncio.Semaphore(_SNIP_CONC_THR)
 
     prepared: List[Tuple[int, str, Dict[str, Any], bool, List[int]]] = []  # (idx, file_rel, meta, prefer_full, extra_centers_abs)
     for idx, (score, file_rel, obj) in enumerate(hits_sorted):
@@ -134,13 +251,66 @@ async def build_project_context_for(query: str, *, k: int | None = None, max_cha
                 except Exception:
                     pass
                 return res
-            hdr, code, ls, le, is_full = await asyncio.to_thread(_run)
+            # Under throttle, serialize heavy CPU via lock; else proceed normally
+            if jx_state.throttle_event.is_set():
+                async with THROTTLE_LOCK:
+                    hdr, code, ls, le, is_full = await asyncio.to_thread(_run)
+            else:
+                hdr, code, ls, le, is_full = await asyncio.to_thread(_run)
             return (idx_i, file_rel_i, meta_i, hdr, code, ls, le, is_full)
 
     tasks = [asyncio.create_task(_build(*args)) for args in prepared]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+    # Progress as tasks complete
+    done = 0
+    results: List[Tuple[int, str, Dict[str, Any], str, str, int, int, bool]] = []
+    # Dosing config for throttled mode
+    try:
+        _DOSE_BATCH = max(1, int(os.getenv("EMBED_PROJECT_DOSE_BATCH", "4")))
+    except Exception:
+        _DOSE_BATCH = 4
+    try:
+        _DOSE_MS = max(0, int(os.getenv("EMBED_PROJECT_DOSE_MS", "8")))
+    except Exception:
+        _DOSE_MS = 8
+
+    approx_len = 0
+    for fut in asyncio.as_completed(tasks):
+        try:
+            r = await fut
+        except Exception:
+            continue
+        results.append(r)
+        done += 1
+        try:
+            _actdet({"hits": len(hits_sorted), "tasks": f"{done}/{len(prepared)}", "budget": (budget or 0)})
+        except Exception:
+            pass
+        # Early cancellation if overall budget will be exceeded by accumulated snippet sizes
+        if budget is not None:
+            try:
+                snip_len = len(r[3] or "") + len(r[4] or "")
+            except Exception:
+                snip_len = 0
+            approx_len += snip_len
+            if approx_len > budget and done > 0:
+                # Cancel remaining tasks to save resources
+                pend = [t for t in tasks if not t.done()]
+                for t in pend:
+                    t.cancel()
+                if pend:
+                    try:
+                        await asyncio.gather(*pend, return_exceptions=True)
+                    except Exception:
+                        pass
+                break
+        if jx_state.throttle_event.is_set():
+            if (done % _DOSE_BATCH) == 0:
+                await asyncio.sleep(_DOSE_MS / 1000.0)
+        else:
+            if (done % 5) == 0:
+                await asyncio.sleep(0)
     # Assemble in original order, enforcing budget and per-file consolidation
-    for r in sorted([x for x in results if not isinstance(x, Exception)], key=lambda t: t[0]):
+    for r in sorted(results, key=lambda t: t[0]):
         idx, file_rel, meta, header, code_block, use_ls, use_le, is_full_scope = r
         if PROJ_CONSOLIDATE_PER_FILE and file_rel in included_files:
             continue
@@ -155,6 +325,10 @@ async def build_project_context_for(query: str, *, k: int | None = None, max_cha
                     parts.append(snippet_text)
                 break
             total_len = would
+        try:
+            _actdet({"hits": len(hits_sorted), "tasks": f"{done}/{len(prepared)}", "budget": (budget or 0), "collected": total_len})
+        except Exception:
+            pass
         parts.append(snippet_text)
         if PROJ_CONSOLIDATE_PER_FILE:
             included_files.add(file_rel)
@@ -192,15 +366,27 @@ async def build_project_context_for(query: str, *, k: int | None = None, max_cha
             async def _collect_usages() -> list[tuple[str, str]]:
                 out: list[tuple[str, str]] = []
                 try:
-                    file_text = ""
-                    try:
-                        with open(os.path.join(ROOT, file_rel), 'r', encoding='utf-8', errors='ignore') as _f:
-                            file_text = _f.read()
-                    except Exception:
-                        file_text = ""
+                    file_text = file_text_cache.get(file_rel, "")
+                    if not file_text:
+                        try:
+                            if jx_state.throttle_event.is_set():
+                                async with THROTTLE_LOCK:
+                                    file_text = await read_text_abs_thread(os.path.join(ROOT, file_rel))
+                            else:
+                                file_text = await read_text_abs_thread(os.path.join(ROOT, file_rel))
+                            if file_text:
+                                file_text_cache[file_rel] = file_text
+                        except Exception:
+                            file_text = ""
                     if file_rel.endswith('.py') and file_text:
                         cand_line = int((use_ls + use_le) // 2) if (use_ls and use_le) else int(use_ls or use_le or 0)
-                        sym_name, sym_kind = get_python_symbol_at_line(file_text, cand_line)
+                        def _sym():
+                            return get_python_symbol_at_line(file_text, cand_line)
+                        if jx_state.throttle_event.is_set():
+                            async with THROTTLE_LOCK:
+                                sym_name, sym_kind = await asyncio.to_thread(_sym)
+                        else:
+                            sym_name, sym_kind = await asyncio.to_thread(_sym)
                         if sym_name:
                             usages = await find_usages_cached(sym_name, file_rel, limit=usage_limit, around=PROJ_SNIPPET_AROUND)
                             for fr, ua, ub, usnip, ulang in usages:
@@ -283,10 +469,41 @@ async def build_project_context_for(query: str, *, k: int | None = None, max_cha
         except Exception:
             pass
 
+    # Optionally include memory results even if code gathered nothing
+    mem_parts: List[str] = []
+    if _mem_enable and mem_task is not None:
+        try:
+            try:
+                _mem_budget = max(200, int(os.getenv("EMBED_AGG_MEM_BUDGET_CHARS", "1200")))
+            except Exception:
+                _mem_budget = 1200
+            mem_lines = await mem_task  # unified lines already deduped and clamped
+            if mem_lines:
+                acc: List[str] = []
+                total = 0
+                for ln in mem_lines:
+                    L = len(ln) + 1
+                    if total + L > _mem_budget:
+                        break
+                    acc.append(ln)
+                    total += L
+                if acc:
+                    mem_parts.append("\n".join(acc))
+        except Exception:
+            pass
+
+    if not parts and mem_parts:
+        return _build_memory_block(mem_parts)
     if not parts:
         return ""
     body = "\n".join(parts)
-    out_blocks: List[str] = [f"<embeddings_code>\n{body}\n</embeddings_code>"]
+    code_block = _build_code_block([body])
+    brain_block = ""
+    try:
+        if _brain_enable and brain_pairs:
+            brain_block = _build_brain_block(brain_pairs)
+    except Exception:
+        brain_block = ""
     # Refs policy gating and size budget to avoid unnecessary tokens
     # Default to 'always' so references are visible by default; can be tuned via env
     refs_policy = os.getenv("JINX_REFS_POLICY", "always").strip().lower()
@@ -306,23 +523,28 @@ async def build_project_context_for(query: str, *, k: int | None = None, max_cha
             return True
         return bool(codey) or (count >= refs_min)
 
-    if refs_parts and _should_send_refs(codey_query, len(refs_parts)):
-        # Trim refs to the configured character budget
-        acc: List[str] = []
-        total = 0
-        for p in refs_parts:
-            plen = len(p) + 1
-            if total + plen > refs_max_chars:
-                break
-            acc.append(p)
-            total += plen
-        if acc:
-            rbody = "\n".join(acc)
-            out_blocks.append(f"<embeddings_refs>\n{rbody}\n</embeddings_refs>")
-    if graph_parts:
-        gbody = "\n".join(graph_parts)
-        out_blocks.append(f"<embeddings_graph>\n{gbody}\n</embeddings_graph>")
-    return "\n\n".join(out_blocks)
+    refs_block = _build_refs_block(refs_parts, policy=refs_policy, refs_min=refs_min, refs_max_chars=refs_max_chars, codey=codey_query)
+    graph_block = _build_graph_block(graph_parts)
+    mem_block = _build_memory_block(mem_parts)
+    final_text = _join_blocks([code_block, brain_block, refs_block, graph_block, mem_block])
+    try:
+        _actdet_clear()
+    except Exception:
+        pass
+    # Record attention: included code paths and query terms
+    try:
+        keys: list[str] = []
+        for fr in included_files:
+            keys.append(f"path: {fr}")
+        for m in _re.finditer(r"(?u)[\\w\\.]{3,}", (query or "")):
+            t = (m.group(0) or "").strip().lower()
+            if t and len(t) >= 3:
+                keys.append(f"term: {t}")
+        if keys:
+            await _att_rec(keys, weight=1.0)
+    except Exception:
+        pass
+    return final_text
 
 
 __all__ = [
@@ -338,7 +560,7 @@ async def build_project_context_multi_for(queries: List[str], *, k: int | None =
     if not hits:
         return ""
     # Re-rank across all hits by combined query string
-    hits_sorted = rerank_hits(hits, " ".join(queries))
+    hits_sorted = rerank_hits_unified(hits, " ".join(queries))
     parts: List[str] = []
     refs_parts: List[str] = []
     graph_parts: List[str] = []
@@ -373,6 +595,40 @@ async def build_project_context_multi_for(queries: List[str], *, k: int | None =
 
     q_join = " ".join(queries)[:512]
     codey_join = _is_code_like(q_join or "")
+    # Brain activation (multi)
+    try:
+        _brain_enable_m = os.getenv("EMBED_BRAIN_ENABLE", "1").strip().lower() not in ("", "0", "false", "off", "no")
+    except Exception:
+        _brain_enable_m = True
+    try:
+        _brain_topk_m = max(4, int(os.getenv("EMBED_BRAIN_TOP_K", "12")))
+    except Exception:
+        _brain_topk_m = 12
+    brain_pairs_m: list[tuple[str, float]] = []
+    if _brain_enable_m:
+        try:
+            brain_pairs_m = await _brain_activate(q_join, top_k=_brain_topk_m)
+        except Exception:
+            brain_pairs_m = []
+    # Memory retrieval (multi)
+    try:
+        _mem_enable_m = os.getenv("EMBED_AGG_MEM_ENABLE", "1").strip().lower() not in ("", "0", "false", "off", "no")
+    except Exception:
+        _mem_enable_m = True
+    try:
+        _mem_k_m = max(1, int(os.getenv("EMBED_AGG_MEM_K", "8")))
+    except Exception:
+        _mem_k_m = 8
+    mem_task_m: asyncio.Task | None = None
+    if _mem_enable_m:
+        try:
+            try:
+                _mem_preview_m = max(24, int(os.getenv("JINX_MACRO_MEM_PREVIEW_CHARS", "160")))
+            except Exception:
+                _mem_preview_m = 160
+            mem_task_m = asyncio.create_task(_mem_unified(q_join, k=_mem_k_m, preview_chars=_mem_preview_m))
+        except Exception:
+            mem_task_m = None
     prepared: List[Tuple[int, str, Dict[str, Any], bool, List[int]]] = []
     for idx, (score, file_rel, obj) in enumerate(hits_sorted):
         try:
@@ -411,8 +667,58 @@ async def build_project_context_multi_for(queries: List[str], *, k: int | None =
             return (idx_i, file_rel_i, meta_i, hdr, code, ls, le, is_full)
 
     tasks = [asyncio.create_task(_build(*args)) for args in prepared]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-    for r in sorted([x for x in results if not isinstance(x, Exception)], key=lambda t: t[0]):
+    # Progress as tasks complete
+    done = 0
+    results: List[Tuple[int, str, Dict[str, Any], str, str, int, int, bool]] = []
+    try:
+        _actdet({"hits": len(hits_sorted), "tasks": f"0/{len(prepared)}"})
+    except Exception:
+        pass
+    # Adaptive dosing in multi-query builder as well
+    try:
+        _DOSE_BATCH_M = max(1, int(os.getenv("EMBED_PROJECT_DOSE_BATCH", "4")))
+    except Exception:
+        _DOSE_BATCH_M = 4
+    try:
+        _DOSE_MS_M = max(0, int(os.getenv("EMBED_PROJECT_DOSE_MS", "8")))
+    except Exception:
+        _DOSE_MS_M = 8
+
+    approx_len_m = 0
+    for fut in asyncio.as_completed(tasks):
+        try:
+            r = await fut
+        except Exception:
+            continue
+        results.append(r)
+        done += 1
+        try:
+            _actdet({"hits": len(hits_sorted), "tasks": f"{done}/{len(prepared)}"})
+        except Exception:
+            pass
+        if jx_state.throttle_event.is_set():
+            if (done % _DOSE_BATCH_M) == 0:
+                await asyncio.sleep(_DOSE_MS_M / 1000.0)
+        else:
+            if (done % 5) == 0:
+                await asyncio.sleep(0)
+        # Early cancellation on approximate budget in multi-query
+        try:
+            snip_len_m = len(r[3] or "") + len(r[4] or "")
+        except Exception:
+            snip_len_m = 0
+        approx_len_m += snip_len_m
+        if budget is not None and approx_len_m > budget and done > 0:
+            pend = [t for t in tasks if not t.done()]
+            for t in pend:
+                t.cancel()
+            if pend:
+                try:
+                    await asyncio.gather(*pend, return_exceptions=True)
+                except Exception:
+                    pass
+            break
+    for r in sorted(results, key=lambda t: t[0]):
         idx, file_rel, meta, header, code_block, use_ls, use_le, is_full_scope = r
         if PROJ_CONSOLIDATE_PER_FILE and file_rel in included_files:
             continue
@@ -454,18 +760,33 @@ async def build_project_context_multi_for(queries: List[str], *, k: int | None =
             pass
         # Optionally add a couple of usage references for the enclosing symbol (Python only)
         try:
+            # Per-call cache to avoid re-reading same files
+            file_text_cache: Dict[str, str] = {}
+
             async def _collect_usages() -> list[tuple[str, str]]:
                 out: list[tuple[str, str]] = []
                 try:
-                    file_text = ""
-                    try:
-                        with open(os.path.join(ROOT, file_rel), 'r', encoding='utf-8', errors='ignore') as _f:
-                            file_text = _f.read()
-                    except Exception:
-                        file_text = ""
+                    file_text = file_text_cache.get(file_rel, "")
+                    if not file_text:
+                        try:
+                            if jx_state.throttle_event.is_set():
+                                async with THROTTLE_LOCK:
+                                    file_text = await read_text_abs_thread(os.path.join(ROOT, file_rel))
+                            else:
+                                file_text = await read_text_abs_thread(os.path.join(ROOT, file_rel))
+                            if file_text:
+                                file_text_cache[file_rel] = file_text
+                        except Exception:
+                            file_text = ""
                     if file_rel.endswith('.py') and file_text:
                         cand_line = int((use_ls + use_le) // 2) if (use_ls and use_le) else int(use_ls or use_le or 0)
-                        sym_name, sym_kind = get_python_symbol_at_line(file_text, cand_line)
+                        def _sym():
+                            return get_python_symbol_at_line(file_text, cand_line)
+                        if jx_state.throttle_event.is_set():
+                            async with THROTTLE_LOCK:
+                                sym_name, sym_kind = await asyncio.to_thread(_sym)
+                        else:
+                            sym_name, sym_kind = await asyncio.to_thread(_sym)
                         if sym_name:
                             usages = await find_usages_cached(sym_name, file_rel, limit=PROJ_USAGE_REFS_LIMIT, around=PROJ_SNIPPET_AROUND)
                             for fr, ua, ub, usnip, ulang in usages:
@@ -546,10 +867,56 @@ async def build_project_context_multi_for(queries: List[str], *, k: int | None =
         except Exception:
             pass
 
+    # Optionally include memory results even if code gathered nothing (multi)
+    mem_parts: List[str] = []
+    if _mem_enable_m and mem_task_m is not None:
+        try:
+            try:
+                _mem_budget_m = max(200, int(os.getenv("EMBED_AGG_MEM_BUDGET_CHARS", "1200")))
+            except Exception:
+                _mem_budget_m = 1200
+            mem_lines_m = await mem_task_m
+            if mem_lines_m:
+                acc_m: List[str] = []
+                total_m = 0
+                for ln in mem_lines_m:
+                    L = len(ln) + 1
+                    if total_m + L > _mem_budget_m:
+                        break
+                    acc_m.append(ln)
+                    total_m += L
+                if acc_m:
+                    mem_parts.append("\n".join(acc_m))
+        except Exception:
+            pass
+
+    if not parts and mem_parts:
+        return _build_memory_block(mem_parts)
     if not parts:
         return ""
     body = "\n".join(parts)
-    out_blocks: List[str] = [f"<embeddings_code>\n{body}\n</embeddings_code>"]
+    code_block = _build_code_block([body])
+    brain_block = ""
+    try:
+        if _brain_enable_m and brain_pairs_m:
+            brain_block = _build_brain_block(brain_pairs_m)
+    except Exception:
+        brain_block = ""
+    # Optional brain dump to logs (multi)
+    try:
+        dump_on = os.getenv("EMBED_BRAIN_DUMP", "0").strip().lower() not in ("", "0", "false", "off", "no")
+        if dump_on:
+            await _log_append(BLUE_WHISPERS, "[brain] multi-query dump:")
+            for kkey, sc in (brain_pairs_m or [])[:8]:
+                await _log_append(BLUE_WHISPERS, f"[brain.top] {kkey} ({sc:.2f})")
+            att = _atten_get()
+            if att:
+                top_att = sorted(att.items(), key=lambda kv: -float(kv[1] or 0.0))[:8]
+                for k, v in top_att:
+                    if float(v or 0.0) > 0.0:
+                        await _log_append(BLUE_WHISPERS, f"[atten] {k}={v:.3f}")
+    except Exception:
+        pass
     # Refs policy gating and size budget (multi-query). Default to 'always' so refs are visible by default.
     refs_policy = os.getenv("JINX_REFS_POLICY", "always").strip().lower()
     try:
@@ -568,19 +935,22 @@ async def build_project_context_multi_for(queries: List[str], *, k: int | None =
             return True
         return bool(codey) or (count >= refs_min)
 
-    if refs_parts and _should_send_refs_multi(codey_join, len(refs_parts)):
-        acc: List[str] = []
-        total = 0
-        for p in refs_parts:
-            plen = len(p) + 1
-            if total + plen > refs_max_chars:
-                break
-            acc.append(p)
-            total += plen
-        if acc:
-            rbody = "\n".join(acc)
-            out_blocks.append(f"<embeddings_refs>\n{rbody}\n</embeddings_refs>")
-    if graph_parts:
-        gbody = "\n".join(graph_parts)
-        out_blocks.append(f"<embeddings_graph>\n{gbody}\n</embeddings_graph>")
-    return "\n\n".join(out_blocks)
+    refs_block = _build_refs_block(refs_parts, policy=refs_policy, refs_min=refs_min, refs_max_chars=refs_max_chars, codey=codey_join)
+    graph_block = _build_graph_block(graph_parts)
+    mem_block = _build_memory_block(mem_parts)
+    # Record attention: included code paths and query terms (multi)
+    try:
+        keys2: list[str] = []
+        for fr in included_files:
+            keys2.append(f"path: {fr}")
+        q_join = " ".join(queries)[:512]
+        for m in _re.finditer(r"(?u)[\\w\\.]{3,}", q_join):
+            t = (m.group(0) or "").strip().lower()
+            if t and len(t) >= 3:
+                keys2.append(f"term: {t}")
+        if keys2:
+            await _att_rec(keys2, weight=1.0)
+    except Exception:
+        pass
+    return _join_blocks([code_block, brain_block, refs_block, graph_block, mem_block])
+

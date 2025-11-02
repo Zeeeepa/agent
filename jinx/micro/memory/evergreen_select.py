@@ -11,6 +11,7 @@ except Exception:  # optional
     _fuzzy = None  # type: ignore
 
 from jinx.micro.memory.storage import read_evergreen
+from jinx.micro.memory.vector_index import search as _vec_search
 
 # Simple in-process TTL cache
 _SEL_CACHE: Dict[Tuple[str, str, str], Tuple[int, str]] = {}
@@ -169,6 +170,37 @@ async def select_evergreen_for(query: str, anchors: Optional[Dict[str, List[str]
         used += len(b) + 2
 
     out = ("\n\n".join(out_blocks)).strip()
+
+    # Optional vector-based fallback if no blocks selected under the time budget
+    if not out:
+        try:
+            use_vec = str(os.getenv("JINX_EVG_VEC_ENABLE", "1")).lower() not in ("", "0", "false", "off", "no")
+        except Exception:
+            use_vec = True
+        if use_vec and not time_up():
+            try:
+                # Leave up to half of remaining budget
+                elapsed_ms = (time.perf_counter() - t0) * 1000.0
+                rem_ms = int(max(1.0, (max_time_ms or 120) - elapsed_ms))
+                k_vec = max(3, min(12, (max_blocks or 6) * 2))
+                if rem_ms > 1:
+                    lines = await _vec_search(q, k=k_vec, max_time_ms=rem_ms, preview_chars=min(200, int(os.getenv("JINX_EVG_PREVIEW_CHARS", "160"))))
+                else:
+                    lines = []
+            except Exception:
+                lines = []
+            if lines:
+                seen: set[str] = set()
+                parts: List[str] = []
+                limit = max_chars or 1200
+                for ln in lines:
+                    if not ln or ln in seen:
+                        continue
+                    if (sum(len(p) for p in parts) + len(ln) + 1) > limit:
+                        break
+                    parts.append(ln)
+                    seen.add(ln)
+                out = "\n".join(parts).strip()
 
     _SEL_CACHE[ck] = (now, out)
     return out

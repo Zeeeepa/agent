@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import os
+import time
 import contextlib
 from jinx.bootstrap import ensure_optional
 from typing import Any, cast
@@ -17,6 +19,7 @@ from jinx.logging_service import blast_mem, bomb_log
 from jinx.log_paths import TRIGGER_ECHOES, BLUE_WHISPERS
 from jinx.async_utils.queue import try_put_nowait
 import jinx.state as jx_state
+from jinx.micro.ui.spinner_util import format_activity_detail, parse_env_bool, parse_env_int
 
 
 # Ensure prompt_toolkit is present at import time to avoid installing in an active event loop
@@ -34,11 +37,34 @@ async def neon_input(qe: asyncio.Queue[str]) -> None:
     # Lazily import prompt_toolkit symbols
     _ptk = importlib.import_module("prompt_toolkit")
     _ptk_keys = importlib.import_module("prompt_toolkit.key_binding")
+    _ptk_fmt = importlib.import_module("prompt_toolkit.formatted_text")
     PromptSession = getattr(_ptk, "PromptSession")
     KeyBindings = getattr(_ptk_keys, "KeyBindings")
+    FormattedText = getattr(_ptk_fmt, "FormattedText")
 
     finger_wire = KeyBindings()
-    sess = PromptSession(key_bindings=finger_wire)
+
+    def _toolbar() -> "FormattedText":
+        show_det = parse_env_bool("JINX_SPINNER_ACTIVITY_DETAIL", True)
+        # Build activity line
+        act = getattr(jx_state, "activity", "") or ""
+        act_ts = float(getattr(jx_state, "activity_ts", 0.0) or 0.0)
+        spin_t0 = float(getattr(jx_state, "spin_t0", 0.0) or 0.0)
+        pulse = int(getattr(jx_state, "pulse", 0) or 0)
+        now = time.perf_counter()
+        age = (now - act_ts) if act_ts else 0.0
+        total = (now - spin_t0) if spin_t0 else 0.0
+        det = getattr(jx_state, "activity_detail", None)
+        det_str = ""
+        if show_det:
+            try:
+                det_str, _stage, _tasks = format_activity_detail(det)  # stage/tasks not needed here
+            except Exception:
+                det_str = ""
+        text = f"❤ {pulse} | {act or 'ready'} [{age:.1f}s]{det_str} (total {total:.1f}s)"
+        return FormattedText([("", text)])
+
+    sess = PromptSession(key_bindings=finger_wire, bottom_toolbar=_toolbar)
     boom_clock: dict[str, float] = {"time": asyncio.get_running_loop().time()}
     activity = asyncio.Event()
 
@@ -75,6 +101,23 @@ async def neon_input(qe: asyncio.Queue[str]) -> None:
                 boom_clock["time"] = asyncio.get_running_loop().time()
 
     watch_task = asyncio.create_task(kaboom_watch())
+    # Periodic invalidate to refresh toolbar while spinner runs
+    async def toolbar_pulse() -> None:
+        try:
+            while True:
+                await asyncio.sleep(0.12)
+                try:
+                    # Refresh when spinner is on OR when there is activity/detail to show
+                    spin_on = bool(getattr(jx_state, "spin_on", False))
+                    act = (getattr(jx_state, "activity", "") or "").strip()
+                    det = getattr(jx_state, "activity_detail", None)
+                    if spin_on or act or det:
+                        sess.app.invalidate()
+                except Exception:
+                    pass
+        except asyncio.CancelledError:
+            return
+    pulse_task = asyncio.create_task(toolbar_pulse())
     try:
         prompt_task: asyncio.Task[str] | None = None
         shutdown_task: asyncio.Task[bool] | None = None  # Event.wait() resolves to True
@@ -129,6 +172,9 @@ async def neon_input(qe: asyncio.Queue[str]) -> None:
             await watch_task
         except asyncio.CancelledError:
             pass
+        pulse_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await pulse_task
         # Force-close prompt_toolkit app and consume any leftover tasks
         with contextlib.suppress(Exception):
             sess.app.exit(exception=EOFError())

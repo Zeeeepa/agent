@@ -10,6 +10,7 @@ import asyncio
 from jinx.micro.memory.storage import read_compact as _read_compact, read_evergreen as _read_evergreen, get_memory_mtimes as _get_mtimes
 from jinx.micro.memory.graph_reasoner import activate as _graph_activate
 from jinx.micro.text.heuristics import is_code_like as _is_code_like
+from jinx.micro.memory.usage_store import weight_for as _usage_weight
 
 # Module-level caches keyed by memory file mtimes
 _C_MTIME: int = -1
@@ -195,6 +196,12 @@ async def rank_memory(query: str, *, scope: str = "compact", k: int = 6, preview
     except Exception:
         gboost = 0.15
 
+    # Optional usage-based weighting (default ON)
+    try:
+        use_usage = str(os.getenv("JINX_MEM_RANK_USAGE", "1")).lower() not in ("", "0", "false", "off", "no")
+    except Exception:
+        use_usage = True
+
     for i, ln in enumerate(pool):
         low = ln.lower()
         score = 0.0
@@ -218,6 +225,17 @@ async def rank_memory(query: str, *, scope: str = "compact", k: int = 6, preview
         if scope != "evergreen" and L > 1:
             rec = 1.0 + 0.25 * (i / (L - 1))
             score *= rec
+        # usage boost
+        if use_usage and score > 0.0:
+            try:
+                w = float(_usage_weight(ln))
+            except Exception:
+                w = 1.0
+            if w < 0.7:
+                w = 0.7
+            elif w > 2.0:
+                w = 2.0
+            score *= w
         scored.append((score, i, ln))
         if max_ms > 0 and (time.perf_counter() - t0) * 1000.0 > max_ms:
             break

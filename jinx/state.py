@@ -17,6 +17,16 @@ shard_lock: asyncio.Lock = asyncio.Lock()
 pulse: int = int(os.getenv("PULSE", "100"))
 boom_limit: int = int(os.getenv("TIMEOUT", "30"))
 
+# Human-readable activity description shown by spinner (set by pipeline)
+activity: str = ""
+# Monotonic timestamp when activity was last updated (perf_counter seconds)
+activity_ts: float = 0.0
+
+# Optional structured detail for current activity (e.g., progress numbers)
+activity_detail: dict | None = None
+# Timestamp of last detail update
+activity_detail_ts: float = 0.0
+
 # Global shutdown event set when pulse depletes or an emergency stop is requested
 shutdown_event: asyncio.Event = asyncio.Event()
 

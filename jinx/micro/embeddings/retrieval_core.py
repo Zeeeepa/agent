@@ -5,6 +5,10 @@ import time
 import asyncio
 import re
 from typing import Any, Dict, List, Tuple
+import functools
+from concurrent.futures import ProcessPoolExecutor
+import atexit
+import asyncio as _aio
 
 # TTL caches for retrieval results
 _PRJ_CACHE: Dict[str, Tuple[int, List[Tuple[float, str, Dict[str, Any]]]]] = {}
@@ -58,10 +62,91 @@ from .project_stage_astmatch import stage_astmatch_hits
 from .project_stage_astcontains import stage_astcontains_hits
 from .project_stage_rapidfuzz import stage_rapidfuzz_hits
 from .project_stage_tokenmatch import stage_tokenmatch_hits
+from jinx.micro.rt.activity import set_activity_detail as _actdet, clear_activity_detail as _actdet_clear
 from .project_stage_openbuffer import stage_openbuffer_hits
 from .project_query_core import extract_code_core
 from jinx.micro.text.heuristics import is_code_like as _is_code_like
 from .rerankers.cross_encoder import cross_encoder_rerank as _ce_rerank
+from jinx.micro.brain.attention import get_attention_weights as _atten_get
+
+# Optional process pool for CPU-bound stages
+try:
+    _RAW_PROCPOOL = os.getenv("JINX_RETR_PROCPOOL", None)
+    if _RAW_PROCPOOL is None:
+        # Auto: enable if machine has >=4 CPUs
+        _USE_PROCPOOL = (int(os.cpu_count() or 1) >= 4)
+    else:
+        _USE_PROCPOOL = _RAW_PROCPOOL.strip().lower() not in ("", "0", "false", "off", "no")
+except Exception:
+    _USE_PROCPOOL = (int(os.cpu_count() or 1) >= 4)
+try:
+    _RAW_WORKERS = os.getenv("JINX_RETR_PROCPOOL_WORKERS", None)
+    if _RAW_WORKERS is None or (str(_RAW_WORKERS).strip() == ""):
+        _PROCPOOL_WORKERS = max(1, min(4, (int(os.cpu_count() or 2) - 1)))
+    else:
+        _PROCPOOL_WORKERS = max(1, int(_RAW_WORKERS))
+except Exception:
+    _PROCPOOL_WORKERS = max(1, min(4, (int(os.cpu_count() or 2) - 1)))
+_PROC_POOL: ProcessPoolExecutor | None = None
+
+
+def _get_proc_pool() -> ProcessPoolExecutor:
+    global _PROC_POOL
+    if _PROC_POOL is None:
+        _PROC_POOL = ProcessPoolExecutor(max_workers=_PROCPOOL_WORKERS)
+    return _PROC_POOL
+
+
+def shutdown_proc_pool() -> None:
+    """Shutdown the global ProcessPoolExecutor safely.
+
+    Called at interpreter exit (atexit) and can be called explicitly on shutdown.
+    """
+    global _PROC_POOL
+    pool = _PROC_POOL
+    if pool is not None:
+        try:
+            # Avoid long blocking at interpreter shutdown
+            pool.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
+        _PROC_POOL = None
+
+
+# Ensure pool is shutdown before concurrent.futures' own atexit hook runs
+atexit.register(shutdown_proc_pool)
+
+
+_STAGE_MAP = {
+    "stage_tokenmatch_hits": stage_tokenmatch_hits,
+    "stage_lineexact_hits": stage_lineexact_hits,
+    "stage_astmatch_hits": stage_astmatch_hits,
+    "stage_rapidfuzz_hits": stage_rapidfuzz_hits,
+    "stage_literal_hits": stage_literal_hits,
+    "stage_pyflow_hits": stage_pyflow_hits,
+    "stage_libcst_hits": stage_libcst_hits,
+    "stage_jedi_hits": stage_jedi_hits,
+    "stage_regex_hits": stage_regex_hits,
+    "stage_astcontains_hits": stage_astcontains_hits,
+    "stage_textscan_hits": stage_textscan_hits,
+    "stage_exact_hits": stage_exact_hits,
+    "stage_traceback_hits": stage_traceback_hits,
+    "stage_pyast_hits": stage_pyast_hits,
+    "stage_pydoc_hits": stage_pydoc_hits,
+    "stage_pyliterals_hits": stage_pyliterals_hits,
+    "stage_cooccur_hits": stage_cooccur_hits,
+    "stage_openbuffer_hits": stage_openbuffer_hits,
+}
+
+
+def _stage_call_entry(name: str, query: str, k_arg: int, cap_ms: int | None):
+    try:
+        fn = _STAGE_MAP.get(name)
+        if fn is None:
+            return []
+        return fn(query, k_arg, max_time_ms=cap_ms)
+    except Exception:
+        return []
 
 
 async def retrieve_project_top_k(query: str, k: int | None = None, *, max_time_ms: int | None = 250) -> List[Tuple[float, str, Dict[str, Any]]]:
@@ -101,6 +186,10 @@ async def retrieve_project_top_k(query: str, k: int | None = None, *, max_time_m
                 continue
             seen_keys.add(kx)
             collected.append(h)
+        try:
+            _actdet({"retr_stage": cur_stage, "hits_collected": len(collected), "rem_ms": _time_left() or 0})
+        except Exception:
+            pass
 
     # Helper closures to minimize repetition across stages
     def _time_left() -> int | None:
@@ -117,6 +206,36 @@ async def retrieve_project_top_k(query: str, k: int | None = None, *, max_time_m
         if PROJ_NO_STAGE_BUDGETS or PROJ_EXHAUSTIVE_MODE:
             return rem
         return max(1, min(rem, cap_ms))
+
+    # Dynamic routing: attention-informed budget multiplier
+    def _atten_mult() -> float:
+        try:
+            att = _atten_get()
+            if not att:
+                return 1.0
+            # Sum attention over query terms
+            import re as _re
+            s = 0.0
+            for m in _re.finditer(r"(?u)[\w\.]{3,}", q_core or q):
+                t = (m.group(0) or "").strip().lower()
+                if t and len(t) >= 3:
+                    try:
+                        s += float(att.get(f"term: {t}", 0.0))
+                    except Exception:
+                        continue
+            # Map sum into [1.0, MUL_MAX]
+            import math as _math
+            try:
+                mmax = float(os.getenv("EMBED_ROUTING_ATTEN_MUL_MAX", "1.35"))
+            except Exception:
+                mmax = 1.35
+            # Smooth growth: 1 + (1 - exp(-s)) * (mmax-1)
+            growth = (1.0 - _math.exp(-max(0.0, s))) * max(0.0, (mmax - 1.0))
+            return 1.0 + growth
+        except Exception:
+            return 1.0
+
+    _ATT_MUL = _atten_mult()
 
     async def _maybe_ce_rerank(hits: List[Tuple[float, str, Dict[str, Any]]]) -> List[Tuple[float, str, Dict[str, Any]]]:
         """Optionally apply cross-encoder reranking to top-N hits and combine scores.
@@ -174,6 +293,13 @@ async def retrieve_project_top_k(query: str, k: int | None = None, *, max_time_m
 
     async def _run_sync_stage(stage_fn, query: str, k_arg: int, cap_ms: int):
         rem = _bounded(_time_left(), cap_ms)
+        if _USE_PROCPOOL:
+            name = getattr(stage_fn, "__name__", "")
+            if name in _STAGE_MAP:
+                loop = _aio.get_running_loop()
+                hits = await loop.run_in_executor(_get_proc_pool(), functools.partial(_stage_call_entry, name, query, k_arg, rem))
+                return (hits[:k_arg]) if hits else None
+        # Default: run sync stage in thread
         def _call():
             try:
                 return stage_fn(query, k_arg, max_time_ms=rem)
@@ -198,17 +324,22 @@ async def retrieve_project_top_k(query: str, k: int | None = None, *, max_time_m
         vec_task: asyncio.Task[List[Tuple[float, str, Dict[str, Any]]]] = asyncio.create_task(stage_vector_hits(q_core, k_eff, max_time_ms=rem_vec0))
     except Exception:
         vec_task = asyncio.create_task(asyncio.sleep(0.0))  # type: ignore
+    cur_stage = "vector"
+    try:
+        _actdet({"retr_stage": cur_stage, "rem_ms": _time_left() or 0})
+    except Exception:
+        pass
 
     # Early precise stages: run concurrently when accumulating (exhaustive mode)
     if accumulate:
         codey_early = _is_code_like(q or "")
-        cap_lineexact = _bounded(_time_left(), int(PROJ_STAGE_LINEEXACT_MS * (1.5 if codey_early else 1.0))) or PROJ_STAGE_LINEEXACT_MS
-        cap_literal = _bounded(_time_left(), int(PROJ_STAGE_LITERAL_MS * (1.5 if codey_early else 1.0))) or PROJ_STAGE_LITERAL_MS
+        cap_lineexact = _bounded(_time_left(), int(PROJ_STAGE_LINEEXACT_MS * (1.5 if codey_early else 1.0) * _ATT_MUL)) or PROJ_STAGE_LINEEXACT_MS
+        cap_literal = _bounded(_time_left(), int(PROJ_STAGE_LITERAL_MS * (1.5 if codey_early else 1.0) * _ATT_MUL)) or PROJ_STAGE_LITERAL_MS
         tasks = [
-            _run_sync_stage(stage_tokenmatch_hits, q_core, k_eff, PROJ_STAGE_TOKENMATCH_MS),
+            _run_sync_stage(stage_tokenmatch_hits, q_core, k_eff, int(PROJ_STAGE_TOKENMATCH_MS * _ATT_MUL)),
             _run_sync_stage(stage_lineexact_hits, q_core, k_eff, cap_lineexact),
-            _run_sync_stage(stage_astmatch_hits, q_core, k_eff, PROJ_STAGE_ASTMATCH_MS),
-            _run_sync_stage(stage_rapidfuzz_hits, q_core, k_eff, PROJ_STAGE_RAPIDFUZZ_MS),
+            _run_sync_stage(stage_astmatch_hits, q_core, k_eff, int(PROJ_STAGE_ASTMATCH_MS * _ATT_MUL)),
+            _run_sync_stage(stage_rapidfuzz_hits, q_core, k_eff, int(PROJ_STAGE_RAPIDFUZZ_MS * _ATT_MUL)),
             _run_sync_stage(stage_literal_hits, (q_core or q), k_eff, cap_literal),
         ]
         try:
@@ -221,20 +352,20 @@ async def retrieve_project_top_k(query: str, k: int | None = None, *, max_time_m
         await asyncio.sleep(0)
     else:
         # Sequential short-circuit path when not accumulating
-        tm_hits = await _run_sync_stage(stage_tokenmatch_hits, q_core, 1, PROJ_STAGE_TOKENMATCH_MS)
+        tm_hits = await _run_sync_stage(stage_tokenmatch_hits, q_core, 1, int(PROJ_STAGE_TOKENMATCH_MS * _ATT_MUL))
         if tm_hits:
             return tm_hits[:1]
         await asyncio.sleep(0)
 
         codey_seq = _is_code_like(q or "")
-        cap_lineexact2 = _bounded(_time_left(), int(PROJ_STAGE_LINEEXACT_MS * (1.5 if codey_seq else 1.0))) or PROJ_STAGE_LINEEXACT_MS
+        cap_lineexact2 = _bounded(_time_left(), int(PROJ_STAGE_LINEEXACT_MS * (1.5 if codey_seq else 1.0) * _ATT_MUL)) or PROJ_STAGE_LINEEXACT_MS
         le_hits = await _run_sync_stage(stage_lineexact_hits, q_core, 1, cap_lineexact2)
         if le_hits:
             return le_hits[:1]
         await asyncio.sleep(0)
 
         # Literal exact/flex immediately after line-exact for code-like queries
-        cap_literal2 = _bounded(_time_left(), int(PROJ_STAGE_LITERAL_MS * (1.5 if codey_seq else 1.0))) or PROJ_STAGE_LITERAL_MS
+        cap_literal2 = _bounded(_time_left(), int(PROJ_STAGE_LITERAL_MS * (1.5 if codey_seq else 1.0) * _ATT_MUL)) or PROJ_STAGE_LITERAL_MS
         lit_early = await _run_sync_stage(stage_literal_hits, (q_core or q), 1, cap_literal2)
         if lit_early:
             return lit_early[:1]
@@ -303,15 +434,15 @@ async def retrieve_project_top_k(query: str, k: int | None = None, *, max_time_m
     if accumulate:
         # Grouped concurrency under overall budget
         codey = _is_code_like(q or "")
-        cap_pre = int(PROJ_STAGE_PRE_MS * 2) if codey else PROJ_STAGE_PRE_MS
+        cap_pre = int((PROJ_STAGE_PRE_MS * (2 if codey else 1)) * _ATT_MUL)
 
         # Group A: traceback, pyast, pydoc, pyliterals
         try:
             res_a = await asyncio.gather(
                 _run_sync_stage(stage_traceback_hits, q, k_eff, PROJ_STAGE_TB_MS),
-                _run_sync_stage(stage_pyast_hits, q, k_eff, PROJ_STAGE_PYAST_MS),
-                _run_sync_stage(stage_pydoc_hits, q, k_eff, PROJ_STAGE_PYDOC_MS),
-                _run_sync_stage(stage_pyliterals_hits, q, k_eff, PROJ_STAGE_PYLITERALS_MS),
+                _run_sync_stage(stage_pyast_hits, q, k_eff, int(PROJ_STAGE_PYAST_MS * _ATT_MUL)),
+                _run_sync_stage(stage_pydoc_hits, q, k_eff, int(PROJ_STAGE_PYDOC_MS * _ATT_MUL)),
+                _run_sync_stage(stage_pyliterals_hits, q, k_eff, int(PROJ_STAGE_PYLITERALS_MS * _ATT_MUL)),
                 return_exceptions=True,
             )
         except Exception:
@@ -324,11 +455,11 @@ async def retrieve_project_top_k(query: str, k: int | None = None, *, max_time_m
         # Group B: pyflow, libcst, jedi, regex, ast-contains
         try:
             res_b = await asyncio.gather(
-                _run_sync_stage(stage_pyflow_hits, q, k_eff, PROJ_STAGE_PYFLOW_MS),
-                _run_sync_stage(stage_libcst_hits, q, k_eff, PROJ_STAGE_LIBCST_MS),
-                _run_sync_stage(stage_jedi_hits, q, k_eff, PROJ_STAGE_JEDI_MS),
-                _run_sync_stage(stage_regex_hits, q, k_eff, PROJ_STAGE_REGEX_MS),
-                _run_sync_stage(stage_astcontains_hits, q, k_eff, PROJ_STAGE_ASTCONTAINS_MS),
+                _run_sync_stage(stage_pyflow_hits, q, k_eff, int(PROJ_STAGE_PYFLOW_MS * _ATT_MUL)),
+                _run_sync_stage(stage_libcst_hits, q, k_eff, int(PROJ_STAGE_LIBCST_MS * _ATT_MUL)),
+                _run_sync_stage(stage_jedi_hits, q, k_eff, int(PROJ_STAGE_JEDI_MS * _ATT_MUL)),
+                _run_sync_stage(stage_regex_hits, q, k_eff, int(PROJ_STAGE_REGEX_MS * _ATT_MUL)),
+                _run_sync_stage(stage_astcontains_hits, q, k_eff, int(PROJ_STAGE_ASTCONTAINS_MS * _ATT_MUL)),
                 return_exceptions=True,
             )
         except Exception:
@@ -341,10 +472,10 @@ async def retrieve_project_top_k(query: str, k: int | None = None, *, max_time_m
         # Group C: text pre-scan, exact, literal, co-occurrence, open-buffer
         try:
             res_c = await asyncio.gather(
-                _run_sync_stage(stage_textscan_hits, q, k_eff, cap_pre),
-                _run_sync_stage(stage_exact_hits, q, k_eff, PROJ_STAGE_EXACT_MS),
-                _run_sync_stage(stage_literal_hits, (q_core or q), k_eff, PROJ_STAGE_LITERAL_MS),
-                _run_sync_stage(stage_cooccur_hits, q, k_eff, PROJ_STAGE_COOCCUR_MS),
+                _run_sync_stage(stage_textscan_hits, q, k_eff, int(cap_pre)),
+                _run_sync_stage(stage_exact_hits, q, k_eff, int(PROJ_STAGE_EXACT_MS * _ATT_MUL)),
+                _run_sync_stage(stage_literal_hits, (q_core or q), k_eff, int(PROJ_STAGE_LITERAL_MS * _ATT_MUL)),
+                _run_sync_stage(stage_cooccur_hits, q, k_eff, int(PROJ_STAGE_COOCCUR_MS * _ATT_MUL)),
                 _run_sync_stage(stage_openbuffer_hits, (q_core or q), k_eff, 140),
                 return_exceptions=True,
             )
@@ -356,7 +487,7 @@ async def retrieve_project_top_k(query: str, k: int | None = None, *, max_time_m
         await asyncio.sleep(0)
 
         # Final keyword stage
-        kw = (await _run_sync_stage(stage_keyword_hits, q, k_eff, PROJ_STAGE_KEYWORD_MS)) or []
+        kw = (await _run_sync_stage(stage_keyword_hits, q, k_eff, int(PROJ_STAGE_KEYWORD_MS * _ATT_MUL))) or []
         _merge(kw)
         # Literal burst if still empty (give a bit more time once)
         if not collected:
@@ -379,76 +510,135 @@ async def retrieve_project_top_k(query: str, k: int | None = None, *, max_time_m
             _PRJ_CACHE[ck] = (now_ms, list(out_hits))
         except Exception:
             pass
+        try:
+            _actdet_clear()
+        except Exception:
+            pass
         return out_hits
     else:
         # Stage -3: traceback
+        cur_stage = "tb"
+        try:
+            _actdet({"retr_stage": cur_stage, "rem_ms": _time_left() or 0})
+        except Exception:
+            pass
         tb_hits = await _run_sync_stage(stage_traceback_hits, q, k_eff, PROJ_STAGE_TB_MS)
         if tb_hits:
             return tb_hits
         await asyncio.sleep(0)
 
         # Stage -2: pyast
-        ast_hits = await _run_sync_stage(stage_pyast_hits, q, k_eff, PROJ_STAGE_PYAST_MS)
+        cur_stage = "pyast"
+        try:
+            _actdet({"retr_stage": cur_stage, "rem_ms": _time_left() or 0})
+        except Exception:
+            pass
+        ast_hits = await _run_sync_stage(stage_pyast_hits, q, k_eff, int(PROJ_STAGE_PYAST_MS * _ATT_MUL))
         if ast_hits:
             return ast_hits
         await asyncio.sleep(0)
 
         # Stage -1.8: pydoc
-        pydoc_hits = await _run_sync_stage(stage_pydoc_hits, q, k_eff, PROJ_STAGE_PYDOC_MS)
+        cur_stage = "pydoc"
+        try:
+            _actdet({"retr_stage": cur_stage, "rem_ms": _time_left() or 0})
+        except Exception:
+            pass
+        pydoc_hits = await _run_sync_stage(stage_pydoc_hits, q, k_eff, int(PROJ_STAGE_PYDOC_MS * _ATT_MUL))
         if pydoc_hits:
             return pydoc_hits
         await asyncio.sleep(0)
 
         # Stage -1.75: pyliterals
-        pl_hits = await _run_sync_stage(stage_pyliterals_hits, q, k_eff, PROJ_STAGE_PYLITERALS_MS)
+        cur_stage = "pyliterals"
+        try:
+            _actdet({"retr_stage": cur_stage, "rem_ms": _time_left() or 0})
+        except Exception:
+            pass
+        pl_hits = await _run_sync_stage(stage_pyliterals_hits, q, k_eff, int(PROJ_STAGE_PYLITERALS_MS * _ATT_MUL))
         if pl_hits:
             return pl_hits
         await asyncio.sleep(0)
 
         # Stage -1.7: pyflow
-        pyflow_hits = await _run_sync_stage(stage_pyflow_hits, q, k_eff, PROJ_STAGE_PYFLOW_MS)
+        cur_stage = "pyflow"
+        try:
+            _actdet({"retr_stage": cur_stage, "rem_ms": _time_left() or 0})
+        except Exception:
+            pass
+        pyflow_hits = await _run_sync_stage(stage_pyflow_hits, q, k_eff, int(PROJ_STAGE_PYFLOW_MS * _ATT_MUL))
         if pyflow_hits:
             return pyflow_hits
         await asyncio.sleep(0)
 
         # Stage -1.6: libcst
-        cst_hits = await _run_sync_stage(stage_libcst_hits, q, k_eff, PROJ_STAGE_LIBCST_MS)
+        cur_stage = "libcst"
+        try:
+            _actdet({"retr_stage": cur_stage, "rem_ms": _time_left() or 0})
+        except Exception:
+            pass
+        cst_hits = await _run_sync_stage(stage_libcst_hits, q, k_eff, int(PROJ_STAGE_LIBCST_MS * _ATT_MUL))
         if cst_hits:
             return cst_hits
         await asyncio.sleep(0)
 
         # Stage -1.5: jedi
-        jedi_hits = await _run_sync_stage(stage_jedi_hits, q, k_eff, PROJ_STAGE_JEDI_MS)
+        cur_stage = "jedi"
+        try:
+            _actdet({"retr_stage": cur_stage, "rem_ms": _time_left() or 0})
+        except Exception:
+            pass
+        jedi_hits = await _run_sync_stage(stage_jedi_hits, q, k_eff, int(PROJ_STAGE_JEDI_MS * _ATT_MUL))
         if jedi_hits:
             return jedi_hits
         await asyncio.sleep(0)
 
         # Stage -1.4: regex
-        rx_hits = await _run_sync_stage(stage_regex_hits, q, k_eff, PROJ_STAGE_REGEX_MS)
+        cur_stage = "regex"
+        try:
+            _actdet({"retr_stage": cur_stage, "rem_ms": _time_left() or 0})
+        except Exception:
+            pass
+        rx_hits = await _run_sync_stage(stage_regex_hits, q, k_eff, int(PROJ_STAGE_REGEX_MS * _ATT_MUL))
         if rx_hits:
             return rx_hits
         await asyncio.sleep(0)
 
         # Stage -1: textscan
         codey = _is_code_like(q or "")
-        cap_pre = int(PROJ_STAGE_PRE_MS * 2) if codey else PROJ_STAGE_PRE_MS
-        txt_hits = await _run_sync_stage(stage_textscan_hits, q, k_eff, cap_pre)
+        cap_pre = int((PROJ_STAGE_PRE_MS * (2 if codey else 1)) * _ATT_MUL)
+        cur_stage = "textscan"
+        try:
+            _actdet({"retr_stage": cur_stage, "rem_ms": _time_left() or 0})
+        except Exception:
+            pass
+        txt_hits = await _run_sync_stage(stage_textscan_hits, q, k_eff, int(cap_pre))
         if txt_hits:
             return txt_hits
         await asyncio.sleep(0)
 
         # Stage 0: exact
-        exact = await _run_sync_stage(stage_exact_hits, q, k_eff, PROJ_STAGE_EXACT_MS)
+        cur_stage = "exact"
+        try:
+            _actdet({"retr_stage": cur_stage, "rem_ms": _time_left() or 0})
+        except Exception:
+            pass
+        exact = await _run_sync_stage(stage_exact_hits, q, k_eff, int(PROJ_STAGE_EXACT_MS * _ATT_MUL))
         if exact:
             return exact
         await asyncio.sleep(0)
 
         # Stage 2: keyword
-        kw = (await _run_sync_stage(stage_keyword_hits, q, k_eff, PROJ_STAGE_KEYWORD_MS)) or []
+        cur_stage = "keyword"
+        try:
+            _actdet({"retr_stage": cur_stage, "rem_ms": _time_left() or 0})
+        except Exception:
+            pass
+        kw = (await _run_sync_stage(stage_keyword_hits, q, k_eff, int(PROJ_STAGE_KEYWORD_MS * _ATT_MUL))) or []
         out_hits = kw[:k_eff]
         # Final literal pass
         if not out_hits:
-            lit_hits = await _run_sync_stage(stage_literal_hits, (q_core or q), k_eff, PROJ_STAGE_LITERAL_MS)
+            lit_hits = await _run_sync_stage(stage_literal_hits, (q_core or q), k_eff, int(PROJ_STAGE_LITERAL_MS * _ATT_MUL))
             if lit_hits:
                 out_hits = lit_hits
         try:

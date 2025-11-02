@@ -16,6 +16,7 @@ from .utils import (
     leading_ws,
 )
 import ast
+from jinx.micro.embeddings.project_config import resolve_project_root as _resolve_root
 import asyncio
 
 
@@ -27,7 +28,8 @@ def _truthy(name: str, default: str = "1") -> bool:
 
 
 def _get_root() -> str:
-    return os.getenv("EMBED_PROJECT_ROOT", os.getcwd())
+    # Use the same robust resolver as embeddings pipeline to ensure consistency.
+    return _resolve_root()
 
 
 def _rel_to_root(path: str) -> str:

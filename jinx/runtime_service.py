@@ -22,6 +22,7 @@ from jinx.supervisor import run_supervisor, SupervisedJob
 from jinx.priority import start_priority_dispatcher_task
 from jinx.autotune import start_autotune_task
 from jinx.watchdog import start_watchdog_task
+from jinx.micro.embeddings.retrieval_core import shutdown_proc_pool as _retr_pool_shutdown
 
 async def pulse_core(settings: Settings | None = None) -> None:
     """Run the main asynchronous processing loop.
@@ -85,3 +86,6 @@ async def pulse_core(settings: Settings | None = None) -> None:
             with contextlib.suppress(Exception):
                 await stop_error_worker()
                 await stop_memory_optimizer()
+            # Ensure ProcessPoolExecutor is torn down to avoid atexit join hang
+            with contextlib.suppress(Exception):
+                _retr_pool_shutdown()

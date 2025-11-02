@@ -5,6 +5,9 @@ from typing import Optional
 
 import aiofiles
 from aiofiles import ospath
+import asyncio as _asyncio
+from collections import OrderedDict as _OD
+import os as _os
 
 
 async def read_text_raw(path: str) -> str:
@@ -75,3 +78,44 @@ async def write_text(path: str, text: str) -> None:
             await f.write(text or "")
     except Exception:
         pass
+
+
+# --- Read absolute file via thread with small LRU cache ---
+_READ_LRU_CAP = 128
+_read_lru: _OD[tuple[str, int, int], str] = _OD()
+
+
+def _read_abs_sync(path: str) -> str:
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            return f.read()
+    except Exception:
+        return ""
+
+
+async def read_text_abs_thread(path: str) -> str:
+    """Read absolute file text via thread with (path,mtime,size) LRU cache.
+
+    Returns empty string on error.
+    """
+    try:
+        st = _os.stat(path)
+        key = (path, int(st.st_mtime), int(st.st_size))
+    except Exception:
+        key = (path, 0, 0)
+    try:
+        if key in _read_lru:
+            # move to end (most recent)
+            _read_lru.move_to_end(key)
+            return _read_lru[key]
+    except Exception:
+        pass
+    txt = await _asyncio.to_thread(_read_abs_sync, path)
+    try:
+        _read_lru[key] = txt
+        if len(_read_lru) > _READ_LRU_CAP:
+            # pop oldest
+            _read_lru.popitem(last=False)
+    except Exception:
+        pass
+    return txt

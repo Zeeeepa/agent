@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from typing import List
+from jinx.micro.text.structural import is_camel_case as _is_camel_case
 
 # Very light identifier extractor, language-agnostic
 # Picks tokens likely to be identifiers (underscored, camelCase, dotted) with length >= 4
@@ -21,7 +22,7 @@ def extract_identifiers(text: str, max_items: int = 50) -> List[str]:
         if t.isdigit():
             continue
         # Heuristics: underscore or dot or camelCase
-        if ("_" in t) or ("." in t) or _looks_camel(t):
+        if ("_" in t) or ("." in t) or _is_camel_case(t):
             tl = t.lower()
             if tl not in seen:
                 seen.add(tl)
@@ -29,12 +30,3 @@ def extract_identifiers(text: str, max_items: int = 50) -> List[str]:
                 if len(out) >= max_items:
                     break
     return out
-
-
-def _looks_camel(tok: str) -> bool:
-    # contains an uppercase letter after the first position or mixed case pattern
-    if len(tok) <= 3:
-        return False
-    has_upper = any(ch.isupper() for ch in tok[1:])
-    has_lower = any(ch.islower() for ch in tok)
-    return has_upper and has_lower

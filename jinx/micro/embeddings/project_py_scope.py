@@ -2,6 +2,15 @@ from __future__ import annotations
 
 import ast
 from typing import Tuple, Optional
+import functools
+
+
+@functools.lru_cache(maxsize=128)
+def _parse_ast_cached(source: str):
+    try:
+        return ast.parse(source)
+    except Exception:
+        return None
 
 
 def find_python_scope(source: str, line: int) -> Tuple[int, int]:
@@ -9,9 +18,8 @@ def find_python_scope(source: str, line: int) -> Tuple[int, int]:
 
     If not found or AST lacks end positions, returns (0, 0).
     """
-    try:
-        tree = ast.parse(source)
-    except Exception:
+    tree = _parse_ast_cached(source)
+    if tree is None:
         return 0, 0
 
     best_span = (0, 10**9)
@@ -54,9 +62,8 @@ def get_python_symbol_at_line(source: str, line: int) -> Tuple[Optional[str], Op
 
     kind is one of: 'def', 'async def', 'class'. Returns (None, None) if not found.
     """
-    try:
-        tree = ast.parse(source)
-    except Exception:
+    tree = _parse_ast_cached(source)
+    if tree is None:
         return None, None
 
     best: Tuple[Optional[str], Optional[str], int, int] = (None, None, 0, 10**9)

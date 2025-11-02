@@ -9,6 +9,7 @@ single worker to preserve ordering.
 
 import os
 import asyncio
+import functools
 from typing import Optional, Tuple
 import re
 
@@ -25,6 +26,8 @@ from jinx.micro.memory.indexer import ingest_memory
 from jinx.micro.memory.graph import update_graph
 from jinx.micro.memory.topics import update_topics
 from jinx.micro.memory.history_compactor import compact_weekly
+from jinx.micro.memory.summarizer import summarize_if_needed as _summarize
+from jinx.micro.memory.kb_updater import update_kb_from_memory as _kb_update
 from jinx.config import ALL_TAGS
 import jinx.state as jx_state
 import contextlib
@@ -67,8 +70,25 @@ async def _optimize_memory_impl(snapshot: str | None) -> None:
                 token_hint = await read_token_hint()
             except Exception:
                 token_hint = 0
-            compact, durable = build_local_memory(transcript or "", evergreen or "", token_hint=token_hint)
+            # Offload CPU-heavy local builder to a thread to keep event loop responsive
+            fn = functools.partial(build_local_memory, transcript or "", evergreen or "", token_hint=token_hint)
+            compact, durable = await asyncio.to_thread(fn)
+            # Cooperative yield before IO
+            try:
+                await asyncio.sleep(0)
+            except Exception:
+                pass
             await write_state(compact, durable)
+            # Background summary writer (env-gated, throttled)
+            try:
+                asyncio.create_task(_summarize(compact, durable))
+            except Exception:
+                pass
+            # Background KB update (env-gated, throttled)
+            try:
+                asyncio.create_task(_kb_update(compact, durable))
+            except Exception:
+                pass
             # Best-effort background ingestion into embeddings for improved retrieval
             try:
                 def _truthy2(name: str, default: str = "1") -> bool:
@@ -152,6 +172,16 @@ async def _optimize_memory_impl(snapshot: str | None) -> None:
 
         compact, durable = parse_output(out)
         await write_state(compact, durable)
+        # Background summary writer (env-gated, throttled)
+        try:
+            asyncio.create_task(_summarize(compact, durable))
+        except Exception:
+            pass
+        # Background KB update (env-gated, throttled)
+        try:
+            asyncio.create_task(_kb_update(compact, durable))
+        except Exception:
+            pass
         await bomb_log("MEMORY optimize: done")
     except Exception as e:
         await bomb_log(f"ERROR memory optimize failed: {e}")

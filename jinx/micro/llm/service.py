@@ -18,7 +18,16 @@ import sys
 import datetime as _dt
 from .prompt_filters import sanitize_prompt_for_external_api
 from jinx.micro.text.heuristics import is_code_like as _is_code_like
+import asyncio as _asyncio
 from jinx.micro.rt.timing import timing_section
+from jinx.micro.embeddings.unified_context import build_unified_context_for
+from jinx.micro.embeddings.context_compact import compact_context
+from jinx.micro.llm.enrichers import auto_context_lines
+from jinx.micro.llm.enrichers.exports import (
+    patch_exports_lines as _patch_exports_lines,
+    verify_exports_lines as _verify_exports_lines,
+    run_exports_lines as _run_exports_lines,
+)
 
 
 async def code_primer(prompt_override: str | None = None) -> tuple[str, str]:
@@ -32,102 +41,75 @@ async def code_primer(prompt_override: str | None = None) -> tuple[str, str]:
 async def _prepare_request(txt: str, *, prompt_override: str | None = None) -> tuple[str, str, str, str, str]:
     """Compose instructions and return (jx, tag, model, sx, stxt)."""
     jx, tag = await code_primer(prompt_override)
+    # Cooperative yield helpers (env-gated)
+    def _yield_on() -> bool:
+        try:
+            return str(os.getenv("JINX_COOP_YIELD", "1")).lower() not in ("", "0", "false", "off", "no")
+        except Exception:
+            return True
+    async def _yield0() -> None:
+        if _yield_on():
+            try:
+                await _asyncio.sleep(0)
+            except Exception:
+                pass
     # Expand dynamic prompt macros in real time (vars/env/anchors/sys/runtime/exports + custom providers)
     try:
         jx = await compose_dynamic_prompt(jx, key=tag)
-        # Auto-inject helpful embedding macros so the user doesn't need to type them
+        await _yield0()
+        # Unified embeddings context (code+brain+refs+graph+memory)
+        try:
+            _ctx = await build_unified_context_for(txt or "", max_chars=None, max_time_ms=300)
+        except Exception:
+            _ctx = ""
+        have_unified_ctx = bool((_ctx or "").strip())
+        if have_unified_ctx:
+            try:
+                # Default ON: machine-level compaction for <embeddings_*> blocks
+                cmp_on = str(os.getenv("JINX_CTX_COMPACT", "1")).lower() not in ("", "0", "false", "off", "no")
+            except Exception:
+                cmp_on = True
+            _ctx_final = compact_context(_ctx) if cmp_on else _ctx
+            jx = jx + "\n" + _ctx_final + "\n"
+        # Auto-inject helpful embedding macros so the user doesn't need to type them (fallback if unified ctx missing)
         try:
             auto_on = str(os.getenv("JINX_AUTOMACROS", "1")).lower() not in ("", "0", "false", "off", "no")
         except Exception:
             auto_on = True
-        if auto_on and ("{{m:" not in jx or "{{m:emb:" not in jx or "{{m:mem:" not in jx):
-            lines = []
-            try:
-                use_dlg = str(os.getenv("JINX_AUTOMACRO_DIALOGUE", "1")).lower() not in ("", "0", "false", "off", "no")
-            except Exception:
-                use_dlg = True
-            try:
-                use_proj = str(os.getenv("JINX_AUTOMACRO_PROJECT", "1")).lower() not in ("", "0", "false", "off", "no")
-            except Exception:
-                use_proj = True
-            # Dynamic topK per source
-            try:
-                dlg_k = int(os.getenv("JINX_AUTOMACRO_DIALOGUE_K", "3"))
-            except Exception:
-                dlg_k = 3
-            try:
-                proj_k = int(os.getenv("JINX_AUTOMACRO_PROJECT_K", "3"))
-            except Exception:
-                proj_k = 3
-            codey = _is_code_like(txt or "")
-            # Memory automacros
-            try:
-                use_mem = str(os.getenv("JINX_AUTOMACRO_MEMORY", "1").lower()) not in ("", "0", "false", "off", "no")
-            except Exception:
-                use_mem = True
-            try:
-                mem_comp_k = int(os.getenv("JINX_AUTOMACRO_MEM_COMPACT_K", "8"))
-            except Exception:
-                mem_comp_k = 8
-            try:
-                mem_ever_k = int(os.getenv("JINX_AUTOMACRO_MEM_EVERGREEN_K", "8"))
-            except Exception:
-                mem_ever_k = 8
-            # Prefer project for code-like, dialogue for plain text; keep both if allowed
-            if use_dlg:
-                if codey and not use_proj:
-                    lines.append(f"Context (dialogue): {{{{m:emb:dialogue:{dlg_k}}}}}")
-                elif not codey:
-                    lines.append(f"Context (dialogue): {{{{m:emb:dialogue:{dlg_k}}}}}")
-            if use_proj:
-                if codey or not use_dlg:
-                    lines.append(f"Context (code): {{{{m:emb:project:{proj_k}}}}}")
-            if use_mem:
-                # Inject routed memory (pins + graph-aligned + ranker)
-                lines.append(f"Memory (routed): {{{{m:memroute:{max(mem_comp_k, mem_ever_k)}}}}}")
+        if auto_on and (not have_unified_ctx) and ("{{m:" not in jx or "{{m:emb:" not in jx or "{{m:mem:" not in jx):
+            lines = await auto_context_lines(txt)
             if lines:
                 jx = jx + "\n" + "\n".join(lines) + "\n"
+        await _yield0()
         # Optionally include recent patch previews/commits from runtime exports
         try:
             include_patch = str(os.getenv("JINX_AUTOMACRO_PATCH_EXPORTS", "1")).lower() not in ("", "0", "false", "off", "no")
         except Exception:
             include_patch = True
         if include_patch and ("{{export:" not in jx or "{{export:last_patch_" not in jx):
-            exp_lines = [
-                "Recent Patch Preview (may be empty): {{export:last_patch_preview:1}}",
-                "Recent Patch Commit (may be empty): {{export:last_patch_commit:1}}",
-                "Recent Patch Strategy: {{export:last_patch_strategy:1}}",
-                "Recent Patch Reason: {{export:last_patch_reason:1}}",
-            ]
-            jx = jx + "\n" + "\n".join(exp_lines) + "\n"
+            exp_lines = await _patch_exports_lines()
+            if exp_lines:
+                jx = jx + "\n" + "\n".join(exp_lines) + "\n"
+        await _yield0()
         # Optionally include last verification results
         try:
             include_verify = str(os.getenv("JINX_AUTOMACRO_VERIFY_EXPORTS", "1")).lower() not in ("", "0", "false", "off", "no")
         except Exception:
             include_verify = True
         if include_verify and ("{{export:" not in jx or "{{export:last_verify_" not in jx):
-            vlines = [
-                "Verification Score: {{export:last_verify_score:1}}",
-                "Verification Reason: {{export:last_verify_reason:1}}",
-                "Verification Files: {{export:last_verify_files:1}}",
-            ]
-            jx = jx + "\n" + "\n".join(vlines) + "\n"
+            vlines = await _verify_exports_lines()
+            if vlines:
+                jx = jx + "\n" + "\n".join(vlines) + "\n"
+        await _yield0()
         # Optionally include last sandbox run artifacts (stdout/stderr/status) via macros
         try:
             include_run = str(os.getenv("JINX_AUTOMACRO_RUN_EXPORTS", "1")).lower() not in ("", "0", "false", "off", "no")
         except Exception:
             include_run = True
         if include_run and ("{{m:run:" not in jx):
-            try:
-                run_chars = max(24, int(os.getenv("JINX_MACRO_MEM_PREVIEW_CHARS", "160")))
-            except Exception:
-                run_chars = 160
-            rlines = [
-                f"Last Run Status: {{{{m:run:status}}}}",
-                f"Last Run Stdout: {{{{m:run:stdout:3:chars={run_chars}}}}}",
-                f"Last Run Stderr: {{{{m:run:stderr:2:chars={run_chars}}}}}",
-            ]
-            jx = jx + "\n" + "\n".join(rlines) + "\n"
+            rlines = await _run_exports_lines(None)
+            if rlines:
+                jx = jx + "\n" + "\n".join(rlines) + "\n"
         # Build macro context and expand provider macros {{m:ns:arg1:arg2}}
         try:
             anc = await load_last_anchors()
@@ -137,6 +119,7 @@ async def _prepare_request(txt: str, *, prompt_override: str | None = None) -> t
             progs = await list_programs()
         except Exception:
             progs = []
+        await _yield0()
         ctx = MacroContext(
             key=tag,
             anchors={k: [str(x) for x in (anc.get(k) or [])] for k in ("questions","symbols","paths")},
@@ -172,6 +155,7 @@ async def _prepare_request(txt: str, *, prompt_override: str | None = None) -> t
         except Exception:
             max_exp = 50
         jx = await expand_dynamic_macros(jx, ctx, max_expansions=max_exp)
+        await _yield0()
         # Best-effort token hint (chars/4 heuristic) for dynamic memory budgets
         try:
             est_tokens = max(0, (len(jx) + len(txt or "")) // 4)

@@ -7,6 +7,7 @@ from jinx.async_utils.fs import read_text_raw, write_text
 from jinx.state import shard_lock
 from jinx.log_paths import INK_SMEARED_DIARY, EVERGREEN_MEMORY
 from jinx.micro.embeddings.project_config import ROOT as PROJECT_ROOT
+import asyncio
 
 
 def _memory_dir() -> str:
@@ -30,6 +31,7 @@ _CH_SYMBOLS = os.path.join(_MEM_DIR, "symbols.md")
 _CH_PREFS = os.path.join(_MEM_DIR, "prefs.md")
 _CH_DECS = os.path.join(_MEM_DIR, "decisions.md")
 _TOPICS_DIR = os.path.join(_MEM_DIR, "topics")
+_SUMMARIES_DIR = os.path.join(_MEM_DIR, "summaries")
 _TOKEN_HINT = os.path.join(_MEM_DIR, ".last_prompt_tokens")
 _OPEN_BUFFERS = os.path.join(_MEM_DIR, "open_buffers.jsonl")
 try:
@@ -43,6 +45,7 @@ def _ensure_dirs() -> None:
         os.makedirs(_MEM_DIR, exist_ok=True)
         os.makedirs(_HIST_DIR, exist_ok=True)
         os.makedirs(_TOPICS_DIR, exist_ok=True)
+        os.makedirs(_SUMMARIES_DIR, exist_ok=True)
     except Exception:
         pass
 
@@ -211,6 +214,57 @@ async def read_topic(name: str) -> str:
     return ""
 
 
+def summaries_dir() -> str:
+    """Return absolute path to the summaries directory (.jinx/memory/summaries)."""
+    return _SUMMARIES_DIR
+
+
+async def write_summary_snapshot(body: str, title: str | None = None) -> str:
+    """Persist a summary snapshot under .jinx/memory/summaries/.
+
+    Returns the created file path or an empty string on failure.
+    """
+    text = (body or "").strip()
+    if not text:
+        return ""
+    _ensure_dirs()
+    ts = int(time.time() * 1000)
+    # Basic safe title to filename piece
+    name = (title or "summary").strip().lower()
+    safe = "".join(ch if (ch.isalnum() or ch in ("-", "_")) else "-" for ch in name) or "summary"
+    fname = f"{ts}_{safe}.md"
+    path = os.path.join(_SUMMARIES_DIR, fname)
+    # Wrap with a tiny header for readability
+    lines = ["---", f"ts_ms: {ts}", f"title: {name}", "---\n", text]
+    async with shard_lock:
+        try:
+            await write_text(path, ensure_nl("\n".join(lines)))
+            return path
+        except Exception:
+            return ""
+
+
+async def read_summary_heads(max_n: int = 3) -> list[tuple[str, str]]:
+    """Read head content of the latest N summary files (filename, content)."""
+    try:
+        files = [os.path.join(_SUMMARIES_DIR, f) for f in os.listdir(_SUMMARIES_DIR) if f.endswith(".md")]
+    except Exception:
+        files = []
+    if not files:
+        return []
+    files.sort()  # ts prefix ensures chronological order
+    pick = files[-max(1, max_n):]
+    out: list[tuple[str, str]] = []
+    async with shard_lock:
+        for p in reversed(pick):
+            try:
+                txt = await read_text_raw(p)
+                out.append((p, txt or ""))
+            except Exception:
+                out.append((p, ""))
+    return out
+
+
 def ensure_nl(s: str) -> str:
     return s + ("\n" if s and not s.endswith("\n") else "")
 
@@ -224,6 +278,7 @@ async def write_state(compact: str, durable: str | None) -> None:
     """
     _ensure_dirs()
     compact_out = ensure_nl(compact)
+    durable_out_val = ensure_nl(durable) if durable is not None else None
     ts = int(time.time() * 1000)
     hist_name = f"{ts}_state.md"
     hist_path = os.path.join(_HIST_DIR, hist_name)
@@ -236,13 +291,12 @@ async def write_state(compact: str, durable: str | None) -> None:
             pass
         if durable is not None:
             try:
-                durable_out = ensure_nl(durable)
-                await write_text(_EVERGREEN_PATH, durable_out)
+                await write_text(_EVERGREEN_PATH, durable_out_val or "")
             except Exception:
                 pass
             # Derive channel files from durable content (best-effort)
             try:
-                buckets = _parse_channels(durable_out)
+                buckets = _parse_channels(durable_out_val or "")
                 if buckets.get("paths") is not None:
                     await write_text(_CH_PATHS, ensure_nl("\n".join(buckets.get("paths") or [])))
                 if buckets.get("symbols") is not None:
@@ -260,8 +314,7 @@ async def write_state(compact: str, durable: str | None) -> None:
             pass
         if durable is not None:
             try:
-                durable_out = ensure_nl(durable)
-                await write_text(EVERGREEN_MEMORY, durable_out)
+                await write_text(EVERGREEN_MEMORY, durable_out_val or "")
             except Exception:
                 pass
         # History snapshot (best-effort)
@@ -282,5 +335,11 @@ async def write_state(compact: str, durable: str | None) -> None:
                         os.remove(p)
                     except Exception:
                         pass
+    except Exception:
+        pass
+    # Fire-and-forget KG update (internally throttled); lazy import to avoid cycles
+    try:
+        from jinx.micro.memory.graph import update_graph as _mem_update_graph  # local import
+        asyncio.create_task(_mem_update_graph(compact_out, durable_out_val))
     except Exception:
         pass

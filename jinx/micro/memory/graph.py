@@ -7,8 +7,8 @@ import re
 import time
 from typing import Any, Dict, List, Tuple
 
-from jinx.micro.memory.storage import memory_dir
 from jinx.micro.embeddings.project_identifiers import extract_identifiers
+from jinx.micro.embeddings.project_config import ROOT as PROJECT_ROOT
 
 _PATH_RE = re.compile(r"(?:[A-Za-z]:\\[^\r\n]+|(?:\.|\.{1,2})?/(?:[^\s/]+/)*[^\s/]+\.[A-Za-z0-9]{1,6})")
 _WORD_RE = re.compile(r"(?u)[\w\.]{4,}")
@@ -16,12 +16,21 @@ _DIALOG_PREFIX_RE = re.compile(r"^(?:User|Jinx|Error|State|Note):\s*", re.IGNORE
 _STOP_TERMS = {"user", "jinx", "error", "state", "note"}
 
 
+def _memory_dir_local() -> str:
+    try:
+        sub = os.getenv("JINX_MEMORY_DIR", os.path.join(".jinx", "memory"))
+    except Exception:
+        sub = os.path.join(".jinx", "memory")
+    root = PROJECT_ROOT or os.getcwd()
+    return os.path.join(root, sub)
+
+
 def _graph_path() -> str:
-    return os.path.join(memory_dir(), "graph.json")
+    return os.path.join(_memory_dir_local(), "graph.json")
 
 
 def _stamp_path() -> str:
-    return os.path.join(memory_dir(), ".graph_last_run")
+    return os.path.join(_memory_dir_local(), ".graph_last_run")
 
 
 def _load_graph() -> Dict[str, Any]:
@@ -312,3 +321,36 @@ async def query_graph(term: str, k: int = 8) -> List[str]:
     for key, sc in ranked:
         out.append(f"{key} ({sc:.2f})")
     return out
+
+
+def apply_feedback(feedback_nodes: list[tuple[str, float]] | None, feedback_edges: list[tuple[str, str, float]] | None) -> None:
+    """Apply direct feedback to KG by adding node/edge weights and saving the graph.
+
+    - feedback_nodes: list of (key, weight)
+    - feedback_edges: list of (a, b, weight)
+    Best-effort; ignores invalid inputs.
+    """
+    try:
+        g = _load_graph()
+        if feedback_nodes:
+            for k, w in feedback_nodes:
+                try:
+                    kk = str(k).strip()
+                    if kk:
+                        _add_node(g, kk, (kk.split(":", 1)[0]).strip(), float(w or 0.0))
+                except Exception:
+                    continue
+        if feedback_edges:
+            for a, b, w in feedback_edges:
+                try:
+                    aa = str(a).strip()
+                    bb = str(b).strip()
+                    if aa and bb and aa != bb:
+                        _add_node(g, aa, (aa.split(":", 1)[0]).strip(), 0.1)
+                        _add_node(g, bb, (bb.split(":", 1)[0]).strip(), 0.1)
+                        _add_edge(g, aa, bb, float(w or 0.0))
+                except Exception:
+                    continue
+        _save_graph(g)
+    except Exception:
+        pass

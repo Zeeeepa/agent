@@ -10,7 +10,7 @@ from jinx.logging_service import glitch_pulse, bomb_log, blast_mem
 from jinx.openai_service import spark_openai
 from jinx.error_service import dec_pulse
 from jinx.conversation import build_chains, run_blocks
-from jinx.micro.ui.output import pretty_echo
+from jinx.micro.ui.output import pretty_echo, pretty_echo_async as _pretty_echo_async
 from jinx.micro.conversation.sandbox_view import show_sandbox_tail
 from jinx.micro.conversation.error_report import corrupt_report
 from jinx.logger.file_logger import append_line as _log_append
@@ -64,6 +64,10 @@ from jinx.micro.memory.pin_store import load_pins as _pins_load
 from jinx.micro.conversation.prefilter import likely_memory_action as _likely_mem
 from jinx.micro.conversation.debug import log_debug
 from jinx.micro.conversation.memory_program import infer_memory_program as _mem_program
+from jinx.micro.embeddings.context_compact import compact_context as _compact_ctx
+from jinx.micro.memory.telemetry import log_metric as _log_metric
+from jinx.micro.rt.coop import coop as _coop
+from jinx.micro.rt.activity import set_activity as _act, clear_activity as _act_clear
 
 
 async def shatter(x: str, err: Optional[str] = None) -> None:
@@ -92,10 +96,14 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
                 asyncio.create_task(embed_text(x.strip(), source="dialogue", kind="user"))
             except Exception:
                 pass
+        _act("reading transcript")
         synth = await glitch_pulse()
+        await _coop()
         # Do not include the transcript in 'chains' since it is placed into <memory>
         # Do not inject error text into the body chains; it will live in <error>
+        _act("building prompt header")
         chains, decay = build_chains("", None)
+        await _coop()
         # Build standardized header blocks in a stable order before the main chains
         # 1) <embeddings_context> from recent dialogue/sandbox using current input as query,
         #    plus project code embeddings context assembled from emb/ when available
@@ -133,6 +141,7 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
             else:
                 eff_q = q_raw
             # Launch runtime context retrieval concurrently with project context assembly
+            _act("retrieving runtime context")
             base_ctx_task = asyncio.create_task(build_context_for(eff_q))
             # Optional: embeddings-backed memory context (no evergreen), env-gated (default OFF for API)
             mem_ctx_task = None
@@ -141,6 +150,7 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
                     mem_ctx_task = asyncio.create_task(_build_mem_ctx(eff_q))
             except Exception:
                 mem_ctx_task = None
+            await _coop()
         except Exception:
             base_ctx_task = asyncio.create_task(asyncio.sleep(0.0))  # type: ignore
         # Always build project context; retrieval enforces its own tight budgets
@@ -148,6 +158,7 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
         try:
             _q = eff_q
             # Delegate enrichment/build to the dedicated micro-module (deduplicated logic)
+            _act("assembling project context")
             proj_ctx_task: asyncio.Task[str] = asyncio.create_task(_build_proj_ctx_enriched(_q, user_text=x or "", synth=synth or ""))
             # Await both contexts; runtime may already be done, otherwise this overlaps work
             try:
@@ -165,6 +176,7 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
                 proj_ctx = await proj_ctx_task
             except Exception:
                 proj_ctx = ""
+            await _coop()
             # _build_proj_ctx_enriched already implements its own fallback
             # Continuity: if still empty and this is a short clarification, reuse last cached project context
             if not proj_ctx:
@@ -198,6 +210,7 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
                 base_ctx = ""
         if 'mem_ctx' not in locals():
             mem_ctx = ""
+        await _coop()
         # Persist last project context snapshot for continuity cache
         try:
             await _save_proj_ctx(proj_ctx or "", anchors=anchors if 'anchors' in locals() else None)
@@ -220,6 +233,7 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
             )
         except Exception:
             cont_block = ""
+        await _coop()
         # Optional: auto-turns resolver — hybrid (fast+LLM) that injects a tiny <turns> block when the user asks about Nth message
         turns_block = ""
         try:
@@ -379,6 +393,17 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
 
         # Do NOT send <embeddings_memory> to API by default; keep only base/project/planner/continuity (+ optional <turns>/<memory_selected>)
         ctx = "\n".join([c for c in [base_ctx, proj_ctx, plan_ctx, cont_block, turns_block, memsel_block] if c])
+        # Optional compaction for orchestrator chains (default ON)
+        try:
+            _orch_cmp = str(os.getenv("JINX_CTX_COMPACT_ORCH", "1")).lower() not in ("", "0", "false", "off", "no")
+        except Exception:
+            _orch_cmp = True
+        if _orch_cmp and ctx:
+            try:
+                ctx = _compact_ctx(ctx)
+            except Exception:
+                pass
+        await _coop()
 
         # Optional: Preload sanitized <plan_kernels> code before final execution, guarded by env
         try:
@@ -502,6 +527,23 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
         header_text = build_header(ctx, mem_text, task_text, error_text, evergreen_text)
         if header_text:
             chains = header_text + ("\n\n" + chains if chains else "")
+        # Optional: lightweight telemetry about context block sizes
+        try:
+            if str(os.getenv("JINX_CTX_TELEMETRY", "0")).lower() not in ("", "0", "false", "off", "no"):
+                payload = {
+                    "base_len": len(base_ctx or ""),
+                    "proj_len": len(proj_ctx or ""),
+                    "plan_len": len(plan_ctx or ""),
+                    "cont_len": len(cont_block or ""),
+                    "turns_len": len(turns_block or ""),
+                    "memsel_len": len(memsel_block or ""),
+                    "mem_len": len(mem_text or ""),
+                    "evg_len": len(evergreen_text or ""),
+                    "ctx_len": len(ctx or ""),
+                }
+                asyncio.create_task(_log_metric("orchestrator_ctx", payload))
+        except Exception:
+            pass
         # Continuity dev echo (optional): tiny trace line for observability
         try:
             if str(os.getenv("JINX_CONTINUITY_DEV_ECHO", "0")).lower() not in ("", "0", "false", "off", "no"):
@@ -566,10 +608,13 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
             except Exception:
                 pass
 
+        _act("calling LLM")
         if stream_on:
             out, code_id = await _spark_llm_stream(chains, prompt_override=prompt_override, on_first_block=_early_exec)
         else:
             out, code_id = await _spark_llm(chains, prompt_override=prompt_override)
+        await _coop()
+        _act("normalizing model output")
         # Normalize model output to ensure exactly one <python_{code_id}> block and proper fences
         try:
             out = normalize_output_blocks(out, code_id)
@@ -578,10 +623,16 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
         # Always show the model output box for the current turn (once)
         printed_out_box: bool = False
         try:
-            pretty_echo(out)
+            await _pretty_echo_async(out)
             printed_out_box = True
         except Exception:
-            pass
+            try:
+                # Fallback to sync printing in a thread
+                import asyncio as _aio
+                await _aio.to_thread(pretty_echo, out)
+                printed_out_box = True
+            except Exception:
+                pass
 
         # Ensure that on any execution error we also show the raw model output
         async def on_exec_error(err_msg: Optional[str]) -> None:
@@ -595,6 +646,7 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
             await corrupt_report(payload)
 
         # If early executed successfully, treat as executed to prevent duplicate run/print
+        _act("executing code blocks")
         executed = True if executed_early else await run_blocks(out, code_id, on_exec_error)
         if not executed:
             await bomb_log(f"No executable <python_{code_id}> block found in model output; displaying raw output.")
@@ -643,6 +695,7 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
         await bomb_log(traceback.format_exc())
         await dec_pulse(50)
     finally:
+        _act_clear()
         # Run memory optimization after each model interaction using a per-turn snapshot
         snap = await glitch_pulse()
         # Late import avoids circular import during startup

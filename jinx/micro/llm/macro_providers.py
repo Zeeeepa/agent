@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import asyncio
 from typing import List
 
 from jinx.micro.llm.macro_registry import register_macro, MacroContext
@@ -12,6 +13,7 @@ from jinx.micro.memory.search import rank_memory as _rank_memory
 from jinx.micro.memory.graph import query_graph as _query_graph
 from jinx.micro.memory.pin_store import load_pins as _pins_load, save_pins as _pins_save
 from jinx.micro.memory.router import assemble_memroute as _memroute
+from jinx.micro.memory.unified import assemble_unified_memory_lines as _mem_unified
 from jinx.micro.exec.run_exports import read_last_stdout as _run_stdout, read_last_stderr as _run_stderr, read_last_status as _run_status
 from jinx.micro.llm.macro_cache import memoized_call
 from jinx.micro.memory.turns import parse_active_turns as _parse_turns, get_user_message as _turn_user, get_jinx_reply_to as _turn_jinx
@@ -232,9 +234,14 @@ async def _memroute_handler(args: List[str], ctx: MacroContext) -> str:
     key = f"memroute|{n}|{lim}|{q}"
     async def _call() -> str:
         try:
-            lines = await _memroute(q, k=n, preview_chars=lim)
+            # Unified path (pins+graph+vector+kb+ranker), deduped & clamped
+            lines = await _mem_unified(q, k=n, preview_chars=lim)
         except Exception:
-            lines = []
+            try:
+                # Fallback to legacy memroute
+                lines = await _memroute(q, k=n, preview_chars=lim)
+            except Exception:
+                lines = []
         return " | ".join(lines[:n])
     return await memoized_call(key, ttl_ms, _call)
 
@@ -356,6 +363,126 @@ async def _run_handler(args: List[str], ctx: MacroContext) -> str:
             return _run_status(ttl_ms)
         return ""
     return await memoized_call(key, pttl, _call)
+
+
+# ----------------------- Code intelligence providers -----------------------
+
+_EXCLUDE_DIRS = {".git", ".hg", ".svn", "__pycache__", ".venv", "venv", "env", "node_modules", "emb", "build", "dist"}
+
+
+def _is_excluded_dir(name: str) -> bool:
+    n = name.lower()
+    return n in _EXCLUDE_DIRS or n.startswith(".")
+
+
+def _iter_py_files(root: str):
+    for dirpath, dirnames, filenames in os.walk(root):
+        # prune excluded dirs in-place
+        dirnames[:] = [d for d in dirnames if not _is_excluded_dir(d)]
+        for fn in filenames:
+            if not fn.endswith(".py"):
+                continue
+            yield os.path.join(dirpath, fn)
+
+
+async def _code_handler(args: List[str], ctx: MacroContext) -> str:
+    """Code provider: {{m:code:usage|def:token[:K][:ms=budget][:chars=lim]}}
+
+    - usage: find call sites for a symbol (regex: \btoken\s*\()
+    - def: find definitions (regex: ^\s*def\s+token\s*\()
+    Returns: "path:line: preview | path:line: preview ..."
+    """
+    mode = (args[0] if args else "usage").strip().lower()
+    token = ""
+    n = 0
+    budget_ms = None
+    lim = None
+    # parse rest of args
+    for a in (args[1:] if len(args) > 1 else []):
+        aa = (a or "").strip()
+        if not aa:
+            continue
+        if aa.startswith("ms="):
+            try:
+                budget_ms = int(aa.split("=",1)[1])
+            except Exception:
+                pass
+            continue
+        if aa.startswith("chars="):
+            try:
+                lim = int(aa.split("=",1)[1])
+            except Exception:
+                pass
+            continue
+        if aa.isdigit():
+            try:
+                n = int(aa)
+            except Exception:
+                pass
+            continue
+        # first non-kv arg after mode is token
+        if not token:
+            token = aa
+    if not token:
+        # fallback: extract first callable name from input_text
+        m = re.search(r"([A-Za-z_][A-Za-z0-9_]*)\s*\(", ctx.input_text or "")
+        if m:
+            token = m.group(1)
+    if not token:
+        return ""
+    if n <= 0:
+        try:
+            n = max(1, int(os.getenv("JINX_MACRO_CODE_TOPK", "8")))
+        except Exception:
+            n = 8
+    if budget_ms is None:
+        try:
+            budget_ms = int(os.getenv("JINX_MACRO_CODE_MS", "280"))
+        except Exception:
+            budget_ms = 280
+    if lim is None:
+        try:
+            lim = max(24, int(os.getenv("JINX_MACRO_CODE_PREVIEW_CHARS", os.getenv("JINX_MACRO_MEM_PREVIEW_CHARS", "160"))))
+        except Exception:
+            lim = 160
+
+    # Compile regex once
+    if mode == "def":
+        pat = re.compile(rf"(?mi)^\s*def\s+{re.escape(token)}\s*\(")
+    else:
+        pat = re.compile(rf"(?m)\b{re.escape(token)}\s*\(")
+
+    root = ctx.cwd or os.getcwd()
+
+    async def _scan() -> str:
+        out: List[str] = []
+        count = 0
+        t0 = asyncio.get_running_loop().time()
+        for fp in _iter_py_files(root):
+            # time budget
+            if budget_ms and (asyncio.get_running_loop().time() - t0) * 1000.0 > budget_ms:
+                break
+            try:
+                with open(fp, "r", encoding="utf-8", errors="ignore") as f:
+                    for i, line in enumerate(f, start=1):
+                        if pat.search(line):
+                            rel = os.path.relpath(fp, root)
+                            prev = " ".join(line.strip().split())[:lim]
+                            out.append(f"{rel}:{i}: {prev}")
+                            count += 1
+                            if count >= n:
+                                return " | ".join(out[:n])
+            except Exception:
+                continue
+        return " | ".join(out[:n])
+
+    # TTL memoization to avoid repeated scans on identical queries
+    try:
+        pttl = int(os.getenv("JINX_MACRO_PROVIDER_TTL_MS", "1500"))
+    except Exception:
+        pttl = 1500
+    key = f"code|{mode}|{token}|{n}|{budget_ms}|{lim}"
+    return await memoized_call(key, pttl, _scan)
 
 
 def _pins_enabled() -> bool:

@@ -4,12 +4,15 @@ import asyncio
 import os
 from typing import Callable, Awaitable, Dict, Set
 
-from jinx.log_paths import SANDBOX_DIR
+from jinx.log_paths import SANDBOX_DIR, TRIGGER_ECHOES
 import time
 from jinx.async_utils.rt import rt_section
 
 # Max lines per second per sandbox file to process (others dropped). Tunable via env.
 _SANDBOX_MAX_LPS = int(os.getenv("EMBED_SANDBOX_MAX_LPS", "5"))
+# Trigger echoes enable + rate
+_TRIG_ENABLE = os.getenv("EMBED_TRIG_ENABLE", "1").strip().lower() not in ("", "0", "false", "off", "no")
+_TRIG_MAX_LPS = int(os.getenv("EMBED_TRIG_MAX_LPS", "12"))
 # Preroll config: how many existing lines to ingest on startup per file, and max bytes read
 _PREROLL_LINES = int(os.getenv("EMBED_SANDBOX_PREROLL_LINES", "50"))
 _PREROLL_MAX_BYTES = int(os.getenv("EMBED_SANDBOX_PREROLL_MAX_BYTES", str(256 * 1024)))
@@ -28,6 +31,8 @@ async def start_realtime_collection(cb: Callback) -> None:
     tasks = [
         asyncio.create_task(_watch_sandbox(cb)),
     ]
+    if _TRIG_ENABLE:
+        tasks.append(asyncio.create_task(_watch_trigger(cb)))
     try:
         await asyncio.gather(*tasks)
     finally:
@@ -39,7 +44,16 @@ async def start_realtime_collection(cb: Callback) -> None:
 async def _ensure_paths() -> None:
     # Ensure parent dirs so tailers can open files reliably
     os.makedirs(SANDBOX_DIR, exist_ok=True)
-    # No trigger_echoes ingestion
+    # Ensure trigger echoes file exists (best-effort); tailer will create if missing
+    try:
+        base = os.path.dirname(TRIGGER_ECHOES)
+        if base:
+            os.makedirs(base, exist_ok=True)
+        if not os.path.exists(TRIGGER_ECHOES):
+            with open(TRIGGER_ECHOES, "a", encoding="utf-8") as _:
+                pass
+    except Exception:
+        pass
 
 
 def _read_tail_lines(path: str, max_bytes: int, max_lines: int) -> list[str]:
@@ -112,6 +126,15 @@ async def _tail_file(path: str, *, source: str, cb: Callback) -> None:
                             await rt.tick()
                             continue
                         processed += 1
+                    if source == "trigger_echoes" and _TRIG_MAX_LPS > 0:
+                        now = time.time()
+                        if now - win_start >= 1.0:
+                            win_start = now
+                            processed = 0
+                        if processed >= _TRIG_MAX_LPS:
+                            await rt.tick()
+                            continue
+                        processed += 1
                     await cb(line, source, "line")
                 await rt.tick()
 
@@ -163,3 +186,16 @@ async def _watch_sandbox(cb: Callback) -> None:
         for t in tasks.values():
             t.cancel()
         await asyncio.gather(*tasks.values(), return_exceptions=True)
+
+
+async def _watch_trigger(cb: Callback) -> None:
+    # Single-file tailer for trigger echoes
+    # Slightly lower preroll for triggers by reusing _read_tail_lines directly
+    try:
+        # Preroll
+        for ln in _read_tail_lines(TRIGGER_ECHOES, _PREROLL_MAX_BYTES, min(_PREROLL_LINES, 20)):
+            await cb(ln, "trigger_echoes", "line")
+    except Exception:
+        pass
+    # Then switch to live tail
+    await _tail_file(TRIGGER_ECHOES, source="trigger_echoes", cb=cb)

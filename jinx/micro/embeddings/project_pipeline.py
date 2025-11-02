@@ -5,6 +5,7 @@ import json
 import os
 import hashlib
 from typing import Any, Dict, List, Tuple
+import contextlib
 
 from .project_paths import (
     ensure_project_dirs,
@@ -21,6 +22,7 @@ from .util import now_ts
 from .embed_cache import embed_texts_cached, embed_text_cached
 from .project_chunk_semantic import chunk_text_semantic
 from .digest import make_digest
+from jinx.async_utils.fs import read_text_abs_thread
 from .fingerprint import simhash
 
 
@@ -74,12 +76,9 @@ async def embed_file(abs_path: str, rel_path: str, *, file_sha: str, prune_old: 
     file_dir = os.path.join(PROJECT_FILES_DIR, safe)
     os.makedirs(file_dir, exist_ok=True)
 
-    # Read file off the event loop
+    # Read file off the event loop (shared helper with LRU)
     try:
-        def _read_file() -> str:
-            with open(abs_path, "r", encoding="utf-8", errors="ignore") as f:
-                return f.read()
-        text = await asyncio.to_thread(_read_file)
+        text = await read_text_abs_thread(abs_path)
     except Exception:
         # If unreadable, write an empty index and return
         index_path = os.path.join(PROJECT_INDEX_DIR, f"{safe}.json")
@@ -117,9 +116,16 @@ async def embed_file(abs_path: str, rel_path: str, *, file_sha: str, prune_old: 
 
     batch_texts = [t[1] for t in unique_inputs]
     # Parallelize embeddings and digest generation
-    vec_task = asyncio.create_task(_embed_texts(batch_texts))
-    dig_task = asyncio.create_task(asyncio.gather(*[make_digest(t) for t in batch_texts]))
-    batch_vecs, batch_digests = await asyncio.gather(vec_task, dig_task)
+    # Do NOT wrap asyncio.gather() into create_task() — create_task expects a coroutine
+    vec_fut = asyncio.create_task(_embed_texts(batch_texts))
+    dig_fut = asyncio.gather(*(make_digest(t) for t in batch_texts))
+    try:
+        batch_vecs, batch_digests = await asyncio.gather(vec_fut, dig_fut)
+    except asyncio.CancelledError:
+        # Ensure child task is awaited to avoid 'Task exception was never retrieved'
+        with contextlib.suppress(Exception):
+            await vec_fut
+        raise
 
     results: List[Tuple[str, Dict[str, Any]]] = []  # (chunk_sha, payload)
     for idx, (i, ch, csha, ls, le) in enumerate(unique_inputs):

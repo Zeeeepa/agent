@@ -3,6 +3,9 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+import hashlib
+import math
+import re
 from typing import Any, Dict, List, Tuple
 
 from jinx.net import get_openai_client
@@ -25,6 +28,77 @@ _DUMP = str(os.getenv("JINX_EMBED_DUMP", "0")).lower() in {"1", "true", "on", "y
 _mem: Dict[Tuple[str, str], Tuple[float, List[float]]] = {}
 _inflight: Dict[Tuple[str, str], asyncio.Future] = {}
 _sem = asyncio.Semaphore(max(1, _MAX_CONC))
+
+
+# ------------------------
+# Offline fallback support
+# ------------------------
+
+_TOK_RE = re.compile(r"(?u)[\w]{2,}")
+
+
+def _dims_for_model(model: str) -> int:
+    m = (model or "").lower()
+    # Known OpenAI embedding dims
+    if "text-embedding-3-large" in m:
+        return 3072
+    if "text-embedding-3-small" in m:
+        return 1536
+    if "text-embedding-ada-002" in m:
+        return 1536
+    try:
+        return max(64, int(os.getenv("JINX_EMBED_OFFLINE_DIMS", "1536")))
+    except Exception:
+        return 1536
+
+
+def _online_enabled() -> bool:
+    val = str(os.getenv("JINX_EMBED_ONLINE", "auto")).strip().lower()
+    if val in ("0", "false", "off", "no"):
+        return False
+    if val in ("1", "true", "on", "yes"):
+        return True
+    # auto: enabled only if API key present
+    return bool(os.getenv("OPENAI_API_KEY") or os.getenv("AZURE_OPENAI_API_KEY"))
+
+
+def _normalize(vec: List[float]) -> List[float]:
+    try:
+        s = math.sqrt(sum((x or 0.0) * (x or 0.0) for x in (vec or [])))
+        if s <= 0.0:
+            return list(vec or [])
+        return [(x or 0.0) / s for x in vec]
+    except Exception:
+        return list(vec or [])
+
+
+def _offline_embed(model: str, text: str) -> List[float]:
+    dims = _dims_for_model(model)
+    vec = [0.0] * dims
+    if not text:
+        return vec
+    salt = "jinx-offline-emb-v1"
+    try:
+        max_tokens = max(128, int(os.getenv("JINX_EMBED_OFFLINE_MAX_TOKENS", "2048")))
+    except Exception:
+        max_tokens = 2048
+    # Tokenize and accumulate hashed contributions
+    toks: List[str] = []
+    for m in _TOK_RE.finditer(text.lower()):
+        t = (m.group(0) or "").strip()
+        if t:
+            toks.append(t)
+        if len(toks) >= max_tokens:
+            break
+    if not toks:
+        return vec
+    for t in toks:
+        h = hashlib.blake2b((salt + t).encode("utf-8", errors="ignore"), digest_size=16).digest()
+        idx = int.from_bytes(h[:8], "little", signed=False) % dims
+        mag_raw = int.from_bytes(h[8:], "little", signed=False)
+        mag = (mag_raw % 2001) / 1000.0 - 1.0  # in [-1.0, 1.0]
+        vec[idx] += mag
+    return _normalize(vec)
 
 
 async def _dump_line(line: str) -> None:
@@ -60,6 +134,9 @@ def _cache_put(model: str, text: str, vec: List[float]) -> None:
 
 
 async def _call_single(model: str, text: str) -> List[float]:
+    # Offline short-circuit
+    if not _online_enabled():
+        return _offline_embed(model, text)
     async with _sem:
         await _dump_line(f"call single model={model} len={len(text)}")
         def _worker() -> Any:
@@ -68,15 +145,20 @@ async def _call_single(model: str, text: str) -> List[float]:
         try:
             resp = await asyncio.wait_for(asyncio.to_thread(_worker), timeout=max(0.05, _TIMEOUT_MS / 1000))
             vec = resp.data[0].embedding if getattr(resp, "data", None) else []
+            if not vec:
+                return _offline_embed(model, text)
+            return vec
         except Exception as e:
             await _dump_line(f"single error: {type(e).__name__}")
-            vec = []
-        return vec
+            return _offline_embed(model, text)
 
 
 async def _call_batch(model: str, texts: List[str]) -> List[List[float]]:
     if not texts:
         return []
+    # Offline short-circuit
+    if not _online_enabled():
+        return [_offline_embed(model, t) for t in texts]
     async with _sem:
         await _dump_line(f"call batch model={model} n={len(texts)}")
         def _worker() -> Any:
@@ -89,13 +171,15 @@ async def _call_batch(model: str, texts: List[str]) -> List[List[float]]:
             for i in range(len(texts)):
                 try:
                     vec = data[i].embedding  # type: ignore[index]
+                    if not vec:
+                        vec = _offline_embed(model, texts[i])
                 except Exception:
-                    vec = []
+                    vec = _offline_embed(model, texts[i])
                 out.append(vec)
             return out
         except Exception as e:
             await _dump_line(f"batch error: {type(e).__name__}")
-            return [[] for _ in texts]
+            return [_offline_embed(model, t) for t in texts]
 
 
 async def embed_text_cached(text: str, *, model: str) -> List[float]:

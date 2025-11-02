@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from typing import Any, Awaitable, Callable, Dict, List, Tuple
+import contextlib
 
 # Generic hot-snapshot cache for expensive on-disk scans.
 # - Keeps last snapshot in-memory.
@@ -42,16 +43,27 @@ async def get_hot_snapshot(key: str, loader: Callable[[], Awaitable[List[Any]]],
         if not snap:
             try:
                 res = await task
-            except Exception:
+            except BaseException:
+                # On cancellation or any failure provide empty result; caller can retry later
                 res = []
             _SNAPSHOTS[key] = (res or [], _now_ms())
+            # Clear task reference once finished
+            _TASKS.pop(key, None)
             return _SNAPSHOTS[key][0]
 
         def _on_done(t: asyncio.Task) -> None:
             try:
+                # If task was cancelled, just drop it silently
+                if t.cancelled():
+                    return
                 res = t.result()
-            except Exception:
+            except BaseException:
+                # Swallow any exception from background refresh
                 return
+            finally:
+                # Ensure we clear the task reference regardless of outcome
+                with contextlib.suppress(Exception):
+                    _TASKS.pop(key, None)
             _SNAPSHOTS[key] = (res or [], _now_ms())
 
         task.add_done_callback(_on_done)

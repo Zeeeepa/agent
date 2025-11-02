@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from jinx.conversation.orchestrator import shatter
 from jinx.spinner_service import sigil_spin
 import jinx.state as jx_state
@@ -20,7 +21,12 @@ async def frame_shift(q: asyncio.Queue[str]) -> None:
             await asyncio.sleep(0.05)
         c: str = await q.get()
         evt.clear()
-        spintask = asyncio.create_task(sigil_spin(evt))
+        # Env gate to disable spinner if needed for diagnostics or TTY performance
+        try:
+            _spin_on = str(os.getenv("JINX_SPINNER_ENABLE", "1")).strip().lower() not in ("", "0", "false", "off", "no")
+        except Exception:
+            _spin_on = True
+        spintask = asyncio.create_task(sigil_spin(evt)) if _spin_on else asyncio.create_task(asyncio.sleep(0))
         try:
             await shatter(c)
         finally:
