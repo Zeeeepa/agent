@@ -7,11 +7,14 @@ from typing import List, Tuple, Dict, Any
 import hashlib
 
 from jinx.micro.embeddings.pipeline import iter_recent_items
+import jinx.state as jx_state
 from .paths import EMBED_ROOT
 from .similarity import score_cosine_batch
 from .text_clean import is_noise_text
 from .scan_store import iter_items as scan_iter_items
 from .embed_cache import embed_text_cached
+from jinx.micro.runtime.task_ctx import get_current_group as _get_group
+from .project_terms import extract_terms as _extract_terms
 from .ann_index_runtime import search_ann_items as _search_ann_runtime
 
 DEFAULT_TOP_K = int(os.getenv("EMBED_TOP_K", "5"))
@@ -22,7 +25,7 @@ MAX_FILES_PER_SOURCE = int(os.getenv("EMBED_MAX_FILES_PER_SOURCE", "500"))
 MAX_SOURCES = int(os.getenv("EMBED_MAX_SOURCES", "50"))
 QUERY_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 RECENCY_WINDOW_SEC = int(os.getenv("EMBED_RECENCY_WINDOW_SEC", str(24 * 3600)))
-EXHAUSTIVE = str(os.getenv("EMBED_EXHAUSTIVE", "1")).lower() in {"1", "true", "on", "yes"}
+EXHAUSTIVE = str(os.getenv("EMBED_EXHAUSTIVE", "0")).lower() in {"1", "true", "on", "yes"}
 
 # Shared hot-store for runtime items
 try:
@@ -49,6 +52,22 @@ def _iter_items() -> List[Tuple[str, Dict[str, Any]]]:
     return scan_iter_items(EMBED_ROOT, MAX_FILES_PER_SOURCE, MAX_SOURCES)
 
 
+def _terms_of(s: str) -> List[str]:
+    try:
+        return _extract_terms((s or "").strip().lower())
+    except Exception:
+        return []
+
+
+def _term_overlap(q_terms: List[str], meta_terms: List[str]) -> float:
+    if not q_terms or not meta_terms:
+        return 0.0
+    qs = set(q_terms)
+    ms = set([t.lower() for t in meta_terms if t])
+    inter = qs.intersection(ms)
+    return float(len(inter)) / float(max(1, len(qs)))
+
+
 async def retrieve_top_k(query: str, k: int | None = None, *, max_time_ms: int | None = 200) -> List[Tuple[float, str, Dict[str, Any]]]:
     # Adapt parameters based on query length (short queries get lower threshold and higher k)
     q = (query or "").strip()
@@ -69,6 +88,19 @@ async def retrieve_top_k(query: str, k: int | None = None, *, max_time_ms: int |
     scored: List[Tuple[float, str, Dict[str, Any]]] = []
     now = time.time()
     t0 = time.perf_counter()
+    # Precompute query terms once
+    q_terms = _terms_of(q)
+    # Session affinity (prefer current per-turn group; fallback to env)
+    try:
+        _sess_cv = (_get_group() or "").strip()
+        sess = _sess_cv or None
+    except Exception:
+        sess = None
+    if sess is None:
+        try:
+            sess = (os.getenv("JINX_SESSION", "").strip() or None)
+        except Exception:
+            sess = None
 
     # 1) Fast-path: score in-memory recent items first
     try:
@@ -97,14 +129,24 @@ async def retrieve_top_k(query: str, k: int | None = None, *, max_time_ms: int |
         if len(_recent_objs) >= k_eff * 2:  # cap to a small multiple of k
             break
     if _recent_vecs:
-        sims = score_cosine_batch(qv, _recent_vecs)
+        # Offload cosine batch to threads to avoid blocking the event loop
+        sims = await asyncio.to_thread(score_cosine_batch, qv, _recent_vecs)
         for obj, meta, sim in zip(_recent_objs, _recent_meta, sims):
             if sim < thr:
                 continue
             ts = float(meta.get("ts") or 0.0)
             age = max(0.0, now - ts)
             rec = 0.0 if RECENCY_WINDOW_SEC <= 0 else max(0.0, 1.0 - (age / RECENCY_WINDOW_SEC))
-            score = 0.8 * sim + 0.2 * rec
+            # Term overlap boost and session affinity
+            terms = meta.get("terms") or []
+            overlap = _term_overlap(q_terms, terms) if terms else 0.0
+            sess_boost = 1.0
+            if sess and (meta.get("session") or None) == sess:
+                try:
+                    sess_boost = float(os.getenv("EMBED_SESSION_BOOST", "1.08"))
+                except Exception:
+                    sess_boost = 1.08
+            score = (0.7 * sim + 0.2 * rec + 0.1 * overlap) * sess_boost
             if (meta.get("source") or "").strip().lower() == "state" and short_q:
                 score *= state_boost * (1.0 + state_rec_mult * rec)
             scored.append((score, meta.get("source", "recent"), obj))
@@ -116,10 +158,17 @@ async def retrieve_top_k(query: str, k: int | None = None, *, max_time_ms: int |
         return scored[:k_eff]
     eff_budget = None if EXHAUSTIVE else max_time_ms
 
-    # 2) Persisted items: filter by source and preview, then ANN overlay (fallback to batch cosine)
+    # 2) Persisted items: filter by source and preview, prefer current session, cap total, then ANN overlay
     items_all = await hot_task
-    items: List[Tuple[str, Dict[str, Any]]] = []
-    for src, obj in (items_all or []):
+    # Cap total items to bound runtime; lower under throttle
+    try:
+        cap_base = max(500, int(os.getenv("EMBED_RUNTIME_MAX_ITEMS", "4000")))
+    except Exception:
+        cap_base = 4000
+    cap = min(cap_base, 1500) if jx_state.throttle_event.is_set() else cap_base
+    items_grp: List[Tuple[str, Dict[str, Any]]] = []
+    items_oth: List[Tuple[str, Dict[str, Any]]] = []
+    for ix, (src, obj) in enumerate(items_all or []):
         meta = (obj or {}).get("meta", {})
         src_l = (src or "").strip().lower()
         meta_src_l = (meta.get("source") or "").strip().lower()
@@ -132,13 +181,24 @@ async def retrieve_top_k(query: str, k: int | None = None, *, max_time_ms: int |
         pv = (meta.get("text_preview") or "").strip()
         if len(pv) < MIN_PREVIEW_LEN or is_noise_text(pv):
             continue
-        items.append((src, obj))
+        if sess and (meta.get("session") or None) == sess:
+            items_grp.append((src, obj))
+        else:
+            items_oth.append((src, obj))
+        if (ix % 256) == 255:
+            # Periodic yield during accumulation to keep prompt responsive
+            await asyncio.sleep(0)
+    # Prioritize session-matching items and cap
+    items: List[Tuple[str, Dict[str, Any]]] = (items_grp + items_oth)[:cap]
 
     # ANN candidate generation
     try:
         overfetch = max(k_eff * 4, int(os.getenv("EMBED_RUNTIME_ANN_OVERFETCH", str(k_eff * 6))))
     except Exception:
         overfetch = k_eff * 6
+    # Reduce breadth under throttle
+    if jx_state.throttle_event.is_set():
+        overfetch = max(k_eff * 2, min(overfetch, k_eff * 3))
     try:
         def _rank_candidates() -> List[Tuple[int, float]]:
             return _search_ann_runtime(qv, items, top_n=min(len(items), max(k_eff, overfetch)))
@@ -147,7 +207,7 @@ async def retrieve_top_k(query: str, k: int | None = None, *, max_time_ms: int |
         scored_candidates = []  # type: ignore[name-defined]
 
     if scored_candidates:
-        for idx_c, sim in scored_candidates:
+        for idx_iter, (idx_c, sim) in enumerate(scored_candidates):
             if idx_c < 0 or idx_c >= len(items):
                 continue
             src_i, obj_i = items[idx_c]
@@ -156,7 +216,16 @@ async def retrieve_top_k(query: str, k: int | None = None, *, max_time_ms: int |
             ts = float(obj_i.get("meta", {}).get("ts") or 0.0)
             age = max(0.0, now - ts)
             rec = 0.0 if RECENCY_WINDOW_SEC <= 0 else max(0.0, 1.0 - (age / RECENCY_WINDOW_SEC))
-            score = 0.8 * sim + 0.2 * rec
+            # Term overlap and session boost
+            meta_i = obj_i.get("meta", {})
+            overlap = _term_overlap(q_terms, meta_i.get("terms") or [])
+            sess_boost = 1.0
+            if sess and (meta_i.get("session") or None) == sess:
+                try:
+                    sess_boost = float(os.getenv("EMBED_SESSION_BOOST", "1.08"))
+                except Exception:
+                    sess_boost = 1.08
+            score = (0.72 * sim + 0.18 * rec + 0.10 * overlap) * sess_boost
             if (obj_i.get("meta", {}).get("source") or "").strip().lower() == "state" and short_q:
                 score *= state_boost * (1.0 + state_rec_mult * rec)
             scored.append((score, obj_i.get("meta", {}).get("source", "persisted"), obj_i))
@@ -164,18 +233,29 @@ async def retrieve_top_k(query: str, k: int | None = None, *, max_time_ms: int |
                 break
             if eff_budget is not None and (time.perf_counter() - t0) * 1000.0 > eff_budget:
                 break
+            if (idx_iter % 64) == 63:
+                # Cooperative yield to keep prompt responsive during long ANN loops
+                await asyncio.sleep(0)
     else:
         # Batch cosine fallback
-        B = 1024
+        try:
+            B_base = max(64, int(os.getenv("EMBED_COSINE_BATCH", "256")))
+        except Exception:
+            B_base = 256
+        # Adaptive batch size based on throttle
+        B = min(B_base, 256) if jx_state.throttle_event.is_set() else B_base
+        # Adaptive threshold raising once we have k candidates
+        thr_curr = float(thr)
         buf_vecs: List[List[float]] = []
         buf_meta_src: List[Tuple[str, Dict[str, Any]]] = []
-        def _flush() -> None:
+        async def _flush_async() -> None:
             nonlocal scored, buf_vecs, buf_meta_src
             if not buf_vecs:
                 return
-            sims = score_cosine_batch(qv, buf_vecs)
+            # Offload cosine batch to a thread to keep UI responsive
+            sims = await asyncio.to_thread(score_cosine_batch, qv, buf_vecs)
             for (src_i, obj_i), sim in zip(buf_meta_src, sims):
-                if sim < thr:
+                if sim < thr_curr:
                     continue
                 ts = float(obj_i.get("meta", {}).get("ts") or 0.0)
                 age = max(0.0, now - ts)
@@ -184,21 +264,33 @@ async def retrieve_top_k(query: str, k: int | None = None, *, max_time_ms: int |
                 if (obj_i.get("meta", {}).get("source") or "").strip().lower() == "state" and short_q:
                     score *= state_boost * (1.0 + state_rec_mult * rec)
                 scored.append((score, obj_i.get("meta", {}).get("source", "persisted"), obj_i))
+            # If we have enough candidates, raise dynamic threshold to prune work
+            if len(scored) >= k_eff:
+                try:
+                    import heapq as _hq
+                    tops = _hq.nlargest(k_eff, [sc for sc, _src, _obj in scored])
+                    min_in_topk = tops[-1] if tops else thr_curr
+                    thr_curr = max(thr_curr, float(min_in_topk) * 0.9)
+                except Exception:
+                    pass
             buf_vecs = []
             buf_meta_src = []
         for idx, (src, obj) in enumerate(items):
             buf_vecs.append(obj.get("embedding") or [])
             buf_meta_src.append((src, obj))
             if len(buf_vecs) >= B:
-                _flush()
-                if (idx % 50) == 49:
-                    await asyncio.sleep(0)
+                await _flush_async()
+                # Yield frequently to keep prompt responsive
+                await asyncio.sleep(0)
                 if len(scored) >= k_eff:
                     break
                 if eff_budget is not None and (time.perf_counter() - t0) * 1000.0 > eff_budget:
                     break
+            elif (idx % 64) == 63:
+                # Periodic yield even before batch flush to prevent UI stalls on large sets
+                await asyncio.sleep(0)
         if buf_vecs and len(scored) < k_eff and (eff_budget is None or (time.perf_counter() - t0) * 1000.0 <= eff_budget):
-            _flush()
+            await _flush_async()
 
     scored.sort(key=lambda x: x[0], reverse=True)
     return scored[:k_eff]
@@ -214,20 +306,37 @@ async def build_context_for(query: str, *, k: int | None = None, max_chars: int 
     seen_hash: set[str] = set()
     q_hash = hashlib.sha256((query or "").strip().encode("utf-8", errors="ignore")).hexdigest() if query else ""
     parts: List[str] = []
+    # Optional grouping and labels
+    show_labels = str(os.getenv("EMBED_CONTEXT_LABELS", "1")).strip().lower() not in ("", "0", "false", "off", "no")
+    group_on = str(os.getenv("EMBED_CONTEXT_GROUP", "1")).strip().lower() not in ("", "0", "false", "off", "no")
+    last_key = None
+    total_chars = 0
     for score, src, obj in sorted(hits, key=lambda h: float((h[2].get("meta", {}).get("ts") or 0.0))):
         meta = obj.get("meta", {})
         pv = (meta.get("text_preview") or "").strip()
         csha = (meta.get("content_sha256") or "").strip()
         if not pv or pv in seen or is_noise_text(pv) or (q_hash and csha and csha == q_hash):
             continue
+        # Determine grouping key: prefer file_rel when present, else source
+        file_rel = str(meta.get("file_rel") or "").strip()
+        key = file_rel if file_rel else f"source:{(meta.get('source') or src or 'unknown')}"
+        # Add label when key changes (and grouping enabled)
+        if group_on and show_labels and key != last_key:
+            label = f"# file: {key}" if file_rel else f"# {key}"
+            if total_chars + len(label) <= max_chars:
+                parts.append(label)
+                total_chars += len(label) + 1
+            last_key = key
+        # Add preview line
+        if total_chars + len(pv) > max_chars:
+            break
         seen.add(pv)
         if csha:
             if csha in seen_hash:
                 continue
             seen_hash.add(csha)
         parts.append(pv)
-        if sum(len(p) for p in parts) > max_chars:
-            break
+        total_chars += len(pv) + 1
     if not parts:
         return ""
     body = "\n".join(parts)

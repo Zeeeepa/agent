@@ -8,6 +8,8 @@ from .project_chunk_types import Chunk
 TOKENS_PER_CHUNK = int(os.getenv("EMBED_PROJECT_TOKENS_PER_CHUNK", "300"))
 MIN_CHUNK_TOKENS = int(os.getenv("EMBED_PROJECT_MIN_CHUNK_TOKENS", "40"))
 MAX_CHUNKS_PER_FILE = int(os.getenv("EMBED_PROJECT_MAX_CHUNKS_PER_FILE", "200"))
+# Small token overlap for better boundary recall
+TOK_OVERLAP = int(os.getenv("EMBED_PROJECT_TOKEN_OVERLAP", "32"))
 
 
 def _tiktoken_encode(text: str):
@@ -50,5 +52,9 @@ def chunk_text_token(text: str) -> List[Chunk]:
             sub_text = ""
         if sub_text:
             chunks.append(Chunk(text=sub_text, line_start=0, line_end=0))
-        i = j
+        # Advance with overlap
+        if TOK_OVERLAP > 0:
+            i = max(i + 1, j - TOK_OVERLAP)
+        else:
+            i = j
     return chunks

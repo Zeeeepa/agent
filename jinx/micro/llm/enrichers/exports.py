@@ -3,44 +3,137 @@ from __future__ import annotations
 import os
 from typing import List
 
+# Pull data directly to avoid unresolved macros and keep RT behavior
+from jinx.micro.runtime.exports import collect_export, collect_export_for_group
+from jinx.micro.exec.run_exports import read_last_stdout, read_last_stderr, read_last_status
+from jinx.micro.runtime.task_ctx import get_current_group as _get_group
+
+
+def _clamp(s: str, lim: int) -> str:
+    s = (s or "").strip()
+    if lim <= 0:
+        return s
+    return s[:lim]
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        return max(0, int(os.getenv(name, str(default))))
+    except Exception:
+        return default
+
 
 async def patch_exports_lines() -> List[str]:
-    """Return lines that surface recent patch artifacts via export macros.
+    """Smart patch dashboard lines (resolved values, group-aware).
 
-    These are plain display lines that expand at prompt time.
+    - Aggregates recent patch artifacts from all programs via runtime exports.
+    - Computes simple size metrics from commit preview.
+    - Includes current logical group to align with concurrent turns.
     """
-    return [
-        "Recent Patch Preview (may be empty): {{export:last_patch_preview:1}}",
-        "Recent Patch Commit (may be empty): {{export:last_patch_commit:1}}",
-        "Recent Patch Strategy: {{export:last_patch_strategy:1}}",
-        "Recent Patch Reason: {{export:last_patch_reason:1}}",
-    ]
+    try:
+        gid = _get_group()
+    except Exception:
+        gid = "main"
+    # Preview clamp
+    prev_chars = _int_env("JINX_MACRO_MEM_PREVIEW_CHARS", 160)
+    # Collect aggregated exports
+    try:
+        prevs = await collect_export_for_group("last_patch_preview", gid, limit=1)
+    except Exception:
+        prevs = []
+    try:
+        commits = await collect_export_for_group("last_patch_commit", gid, limit=1)
+    except Exception:
+        commits = []
+    try:
+        strategy = (await collect_export_for_group("last_patch_strategy", gid, limit=1) or [""])[0]
+    except Exception:
+        strategy = ""
+    try:
+        reason = (await collect_export_for_group("last_patch_reason", gid, limit=1) or [""])[0]
+    except Exception:
+        reason = ""
+    prev = _clamp((prevs[0] if prevs else ""), prev_chars)
+    commit = commits[0] if commits else ""
+    # Simple size proxy: changed lines count
+    try:
+        lines_changed = commit.count("\n") if commit else 0
+    except Exception:
+        lines_changed = 0
+    lines: List[str] = []
+    lines.append(f"[patch][group={gid}] strategy={strategy or '-'} | lines={lines_changed} | reason={(reason or '-').strip()}")
+    if prev:
+        lines.append(f"preview: {prev}")
+    # Optional short commit head
+    if commit:
+        _flat = commit.replace("\r", " ").replace("\n", " ")
+        lines.append("commit: " + _clamp(_flat, max(80, prev_chars)))
+    return lines
 
 
 async def verify_exports_lines() -> List[str]:
-    """Return lines that surface last verification results via export macros."""
-    return [
-        "Verification Score: {{export:last_verify_score:1}}",
-        "Verification Reason: {{export:last_verify_reason:1}}",
-        "Verification Files: {{export:last_verify_files:1}}",
-    ]
+    """Verification dashboard lines (resolved values).
+
+    - Pulls score/reason/files directly from exports aggregator.
+    - Emits a compact single-line summary plus optional files list.
+    """
+    try:
+        gid = _get_group()
+    except Exception:
+        gid = "main"
+    try:
+        score = (await collect_export_for_group("last_verify_score", gid, limit=1) or [""])[0]
+    except Exception:
+        score = ""
+    try:
+        reason = (await collect_export_for_group("last_verify_reason", gid, limit=1) or [""])[0]
+    except Exception:
+        reason = ""
+    try:
+        files = (await collect_export_for_group("last_verify_files", gid, limit=1) or [""])[0]
+    except Exception:
+        files = ""
+    out: List[str] = []
+    score_s = (score or "").strip()
+    reason_s = (reason or "").strip()
+    files_s = (files or "").strip()
+    base = f"[verify] score={score_s or '?'}"
+    if files_s:
+        base += f" | files={files_s}"
+    if reason_s:
+        base += f" | {reason_s}"
+    out.append(base)
+    return out
 
 
 async def run_exports_lines(run_chars: int | None = None) -> List[str]:
-    """Return lines that surface last run artifacts (status/stdout/stderr).
+    """Last run dashboard (resolved values, TTL-respecting).
 
-    If run_chars is None, uses JINX_MACRO_MEM_PREVIEW_CHARS with sane defaults.
+    - Uses run_exports helpers directly to avoid unresolved macros.
+    - Respects JINX_RUN_EXPORT_TTL_MS and preview char budget.
     """
     if run_chars is None:
-        try:
-            run_chars = max(24, int(os.getenv("JINX_MACRO_MEM_PREVIEW_CHARS", "160")))
-        except Exception:
-            run_chars = 160
-    return [
-        f"Last Run Status: {{{{m:run:status}}}}",
-        f"Last Run Stdout: {{{{m:run:stdout:3:chars={run_chars}}}}}",
-        f"Last Run Stderr: {{{{m:run:stderr:2:chars={run_chars}}}}}",
-    ]
+        run_chars = _int_env("JINX_MACRO_MEM_PREVIEW_CHARS", 160)
+    ttl_ms = _int_env("JINX_RUN_EXPORT_TTL_MS", 120000)
+    try:
+        status = read_last_status(ttl_ms)
+    except Exception:
+        status = ""
+    try:
+        stdout = read_last_stdout(3, run_chars, ttl_ms)
+    except Exception:
+        stdout = ""
+    try:
+        stderr = read_last_stderr(2, run_chars, ttl_ms)
+    except Exception:
+        stderr = ""
+    lines: List[str] = []
+    lines.append(f"[run] status={(status or '').strip() or 'unknown'}")
+    if stdout:
+        lines.append(f"stdout: {stdout.strip()}")
+    if stderr:
+        lines.append(f"stderr: {stderr.strip()}")
+    return lines
 
 
 __all__ = [

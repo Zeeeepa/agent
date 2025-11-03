@@ -17,6 +17,7 @@ from jinx.micro.runtime.api import report_progress, report_result
 from jinx.micro.runtime.handlers.batch_handler import handle_batch_patch as _h_batch
 from jinx.micro.runtime.source_extract import extract_symbol_source
 from jinx.micro.embeddings.project_config import ROOT as PROJECT_ROOT, EXCLUDE_DIRS
+from jinx.micro.common.env import truthy
 
 VerifyCB = Callable[[str | None, List[str], str], Awaitable[None]]
 
@@ -30,11 +31,7 @@ def _abs_path(p: str) -> str:
     return os.path.normpath(os.path.join(base, p))
 
 
-def _truthy(name: str, default: str = "1") -> bool:
-    try:
-        return str(os.getenv(name, default)).strip().lower() not in ("", "0", "false", "off", "no")
-    except Exception:
-        return True
+ 
 
 
 def _module_name_from_path(path: str) -> str:
@@ -173,7 +170,7 @@ async def _build_move_plan(src_path: str, symbol: str, dst_path: str, *, create_
         ops.append({"type": "write", "path": init_path, "code": init_new, "meta": {"refactor": "move", "role": "dst_init", "symbol": symbol}})
 
     # Optional: project-wide conservative import rewrite
-    if _truthy("JINX_REFACTOR_REWRITE_IMPORTS", "0"):
+    if truthy("JINX_REFACTOR_REWRITE_IMPORTS", "0"):
         old_mod = _module_name_from_path(ap_src)
         new_mod = _module_name_from_path(ap_dst)
         more_ops = await _scan_and_rewrite_imports(old_mod, new_mod, symbol)
@@ -234,7 +231,7 @@ async def _scan_and_rewrite_imports(old_mod: str, new_mod: str, symbol: str) -> 
                             changed = True
                     # Case B: grouped import containing our symbol -> split when enabled
                     elif symbol in [p.split(" as ")[0].strip() for p in parts]:
-                        if not _truthy("JINX_REFACTOR_REWRITE_GROUPED_IMPORTS", "1"):
+                        if not truthy("JINX_REFACTOR_REWRITE_GROUPED_IMPORTS", "1"):
                             continue
                         # keep others in old_mod, move our entry to new_mod on a new line
                         keep_parts = []

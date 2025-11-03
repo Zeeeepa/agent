@@ -15,15 +15,9 @@ from jinx.micro.runtime.source_extract import (
 )
 from jinx.micro.embeddings.project_config import ROOT as PROJECT_ROOT
 from jinx.micro.embeddings.search_cache import search_project_cached
+from jinx.micro.common.env import truthy
 
 VerifyCB = Callable[[str | None, List[str], str], Awaitable[None]]
-
-
-def _truthy(name: str, default: str = "1") -> bool:
-    try:
-        return str(os.getenv(name, default)).strip().lower() not in ("", "0", "false", "off", "no")
-    except Exception:
-        return True
 
 
 def _abs_path(p: str) -> str:

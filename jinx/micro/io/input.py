@@ -14,7 +14,6 @@ import time
 import contextlib
 from jinx.bootstrap import ensure_optional
 from typing import Any, cast
-from jinx.state import boom_limit
 from jinx.logging_service import blast_mem, bomb_log
 from jinx.log_paths import TRIGGER_ECHOES, BLUE_WHISPERS
 from jinx.async_utils.queue import try_put_nowait
@@ -67,13 +66,23 @@ async def neon_input(qe: asyncio.Queue[str]) -> None:
     sess = PromptSession(key_bindings=finger_wire, bottom_toolbar=_toolbar)
     boom_clock: dict[str, float] = {"time": asyncio.get_running_loop().time()}
     activity = asyncio.Event()
+    # Gate to emit <no_response> only once per inactivity period (until next activity)
+    noresp_sent: dict[str, bool] = {"v": False}
 
     @finger_wire.add("<any>")
     def _(triggerbit) -> None:  # prompt_toolkit callback
         boom_clock["time"] = asyncio.get_running_loop().time()
         triggerbit.app.current_buffer.insert_text(triggerbit.key_sequence[0].key)
-        # Signal activity to reset the inactivity timer immediately
+        # Reset no-response gate and signal activity to reset the timer immediately
+        noresp_sent["v"] = False
         activity.set()
+        # Short-lived preemption: raise throttle briefly on user typing to keep UI responsive
+        try:
+            jx_state.throttle_event.set()
+            # Spinner/toolbar loop will auto-clear when TTL expires
+            setattr(jx_state, "throttle_unset_ts", float(time.perf_counter()) + 0.35)
+        except Exception:
+            pass
 
     async def kaboom_watch() -> None:
         """Emit <no_response> after inactivity using a reactive timer.
@@ -81,9 +90,27 @@ async def neon_input(qe: asyncio.Queue[str]) -> None:
         Avoids periodic polling by waiting for either activity or timeout.
         """
         while True:
-            # Calculate remaining time based on last activity
+            # If the agent is thinking (spinner on), pause the idle timer and gate reset
+            try:
+                if bool(getattr(jx_state, "spin_on", False)):
+                    # Reset timer baseline while busy so the user gets full TIMEOUT after output
+                    boom_clock["time"] = asyncio.get_running_loop().time()
+                    noresp_sent["v"] = False
+                    await asyncio.sleep(0.2)
+                    continue
+            except Exception:
+                pass
+            # Calculate remaining time based on the later of last activity or last agent reply
             now = asyncio.get_running_loop().time()
-            remaining = max(0.0, boom_limit - (now - boom_clock["time"]))
+            try:
+                limit = int(getattr(jx_state, "boom_limit", 30))
+            except Exception:
+                limit = 30
+            try:
+                base = max(float(boom_clock["time"]), float(getattr(jx_state, "last_agent_reply_ts", 0.0) or 0.0))
+            except Exception:
+                base = float(boom_clock["time"])
+            remaining = max(0.0, limit - (now - base))
             activity.clear()
             try:
                 # Wait for either new activity or the inactivity timeout
@@ -92,13 +119,22 @@ async def neon_input(qe: asyncio.Queue[str]) -> None:
                 continue
             except asyncio.TimeoutError:
                 # Timeout: no activity within boom_limit
-                await blast_mem("<no_response>")
-                await bomb_log("<no_response>", TRIGGER_ECHOES)
-                # Do not disrupt FIFO order: emit only if queue has space
-                placed = try_put_nowait(qe, "<no_response>")
-                if not placed:
-                    await bomb_log("<no_response> skipped: input queue saturated", BLUE_WHISPERS)
-                boom_clock["time"] = asyncio.get_running_loop().time()
+                if not noresp_sent["v"]:
+                    await blast_mem("<no_response>")
+                    await bomb_log("<no_response>", TRIGGER_ECHOES)
+                    # Do not disrupt FIFO order: emit only if queue has space
+                    placed = try_put_nowait(qe, "<no_response>")
+                    if not placed:
+                        await bomb_log("<no_response> skipped: input queue saturated", BLUE_WHISPERS)
+                    noresp_sent["v"] = True
+                    boom_clock["time"] = asyncio.get_running_loop().time()
+                else:
+                    # Already emitted for this inactivity period; wait until activity
+                    activity.clear()
+                    try:
+                        await activity.wait()
+                    except Exception:
+                        pass
 
     watch_task = asyncio.create_task(kaboom_watch())
     # Periodic invalidate to refresh toolbar while spinner runs

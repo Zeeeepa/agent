@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import json as _json
 from typing import Dict, Tuple
 import hashlib as _hashlib
 
@@ -512,6 +513,101 @@ def _token_map_compress(all_blocks: Dict[str, str]) -> Tuple[Dict[str, str], str
     return new_blocks, meta_str
 
 
+def _parse_path_tokens(meta_str: str) -> Dict[str, str]:
+    """Extract mapping of rel path -> P# token from <embeddings_meta>."""
+    out: Dict[str, str] = {}
+    s = meta_str or ""
+    for m in re.finditer(r"(?m)^P(\d+)\s*=\s*path:\s*([^\n\r]+)$", s):
+        try:
+            pnum = int(m.group(1) or 0)
+        except Exception:
+            continue
+        rel = (m.group(2) or "").strip()
+        if not rel:
+            continue
+        tok = f"P{pnum}"
+        out[rel] = tok
+        # Also store normalized slashed version
+        out[rel.replace("\\", "/")] = tok
+    return out
+
+
+def _load_symbol_index_sync() -> Dict[str, object]:
+    """Best-effort load of symbol_index.json without async dependencies."""
+    try:
+        path = os.path.join("emb", "_state", "symbol_index.json")
+        with open(path, "r", encoding="utf-8") as f:
+            return _json.load(f) or {}
+    except Exception:
+        return {}
+
+
+def _build_relation_claims(present: Dict[str, str], comp_map: Dict[str, str]) -> list[str]:
+    """Build relation claims L= using symbol index.
+
+    Format (one per symbol):
+      L name=<sym> D= P3 P5 C= P2 P2
+    Gate with JINX_CTX_META_REL_CLAIMS (default on).
+    """
+    try:
+        on = str(os.getenv("JINX_CTX_META_REL_CLAIMS", "1")).lower() not in ("", "0", "false", "off", "no")
+    except Exception:
+        on = True
+    if not on:
+        return []
+    meta_prev = (present.get("embeddings_meta") or "")
+    pmap = _parse_path_tokens(meta_prev)
+    if not pmap:
+        return []
+    # symbols from brain
+    brain = (present.get("embeddings_brain") or "")
+    syms: list[str] = []
+    for m in re.finditer(r"(?mi)\bsymbol:\s*([^\n\r\(]+)", brain):
+        nm = (m.group(1) or "").strip()
+        if nm and nm not in syms:
+            syms.append(nm)
+    if not syms:
+        return []
+    try:
+        topn = max(1, int(os.getenv("JINX_CTX_META_REL_TOP", "4")))
+    except Exception:
+        topn = 4
+    try:
+        capk = max(1, int(os.getenv("JINX_CTX_META_REL_K", "4")))
+    except Exception:
+        capk = 4
+    idx = _load_symbol_index_sync()
+    defs_map: Dict[str, list] = (idx.get("defs") or {})  # type: ignore[assignment]
+    calls_map: Dict[str, list] = (idx.get("calls") or {})  # type: ignore[assignment]
+    claims: list[str] = []
+    for name in syms[:topn]:
+        defs = defs_map.get(name) or []
+        calls = calls_map.get(name) or []
+        # Map rel paths to P# tokens
+        def _to_p(rel_line) -> str:
+            try:
+                rel = (rel_line[0] if isinstance(rel_line, (list, tuple)) else "") or ""
+                tok = pmap.get(rel) or pmap.get(rel.replace("\\", "/"))
+                return tok or ""
+            except Exception:
+                return ""
+        d_p = [t for t in [
+            _to_p(x) for x in defs[:capk]
+        ] if t]
+        c_p = [t for t in [
+            _to_p(x) for x in calls[:capk]
+        ] if t]
+        if not d_p and not c_p:
+            continue
+        line = f"L name={name}"
+        if d_p:
+            line += " D= " + " ".join(d_p)
+        if c_p:
+            line += " C= " + " ".join(c_p)
+        claims.append(line)
+    return claims
+
+
 def compact_context(text: str) -> str:
     s = text or ""
     # Total budget for all embeddings blocks combined
@@ -562,6 +658,10 @@ def compact_context(text: str) -> str:
     wclaims = _build_weight_claims(comp_map)
     if wclaims:
         extra_meta_lines.extend(wclaims)
+    # Relation claims from symbol index (requires P# path mapping in meta)
+    rclaims = _build_relation_claims(blocks, comp_map)
+    if rclaims:
+        extra_meta_lines.extend(rclaims)
     # Cross-block line dedupe: keep code lines, drop duplicates later in refs/graph/memory/brain
     order = ["embeddings_code","embeddings_refs","embeddings_graph","embeddings_memory","embeddings_brain","embeddings_meta"]
     seen: set[str] = set()

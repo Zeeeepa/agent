@@ -5,6 +5,9 @@ import asyncio
 import ast
 from typing import Callable, Awaitable, List, Dict, Tuple, Optional
 
+from jinx.micro.common.log import log_info, log_error
+from jinx.micro.common.repair_utils import maybe_schedule_repairs_from_error as _rep
+
 from jinx.micro.runtime.api import report_progress, report_result
 from jinx.micro.runtime.handlers.batch_handler import handle_batch_patch as _h_batch
 from .refactor_utils import (
@@ -112,8 +115,21 @@ async def handle_refactor_split_file(
             ops_all.append({"type": "write", "path": pkg_init_path, "code": init_new, "meta": {"refactor": "split", "role": "dst_init"}})
         # Finally, write source shim
         ops_all.append({"type": "write", "path": ap_src, "code": src_new, "meta": {"refactor": "split", "role": "src"}})
+        try:
+            log_info("refactor.split.preview.ok", src=src_path, out=out_dir, ops=len(ops_all))
+        except Exception:
+            pass
         await report_progress(tid, 22.0, "preview refactor split (batch)")
         f = bool(force) if force is not None else _truthy("JINX_REFACTOR_FORCE", "1")
         await _h_batch(tid, ops_all, f, verify_cb=verify_cb, exports=exports)
     except Exception as e:
+        try:
+            from jinx.micro.common.repair_utils import maybe_schedule_repairs_from_error as _rep
+            await _rep(e)
+        except Exception:
+            pass
+        try:
+            log_error("refactor.split.error", src=src_path, out=out_dir, msg=str(e))
+        except Exception:
+            pass
         await report_result(tid, False, error=f"refactor split failed: {e}")

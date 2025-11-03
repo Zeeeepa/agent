@@ -62,3 +62,29 @@ async def collect_export(key: str, limit: Optional[int] = None) -> List[str]:
         except Exception:
             continue
     return out
+
+
+async def collect_export_for_group(key: str, group: str, limit: Optional[int] = None) -> List[str]:
+    """Collect export values preferring group-specific keys.
+
+    Tries key formatted as "group:{group}:{key}" for each program, falling back to the global key.
+    Returns up to `limit` non-empty values.
+    """
+    out: List[str] = []
+    try:
+        pids = await list_programs()
+    except Exception:
+        pids = []
+    gk = f"group:{(group or 'main').strip().lower()}:{key}"
+    for pid in pids:
+        try:
+            v = await get_program_export(pid, gk)
+            if not v:
+                v = await get_program_export(pid, key)
+            if v:
+                out.append(v)
+                if limit is not None and len(out) >= max(0, limit):
+                    break
+        except Exception:
+            continue
+    return out

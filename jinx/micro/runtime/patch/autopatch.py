@@ -23,6 +23,8 @@ from jinx.micro.memory.graph import apply_feedback as _kg_feedback
 from .strategy_bandit import bandit_order_for_context as _bandit_order, bandit_update as _bandit_update
 from .symbol_patch_generic import patch_symbol_generic as _patch_symbol_generic
 from jinx.micro.brain.concepts import record_reinforcement as _brain_reinf
+from jinx.micro.embeddings.symbol_index import query_symbol_index as _sym_query
+from jinx.micro.common.env import truthy as _truthy
 
 
 @dataclass
@@ -39,13 +41,6 @@ class AutoPatchArgs:
     force: bool = False
     context_before: Optional[str] = None
     context_tolerance: Optional[float] = None
-
-
-def _truthy(name: str, default: str = "1") -> bool:
-    try:
-        return str(os.getenv(name, default)).strip().lower() not in ("", "0", "false", "off", "no")
-    except Exception:
-        return True
 
 
 async def _evaluate_candidate(name: str, coro) -> Tuple[str, bool, str, int]:
@@ -128,6 +123,44 @@ async def autopatch(args: AutoPatchArgs) -> Tuple[bool, str, str]:
             lambda: patch_line_range(path, ls, le, code, preview=True, max_span=args.max_span),
             lambda: patch_line_range(path, ls, le, code, preview=False, max_span=args.max_span),
         ))
+
+    # 3a) symbol index suggestions when symbol provided but path unknown
+    if (args.symbol or "") and not path:
+        try:
+            idx = await _sym_query(args.symbol or "")
+        except Exception:
+            idx = {"defs": [], "calls": []}
+        defs = idx.get("defs") or []
+        # Prefer definitions; use body vs header depending on code
+        def _looks_like_header(snippet: str) -> bool:
+            sn = (snippet or "").lstrip()
+            if sn.startswith(("def ", "class ", "async def ")):
+                return True
+            try:
+                import ast as _ast
+                m = _ast.parse(snippet or "")
+                for n in getattr(m, "body", []) or []:
+                    if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef)):
+                        return True
+            except Exception:
+                pass
+            return False
+        for rel, _ln in defs[:6]:  # cap to keep RT budgets
+            fpath = os.path.join(ROOT, rel)
+            if is_restricted_path(fpath):
+                continue
+            if _looks_like_header(code or ""):
+                candidates.append((
+                    "symbol",
+                    (lambda fpath=fpath: patch_symbol_python(fpath, args.symbol or "", code, preview=True)),
+                    (lambda fpath=fpath: patch_symbol_python(fpath, args.symbol or "", code, preview=False)),
+                ))
+            else:
+                candidates.append((
+                    "symbol_body",
+                    (lambda fpath=fpath: patch_symbol_body_python(fpath, args.symbol or "", code, preview=True)),
+                    (lambda fpath=fpath: patch_symbol_body_python(fpath, args.symbol or "", code, preview=False)),
+                ))
 
     # 2) python symbol (requires path) with smarter header detection
     if (args.symbol or "") and (str(path).endswith(".py") if path else False):

@@ -5,16 +5,8 @@ import os
 from typing import Any, Dict, List, Optional, Tuple
 
 from jinx.micro.runtime.program import MicroProgram
-from jinx.micro.runtime.api import on, submit_task, report_progress, report_result, spawn, list_programs
 from jinx.micro.runtime.contracts import TASK_REQUEST
 from jinx.micro.embeddings.search_cache import search_project_cached
-
-
-def _truthy(name: str, default: str = "1") -> bool:
-    try:
-        return str(os.getenv(name, default)).strip().lower() not in ("", "0", "false", "off", "no")
-    except Exception:
-        return True
 
 
 class AutoVerifyProgram(MicroProgram):
@@ -43,7 +35,8 @@ class AutoVerifyProgram(MicroProgram):
         return val if len(val) <= cap else (val[:cap] + "\n...<truncated>")
 
     async def run(self) -> None:
-        await on(TASK_REQUEST, self._on_task)
+        from jinx.micro.runtime.api import on as _on
+        await _on(TASK_REQUEST, self._on_task)
         await self.log("verifier online")
         while True:
             await asyncio.sleep(1.0)
@@ -68,10 +61,11 @@ class AutoVerifyProgram(MicroProgram):
 
     async def _handle_verify_embedding(self, tid: str, goal: str, files: List[str], diff: str, topk: int) -> None:
         try:
+            from jinx.micro.runtime.api import report_progress as _report_progress, report_result as _report_result
             if not goal:
-                await report_result(tid, False, error="goal required")
+                await _report_result(tid, False, error="goal required")
                 return
-            await report_progress(tid, 10.0, "searching project")
+            await _report_progress(tid, 10.0, "searching project")
             hits = await search_project_cached(goal, k=max(1, topk), max_time_ms=int(os.getenv("JINX_VERIFY_MS", "400")))
             # simple scoring: +0.5 if any file matches, +0.3 if multi matches, +0.2 if diff mentions headers
             score = 0.0
@@ -106,14 +100,16 @@ class AutoVerifyProgram(MicroProgram):
             self.exports["last_verify_reason"] = reason
             if matched_files:
                 self.exports["last_verify_files"] = ", ".join(matched_files)
-            await report_result(tid, ok, {"score": score, "matched_files": matched_files, "topk": topk}, None if ok else "below threshold")
+            await _report_result(tid, ok, {"score": score, "matched_files": matched_files, "topk": topk}, None if ok else "below threshold")
         except Exception as e:
-            await report_result(tid, False, error=f"verify failed: {e}")
+            from jinx.micro.runtime.api import report_result as _report_result
+            await _report_result(tid, False, error=f"verify failed: {e}")
 
 
 # Helpers
 async def spawn_verifier() -> str:
-    return await spawn(AutoVerifyProgram())
+    from jinx.micro.runtime.api import spawn as _spawn
+    return await _spawn(AutoVerifyProgram())
 
 
 async def ensure_verifier_running() -> Optional[str]:
@@ -134,9 +130,9 @@ async def ensure_verifier_running() -> Optional[str]:
 _VERIFIER_PID: Optional[str] = None
 _VERIFIER_STARTED: bool = False
 
-
 async def submit_verify_embedding(goal: str, files: Optional[List[str]] = None, diff: str = "", *, topk: Optional[int] = None) -> str:
-    return await submit_task(
+    from jinx.micro.runtime.api import submit_task as _submit_task
+    return await _submit_task(
         "verify.embedding",
         goal=str(goal or ""),
         files=list(files or []),

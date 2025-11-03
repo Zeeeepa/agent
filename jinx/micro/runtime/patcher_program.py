@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import os
 from typing import Any, Optional, List, Dict
-
 from .program import MicroProgram
 from .api import on
 from .contracts import TASK_REQUEST
@@ -14,6 +13,7 @@ from jinx.micro.runtime.patcher_handlers import (
     handle_line_patch as _h_line,
     handle_symbol_patch as _h_symbol,
     handle_anchor_patch as _h_anchor,
+    handle_regex_patch as _h_regex,
     handle_auto_patch as _h_auto,
     handle_batch_patch as _h_batch,
     handle_dump_symbol as _h_dump_symbol,
@@ -22,7 +22,9 @@ from jinx.micro.runtime.patcher_handlers import (
     handle_refactor_move_symbol as _h_refactor_move,
     handle_refactor_split_file as _h_refactor_split,
 )
+from jinx.micro.runtime.handlers.rename_handler import handle_refactor_rename as _h_refactor_rename
 
+# removed stray placeholder
 
 class AutoPatchProgram(MicroProgram):
     """Background patcher that applies file writes and line-range patches.
@@ -123,6 +125,19 @@ class AutoPatchProgram(MicroProgram):
                 anchor = str(args[1])
                 replacement = str(args[2])
                 await self._handle_anchor_patch(tid, path, anchor, replacement)
+            elif name == "patch.regex":
+                # Supports both positional args and optional flags kwarg
+                args = payload.get("args") or []
+                if len(args) < 3:
+                    return
+                path = str(args[0])
+                pattern = str(args[1])
+                replacement = str(args[2])
+                kw = payload.get("kwargs") or {}
+                flags = kw.get("flags")
+                if flags is None and len(args) >= 4:
+                    flags = str(args[3])
+                await self._handle_regex_patch(tid, path, pattern, replacement, flags=(str(flags) if flags is not None else None))
             elif name == "patch.auto":
                 kw = payload.get("kwargs") or {}
                 await self._handle_auto_patch(
@@ -223,13 +238,23 @@ class AutoPatchProgram(MicroProgram):
                     insert_shim=bool(insert_shim) if insert_shim is not None else None,
                     force=bool(force) if force is not None else None,
                 )
+            elif name == "refactor.rename":
+                kw = payload.get("kwargs") or {}
+                symbol = str(kw.get("symbol") or "").strip()
+                new_name = str(kw.get("new_name") or "").strip()
+                if not symbol or not new_name:
+                    await self.log("rename: missing symbol or new_name")
+                    return
+                try:
+                    await _h_refactor_rename(tid, symbol, new_name, verify_cb=self._verify_cb, exports=self.exports)
+                except Exception:
+                    await self.log("rename handler failed")
         except Exception:
             # Do not let handler raise; bus must never fail
             pass
 
     async def _handle_write(self, tid: str, path: str, text: str) -> None:
         await _h_write(tid, path, text, verify_cb=self._verify_cb, exports=self.exports)
-
     async def _handle_line_patch(self, tid: str, path: str, ls: int, le: int, replacement: str) -> None:
         await _h_line(tid, path, ls, le, replacement, verify_cb=self._verify_cb, exports=self.exports)
 
@@ -238,6 +263,9 @@ class AutoPatchProgram(MicroProgram):
 
     async def _handle_anchor_patch(self, tid: str, path: str, anchor: str, replacement: str) -> None:
         await _h_anchor(tid, path, anchor, replacement, verify_cb=self._verify_cb, exports=self.exports)
+
+    async def _handle_regex_patch(self, tid: str, path: str, pattern: str, replacement: str, flags: str | None) -> None:
+        await _h_regex(tid, path, pattern, replacement, flags=flags, verify_cb=self._verify_cb, exports=self.exports)
 
     async def _handle_auto_patch(self, tid: str, a: AutoPatchArgs) -> None:
         await _h_auto(tid, a, verify_cb=self._verify_cb, exports=self.exports)

@@ -17,6 +17,9 @@ from jinx.micro.memory.unified import assemble_unified_memory_lines as _mem_unif
 from jinx.micro.exec.run_exports import read_last_stdout as _run_stdout, read_last_stderr as _run_stderr, read_last_status as _run_status
 from jinx.micro.llm.macro_cache import memoized_call
 from jinx.micro.memory.turns import parse_active_turns as _parse_turns, get_user_message as _turn_user, get_jinx_reply_to as _turn_jinx
+from jinx.micro.embeddings.symbol_index import query_symbol_index as _sym_query
+from jinx.micro.exec.test_gen import gen_unit_test_stub as _gen_test_stub
+from jinx.micro.exec.test_runner import run_tests as _run_tests
 
 _registered = False
 
@@ -365,6 +368,120 @@ async def _run_handler(args: List[str], ctx: MacroContext) -> str:
     return await memoized_call(key, pttl, _call)
 
 
+async def _codegraph_handler(args: List[str], ctx: MacroContext) -> str:
+    """Symbol graph from index: {{m:codegraph:token[:mode][:K]}}
+
+    mode: summary (default) | edges
+      - summary: "defs:N calls:M"
+      - edges: "def file:line | call file:line | ..." (clamped to K)
+    """
+    token = (args[0] if args else "").strip()
+    mode = (args[1] if len(args) > 1 else "summary").strip().lower()
+    K = 0
+    if len(args) > 2:
+        try:
+            K = int(args[2])
+        except Exception:
+            K = 0
+    if not token:
+        # try from input_text callable
+        m = re.search(r"([A-Za-z_][A-Za-z0-9_]*)\s*\(", ctx.input_text or "")
+        if m:
+            token = m.group(1)
+    if not token:
+        return ""
+    try:
+        idx = await _sym_query(token)
+    except Exception:
+        idx = {"defs": [], "calls": []}
+    defs = idx.get("defs") or []
+    calls = idx.get("calls") or []
+    if mode == "edges":
+        out: List[str] = []
+        for rel, ln in (defs[:K] if K > 0 else defs):
+            out.append(f"def {rel}:{ln}")
+        for rel, ln in (calls[:K] if K > 0 else calls):
+            out.append(f"call {rel}:{ln}")
+        return " | ".join(out)
+    # summary
+    return f"defs:{len(defs)} calls:{len(calls)}"
+
+
+async def _testgen_handler(args: List[str], ctx: MacroContext) -> str:
+    """Generate a minimal unittest stub for a symbol: {{m:testgen:symbol[:chars=lim]}}"""
+    symbol = (args[0] if args else "").strip()
+    lim = None
+    # parse chars=lim
+    for a in (args[1:] if len(args) > 1 else []):
+        aa = (a or "").strip()
+        if aa.startswith("chars="):
+            try:
+                lim = int(aa.split("=",1)[1])
+            except Exception:
+                lim = None
+    if not symbol:
+        # try callable from input
+        m = re.search(r"([A-Za-z_][A-Za-z0-9_]*)\s*\(", ctx.input_text or "")
+        if m:
+            symbol = m.group(1)
+    if not symbol:
+        return ""
+    try:
+        idx = await _sym_query(symbol)
+    except Exception:
+        idx = {"defs": [], "calls": []}
+    defs = list(idx.get("defs") or [])
+    if lim is None:
+        try:
+            lim = max(200, int(os.getenv("JINX_TESTGEN_PREVIEW_CHARS", "1200")))
+        except Exception:
+            lim = 1200
+    try:
+        stub = await _gen_test_stub(symbol, defs, preview_chars=int(lim or 1200))
+    except Exception:
+        return ""
+    return stub or ""
+
+
+async def _testrun_handler(args: List[str], ctx: MacroContext) -> str:
+    """Run tests and return a compact summary: {{m:test[:pattern][:chars=lim][:timeout=sec]}}
+
+    - pattern: optional pytest -k pattern
+    - chars: clamp for stdout/stderr preview (default JINX_MACRO_MEM_PREVIEW_CHARS)
+    - timeout: overall runner timeout in seconds (default from test_runner)
+    """
+    pattern = None
+    chars = None
+    timeout = None
+    for a in args:
+        aa = (a or "").strip()
+        if not aa:
+            continue
+        if aa.startswith("chars="):
+            try:
+                chars = int(aa.split("=",1)[1])
+            except Exception:
+                pass
+            continue
+        if aa.startswith("timeout="):
+            try:
+                timeout = float(aa.split("=",1)[1])
+            except Exception:
+                pass
+            continue
+        if pattern is None:
+            pattern = aa
+    try:
+        ok, out, err, status = await _run_tests(pattern, chars=chars, timeout_s=timeout)
+    except Exception:
+        return "tests: error"
+    # Prefer stderr message if failed
+    if ok:
+        return f"tests: ok | {out.strip()[:max(24, int(chars or 160))]}" if out else "tests: ok"
+    msg = (err or out or status or "failure").strip()
+    return f"tests: failure | {msg[:max(24, int(chars or 160))]}"
+
+
 # ----------------------- Code intelligence providers -----------------------
 
 _EXCLUDE_DIRS = {".git", ".hg", ".svn", "__pycache__", ".venv", "venv", "env", "node_modules", "emb", "build", "dist"}
@@ -386,10 +503,12 @@ def _iter_py_files(root: str):
 
 
 async def _code_handler(args: List[str], ctx: MacroContext) -> str:
-    """Code provider: {{m:code:usage|def:token[:K][:ms=budget][:chars=lim]}}
+    """Code provider: {{m:code:usage|def|class|import:token[:K][:ms=budget][:chars=lim]}}
 
     - usage: find call sites for a symbol (regex: \btoken\s*\()
-    - def: find definitions (regex: ^\s*def\s+token\s*\()
+    - def: find function definitions (regex: ^\s*def\s+token\s*\()
+    - class: find class definitions (regex: ^\s*class\s+token\s*[(:])
+    - import: find import lines referencing token (import X or from Y import X)
     Returns: "path:line: preview | path:line: preview ..."
     """
     mode = (args[0] if args else "usage").strip().lower()
@@ -446,34 +565,72 @@ async def _code_handler(args: List[str], ctx: MacroContext) -> str:
         except Exception:
             lim = 160
 
-    # Compile regex once
+    # Attempt symbol index first (exact token) for defs/calls
+    try:
+        idx = await _sym_query(token)
+    except Exception:
+        idx = {"defs": [], "calls": []}
+    if mode in ("def", "class") and idx.get("defs"):
+        pairs = idx.get("defs")[:n]
+        return " | ".join([f"{rel}:{ln}" for rel, ln in pairs])
+    if mode == "usage" and idx.get("calls"):
+        pairs = idx.get("calls")[:n]
+        return " | ".join([f"{rel}:{ln}" for rel, ln in pairs])
+
+    # Compile regex once per mode (fallback scan)
     if mode == "def":
         pat = re.compile(rf"(?mi)^\s*def\s+{re.escape(token)}\s*\(")
+    elif mode == "class":
+        pat = re.compile(rf"(?mi)^\s*class\s+{re.escape(token)}\s*[(:]")
+    elif mode == "import":
+        pat = re.compile(rf"(?mi)^(?:\s*from\s+[^\n]+\s+import\s+[^\n]*\b{re.escape(token)}\b|\s*import\s+[^\n]*\b{re.escape(token)}\b)")
     else:
         pat = re.compile(rf"(?m)\b{re.escape(token)}\s*\(")
 
     root = ctx.cwd or os.getcwd()
 
     async def _scan() -> str:
+        def _work() -> str:
+            out: List[str] = []
+            count = 0
+            import time as _t
+            t0 = _t.perf_counter()
+            for fp in _iter_py_files(root):
+                if budget_ms and (_t.perf_counter() - t0) * 1000.0 > budget_ms:
+                    break
+                try:
+                    with open(fp, "r", encoding="utf-8", errors="ignore") as f:
+                        for i, line in enumerate(f, start=1):
+                            if pat.search(line):
+                                rel = os.path.relpath(fp, root)
+                                prev = " ".join(line.strip().split())[:lim]
+                                out.append(f"{rel}:{i}: {prev}")
+                                count += 1
+                                if count >= n:
+                                    return " | ".join(out[:n])
+                except Exception:
+                    continue
+            return " | ".join(out[:n])
+        res = await asyncio.to_thread(_work)
+        if res:
+            return res
+        # Fallback: embeddings-based project search by token if regex scan found nothing
+        try:
+            hits = await _proj_topk(token, k=n, max_time_ms=min(400, max(120, budget_ms or 200)))
+        except Exception:
+            hits = []
         out: List[str] = []
-        count = 0
-        t0 = asyncio.get_running_loop().time()
-        for fp in _iter_py_files(root):
-            # time budget
-            if budget_ms and (asyncio.get_running_loop().time() - t0) * 1000.0 > budget_ms:
-                break
-            try:
-                with open(fp, "r", encoding="utf-8", errors="ignore") as f:
-                    for i, line in enumerate(f, start=1):
-                        if pat.search(line):
-                            rel = os.path.relpath(fp, root)
-                            prev = " ".join(line.strip().split())[:lim]
-                            out.append(f"{rel}:{i}: {prev}")
-                            count += 1
-                            if count >= n:
-                                return " | ".join(out[:n])
-            except Exception:
+        for _score, file_rel, obj in hits:
+            meta = obj.get("meta", {})
+            pv = (meta.get("text_preview") or "").strip()
+            if pv:
+                out.append(_norm_preview(pv, lim))
                 continue
+            ls = int(meta.get("line_start") or 0)
+            le = int(meta.get("line_end") or 0)
+            tag = f"[{file_rel}:{ls}-{le}]" if (file_rel and (ls or le)) else (f"[{file_rel}]" if file_rel else "")
+            if tag:
+                out.append(tag)
         return " | ".join(out[:n])
 
     # TTL memoization to avoid repeated scans on identical queries
@@ -658,4 +815,8 @@ async def register_builtin_macros() -> None:
     await register_macro("pins", _pins_handler)
     await register_macro("pinadd", _pinadd_handler)
     await register_macro("pindel", _pindel_handler)
+    await register_macro("code", _code_handler)
+    await register_macro("codegraph", _codegraph_handler)
+    await register_macro("testgen", _testgen_handler)
+    await register_macro("test", _testrun_handler)
     _registered = True

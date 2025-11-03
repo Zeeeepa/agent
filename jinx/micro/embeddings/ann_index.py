@@ -10,6 +10,7 @@ except Exception:  # pragma: no cover - optional dependency
     hnswlib = None  # type: ignore
 
 from .similarity import score_cosine_batch
+from .project_paths import PROJECT_INDEX_DIR
 
 # Lightweight, best-effort ANN cache for project chunks.
 # Falls back to brute-force cosine if ANN backend not available.
@@ -38,6 +39,86 @@ def _ann_enabled() -> bool:
         return os.getenv("EMBED_PROJECT_ANN", "1").strip().lower() not in ("", "0", "false", "off", "no")
     except Exception:
         return True
+
+
+def _persist_enabled() -> bool:
+    try:
+        return os.getenv("EMBED_PROJECT_ANN_PERSIST", "1").strip().lower() not in ("", "0", "false", "off", "no")
+    except Exception:
+        return True
+
+
+def _persist_path() -> str:
+    try:
+        os.makedirs(PROJECT_INDEX_DIR, exist_ok=True)
+    except Exception:
+        pass
+    return os.path.join(PROJECT_INDEX_DIR, "ann_state.pkl")
+
+
+def _persist_save_async(dims: int, vecs: List[List[float]], meta: List[Tuple[str, Dict[str, Any]]]) -> None:
+    if not _persist_enabled():
+        return
+    path = _persist_path()
+    payload = {
+        "dims": int(dims),
+        "n": int(len(vecs)),
+        "vectors": vecs,
+        "meta": meta,
+        "ts": time.time(),
+    }
+    import asyncio
+    import pickle
+    def _write() -> None:
+        try:
+            with open(path, "wb") as f:
+                pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
+        except Exception:
+            pass
+    # Prefer scheduling on the running loop; otherwise fall back to a background thread
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # No running loop in this thread — use a daemon thread
+        try:
+            import threading
+            threading.Thread(target=_write, daemon=True).start()
+        except Exception:
+            pass
+        return
+    try:
+        # Fire-and-forget in default executor; no coroutine is created if scheduling fails
+        loop.run_in_executor(None, _write)
+    except Exception:
+        # Best-effort fallback
+        try:
+            import threading
+            threading.Thread(target=_write, daemon=True).start()
+        except Exception:
+            pass
+
+
+def _persist_load(dims: int, n: int) -> Optional[Tuple[List[List[float]], List[Tuple[str, Dict[str, Any]]]]]:
+    if not _persist_enabled():
+        return None
+    path = _persist_path()
+    if not os.path.isfile(path):
+        return None
+    try:
+        import pickle
+        with open(path, "rb") as f:
+            payload = pickle.load(f)
+        if int(payload.get("dims") or 0) != int(dims):
+            return None
+        if int(payload.get("n") or 0) != int(n):
+            return None
+        vecs = list(payload.get("vectors") or [])
+        meta = list(payload.get("meta") or [])
+        if not vecs or not meta or len(vecs) != n or len(meta) != n:
+            return None
+        return (vecs, meta)
+    except Exception:
+        return None
 
 
 def _should_rebuild(dims: int, n: int) -> bool:
@@ -111,10 +192,23 @@ def ensure_index(items: List[Tuple[str, Dict[str, Any]]]) -> Tuple[int, List[Lis
     if _should_rebuild(dims, n):
         _ANN.key = (dims, n)
         _ANN.expires_at = time.time() + _ttl_sec()
-        _ANN.vectors = vecs
-        _ANN.meta = meta
-        _ANN.labels = list(range(n))
-        _ANN.index = _build_hnsw(dims, vecs)
+        # Try persisted state first; fall back to freshly built vectors/meta
+        loaded = _persist_load(dims, n)
+        if loaded is not None:
+            vecs_loaded, meta_loaded = loaded
+            _ANN.vectors = vecs_loaded
+            _ANN.meta = meta_loaded
+        else:
+            _ANN.vectors = vecs
+            _ANN.meta = meta
+        _ANN.labels = list(range(len(_ANN.vectors)))
+        _ANN.index = _build_hnsw(dims, _ANN.vectors)
+        # Persist new state asynchronously when we use fresh vectors
+        if loaded is None:
+            try:
+                _persist_save_async(dims, _ANN.vectors, _ANN.meta)
+            except Exception:
+                pass
     return (dims, _ANN.vectors, _ANN.meta, _ANN.index)
 
 

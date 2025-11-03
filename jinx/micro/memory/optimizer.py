@@ -31,12 +31,22 @@ from jinx.micro.memory.kb_updater import update_kb_from_memory as _kb_update
 from jinx.config import ALL_TAGS
 import jinx.state as jx_state
 import contextlib
+from jinx.micro.common.env import truthy
 
 # Single worker ensures strict ordering; lock protects model call & writes
 _mem_lock: asyncio.Lock = asyncio.Lock()
 _queue: asyncio.Queue[Tuple[Optional[str], asyncio.Future[None]]] | None = None
 _worker_task: asyncio.Task[None] | None = None
 _stopping: bool = False
+_bg_tasks: set[asyncio.Task] = set()
+
+
+def _track_bg(t: asyncio.Task) -> None:
+    try:
+        _bg_tasks.add(t)
+        t.add_done_callback(lambda tt: _bg_tasks.discard(tt))
+    except Exception:
+        pass
 
 
 async def _optimize_memory_impl(snapshot: str | None) -> None:
@@ -57,13 +67,7 @@ async def _optimize_memory_impl(snapshot: str | None) -> None:
             return
 
         # Prefer local rule-based builder to avoid an extra OpenAI call.
-        def _truthy(name: str, default: str = "1") -> bool:
-            try:
-                return str(os.getenv(name, default)).strip().lower() not in ("", "0", "false", "off", "no")
-            except Exception:
-                return True
-
-        use_llm = _truthy("JINX_MEMORY_USE_LLM", "0")
+        use_llm = truthy("JINX_MEMORY_USE_LLM", "0")
         if not use_llm:
             # Local build: compact + evergreen from transcript and previous evergreen
             try:
@@ -81,32 +85,29 @@ async def _optimize_memory_impl(snapshot: str | None) -> None:
             await write_state(compact, durable)
             # Background summary writer (env-gated, throttled)
             try:
-                asyncio.create_task(_summarize(compact, durable))
+                t = asyncio.create_task(_summarize(compact, durable))
+                _track_bg(t)
             except Exception:
                 pass
             # Background KB update (env-gated, throttled)
             try:
-                asyncio.create_task(_kb_update(compact, durable))
+                t = asyncio.create_task(_kb_update(compact, durable))
+                _track_bg(t)
             except Exception:
                 pass
             # Best-effort background ingestion into embeddings for improved retrieval
             try:
-                def _truthy2(name: str, default: str = "1") -> bool:
-                    try:
-                        return str(os.getenv(name, default)).strip().lower() not in ("", "0", "false", "off", "no")
-                    except Exception:
-                        return True
-                if _truthy2("JINX_MEM_EMB_ENABLE", "1"):
-                    asyncio.create_task(ingest_memory(compact, durable))
+                if truthy("JINX_MEM_EMB_ENABLE", "1"):
+                    _track_bg(asyncio.create_task(ingest_memory(compact, durable)))
                 # Update knowledge graph (throttled internally)
-                if _truthy2("JINX_MEM_GRAPH_ENABLE", "1"):
-                    asyncio.create_task(update_graph(compact, durable))
+                if truthy("JINX_MEM_GRAPH_ENABLE", "1"):
+                    _track_bg(asyncio.create_task(update_graph(compact, durable)))
                 # Update topics (throttled internally)
-                if durable and _truthy2("JINX_MEM_TOPICS_ENABLE", "1"):
-                    asyncio.create_task(update_topics(durable))
+                if durable and truthy("JINX_MEM_TOPICS_ENABLE", "1"):
+                    _track_bg(asyncio.create_task(update_topics(durable)))
                 # Weekly compaction (throttled internally)
-                if _truthy2("JINX_MEM_HISTORY_COMPACT_ENABLE", "1"):
-                    asyncio.create_task(compact_weekly())
+                if truthy("JINX_MEM_HISTORY_COMPACT_ENABLE", "1"):
+                    _track_bg(asyncio.create_task(compact_weekly()))
             except Exception:
                 pass
             await bomb_log("MEMORY optimize: done (local)")
@@ -289,6 +290,16 @@ async def stop() -> None:
         with contextlib.suppress(asyncio.CancelledError, RuntimeError, BaseException):
             await _worker_task
     _worker_task = None
+    # Cancel background tasks spawned by optimizer
+    if _bg_tasks:
+        for t in list(_bg_tasks):
+            if t.done():
+                _bg_tasks.discard(t)
+                continue
+            t.cancel()
+        with contextlib.suppress(Exception):
+            await asyncio.gather(*list(_bg_tasks), return_exceptions=True)
+        _bg_tasks.clear()
     _stopping = False
 
 

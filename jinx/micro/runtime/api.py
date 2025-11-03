@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 from typing import Any, Awaitable, Callable, Optional
 
@@ -52,6 +53,8 @@ async def ensure_runtime() -> None:
             _bridge_started = True
         except Exception:
             _bridge_started = True  # prevent repeated attempts
+    # (prewarm already handled above)
+
     # Start self-study (embeddings services) once
     if not _selfstudy_started:
         try:
@@ -68,8 +71,67 @@ async def ensure_runtime() -> None:
             _bg_tasks.append(t2)
         except Exception:
             pass
+        # Background symbol indexer (env-gated, default ON)
+        try:
+            if str(os.getenv("JINX_SYMBOL_INDEX_ENABLE", "1")).lower() not in ("", "0", "false", "off", "no"):
+                try:
+                    from jinx.micro.embeddings.symbol_indexer import start_symbol_indexer_task as _start_symidx  # local import to avoid cycles
+                    t3 = _start_symidx()
+                    _bg_tasks.append(t3)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        # Auto-fix program (env-gated, default ON)
+        try:
+            if str(os.getenv("JINX_AUTOFIX_ENABLE", "1")).lower() not in ("", "0", "false", "off", "no"):
+                try:
+                    from jinx.micro.runtime.auto_fix_program import spawn_autofix as _spawn_autofix  # local import to avoid cycles
+                    await _spawn_autofix()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        # Repair program (env-gated, default ON)
+        try:
+            if str(os.getenv("JINX_REPAIR_ENABLE", "1")).lower() not in ("", "0", "false", "off", "no"):
+                try:
+                    from jinx.micro.runtime.repair_program import spawn_repair as _spawn_repair  # local import
+                    await _spawn_repair()
+                except Exception:
+                    pass
+        except Exception:
+            pass
         _selfstudy_started = True
+    # Schedule repairs for any missing modules detected by resilience hook (best-effort)
+    try:
+        from jinx.micro.runtime.resilience import schedule_repairs as _sched_repairs  # local import
+        await _sched_repairs()
+    except Exception:
+        pass
+    # Start resilience monitor to periodically resubmit repairs
+    try:
+        from jinx.micro.runtime.resilience import start_resilience_monitor_task as _start_resmon  # local import
+        tmon = _start_resmon()
+        _bg_tasks.append(tmon)
+    except Exception:
+        pass
 
+
+async def stop_selfstudy() -> None:
+    """Cancel and await background self-study tasks started by ensure_runtime()."""
+    global _bg_tasks
+    if not _bg_tasks:
+        return
+    tasks = list(_bg_tasks)
+    _bg_tasks = []
+    # Cancel any still-running tasks
+    for t in tasks:
+        if t and not t.done():
+            t.cancel()
+    # Await tasks to retrieve exceptions and avoid pending-task warnings
+    with contextlib.suppress(Exception):
+        await asyncio.gather(*[t for t in tasks if t is not None], return_exceptions=True)
 
 # Pub/Sub
 async def on(topic: str, handler: Callable[[str, Any], Awaitable[None]]) -> None:

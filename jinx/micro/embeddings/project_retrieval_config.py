@@ -50,10 +50,10 @@ PROJ_CALLGRAPH_CALLEES_LIMIT = int(os.getenv("EMBED_PROJECT_CALLEES_LIMIT", "3")
 PROJ_CALLGRAPH_TIME_MS = int(os.getenv("EMBED_PROJECT_CALLGRAPH_TIME_MS", "240"))
 
 # Exhaustive and budget overrides (use with care)
-# Defaults favor RT performance: exhaustive off, budgets ON
-PROJ_EXHAUSTIVE_MODE = _env_bool("EMBED_PROJECT_EXHAUSTIVE", True)
+# RT-friendly defaults: exhaustive OFF, budgets ON
+PROJ_EXHAUSTIVE_MODE = _env_bool("EMBED_PROJECT_EXHAUSTIVE", False)
 PROJ_NO_STAGE_BUDGETS = _env_bool("EMBED_PROJECT_NO_STAGE_BUDGETS", False)
-PROJ_NO_CODE_BUDGET = _env_bool("EMBED_PROJECT_NO_CODE_BUDGET", True)
+PROJ_NO_CODE_BUDGET = _env_bool("EMBED_PROJECT_NO_CODE_BUDGET", False)
 
 # Per-stage time budgets (ms). Applied as an upper bound per stage; subject to overall max_time_ms.
 PROJ_STAGE_PYAST_MS = int(os.getenv("EMBED_PROJECT_STAGE_PYAST_MS", "200"))

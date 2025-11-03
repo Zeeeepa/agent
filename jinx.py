@@ -14,7 +14,6 @@ Design goals
 from __future__ import annotations
 
 import sys
-from jinx.orchestrator import main as jinx_main
 
 
 def _run() -> int:
@@ -26,6 +25,14 @@ def _run() -> int:
         Process exit code. ``0`` on success, non-zero on handled errors.
     """
     try:
+        # Install resilient import hook before importing orchestrator/runtime
+        try:
+            from jinx.micro.runtime.resilience import install_resilience as _install
+            _install()
+        except Exception:
+            pass
+        # Lazy import orchestrator after resilience is installed
+        from jinx.orchestrator import main as jinx_main
         jinx_main()
         return 0
     except KeyboardInterrupt:

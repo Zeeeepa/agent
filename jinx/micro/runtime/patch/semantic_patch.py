@@ -18,13 +18,7 @@ from .utils import (
 import ast
 from jinx.micro.embeddings.project_config import resolve_project_root as _resolve_root
 import asyncio
-
-
-def _truthy(name: str, default: str = "1") -> bool:
-    try:
-        return str(os.getenv(name, default)).lower() not in ("", "0", "false", "off", "no")
-    except Exception:
-        return True
+from jinx.micro.common.env import truthy
 
 
 def _get_root() -> str:
@@ -68,7 +62,7 @@ async def _best_hit_in_file(path: str, query: str, rep_lines: List[str], *, topk
     best, best_score = await asyncio.to_thread(_score_candidates)
     if best is None:
         return None
-    if best_score < tol and _truthy("JINX_SEMANTIC_PATCH_STRICT", "0"):
+    if best_score < tol and truthy("JINX_SEMANTIC_PATCH_STRICT", "0"):
         return None
     return best
 
@@ -103,7 +97,7 @@ async def patch_semantic_in_file(path: str, query: str, replacement: str, *, pre
     # Try embedding-guided window
     loc = None
     try:
-        if _truthy("JINX_SEMANTIC_PATCH_ENABLE", "1") and query:
+        if truthy("JINX_SEMANTIC_PATCH_ENABLE", "1") and query:
             loc = await _best_hit_in_file(path, query, rep_lines, topk=k, margin=mg, tol=tl)
     except Exception:
         loc = None

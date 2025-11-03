@@ -12,7 +12,12 @@ from jinx.banner_service import show_banner
 import concurrent.futures as _cf
 from jinx.utils import chaos_patch
 from jinx.runtime import start_input_task, frame_shift as _frame_shift
-from jinx.embeddings import start_embeddings_task, start_project_embeddings_task
+from jinx.embeddings import (
+    start_embeddings_task,
+    start_project_embeddings_task,
+    stop_embeddings_task,
+    stop_project_embeddings_task,
+)
 import jinx.state as jx_state
 import contextlib
 from jinx.memory.optimizer import stop as stop_memory_optimizer, start_memory_optimizer_task
@@ -23,6 +28,8 @@ from jinx.priority import start_priority_dispatcher_task
 from jinx.autotune import start_autotune_task
 from jinx.watchdog import start_watchdog_task
 from jinx.micro.embeddings.retrieval_core import shutdown_proc_pool as _retr_pool_shutdown
+from jinx.micro.net.client import prewarm_openai_client as _prewarm_openai
+from jinx.micro.runtime.api import stop_selfstudy as _stop_selfstudy
 
 async def pulse_core(settings: Settings | None = None) -> None:
     """Run the main asynchronous processing loop.
@@ -46,6 +53,25 @@ async def pulse_core(settings: Settings | None = None) -> None:
             f"threads={cfg.runtime.threads_max_workers}, "
             f"queue={cfg.runtime.queue_maxsize}, rt={cfg.runtime.hard_rt_budget_ms}ms"
         )
+    except Exception:
+        pass
+    # Startup healthcheck to BLUE_WHISPERS
+    try:
+        import os as _os
+        from jinx.logger.file_logger import append_line as _append
+        from jinx.log_paths import BLUE_WHISPERS
+        ak_on = bool((_os.getenv("OPENAI_API_KEY") or _os.getenv("AZURE_OPENAI_API_KEY") or "").strip())
+        model = (_os.getenv("OPENAI_MODEL") or cfg.openai.model or "").strip() or "?"
+        proxy = (_os.getenv("PROXY") or _os.getenv("HTTPS_PROXY") or _os.getenv("HTTP_PROXY") or "").strip()
+        conc = (_os.getenv("JINX_FRAME_MAX_CONC") or "2").strip()
+        prio = ("on" if cfg.runtime.use_priority_queue else "off")
+        await _append(BLUE_WHISPERS, f"[health] api_key={'present' if ak_on else 'absent'} model={model} proxy={'set' if proxy else 'none'} conc={conc} prio={prio}")
+    except Exception:
+        pass
+
+    # Prewarm OpenAI client synchronously (safe outside event loop busy sections)
+    try:
+        _prewarm_openai()
     except Exception:
         pass
 
@@ -86,6 +112,11 @@ async def pulse_core(settings: Settings | None = None) -> None:
             with contextlib.suppress(Exception):
                 await stop_error_worker()
                 await stop_memory_optimizer()
+                # Ensure embeddings services are cancelled/awaited for clean shutdown
+                await stop_embeddings_task()
+                await stop_project_embeddings_task()
+                # Cancel/await self-study tasks started by ensure_runtime()
+                await _stop_selfstudy()
             # Ensure ProcessPoolExecutor is torn down to avoid atexit join hang
             with contextlib.suppress(Exception):
                 _retr_pool_shutdown()

@@ -11,6 +11,10 @@ from .util import sha256_text, now_ts
 from .text_clean import strip_known_tags, is_noise_text
 from .index_io import append_index
 from .embed_cache import embed_text_cached
+from .project_terms import extract_terms as _extract_terms
+from .fingerprint import simhash as _simhash
+from jinx.micro.text.heuristics import is_code_like as _is_code_like
+from jinx.micro.runtime.task_ctx import get_current_group as _get_group
 
 _RECENT_MAX = 200
 _recent: Deque[Dict[str, Any]] = deque(maxlen=_RECENT_MAX)
@@ -74,6 +78,28 @@ async def embed_text(text: str, *, source: str, kind: str = "text") -> Dict[str,
     except Exception:
         vec = []
 
+    # Enrich metadata with lightweight features
+    try:
+        terms = _extract_terms(text)[:24]
+    except Exception:
+        terms = []
+    try:
+        fp = _simhash(text)
+    except Exception:
+        fp = 0
+    try:
+        is_code = bool(_is_code_like(text))
+    except Exception:
+        is_code = False
+    # Prefer per-turn group id over env session
+    try:
+        _sess = (_get_group() or "").strip()
+        session = _sess or None
+    except Exception:
+        session = None
+    if session is None:
+        session = (os.getenv("JINX_SESSION", "").strip() or None)
+
     meta: Dict[str, Any] = {
         "ts": now_ts(),
         "model": model,
@@ -82,6 +108,10 @@ async def embed_text(text: str, *, source: str, kind: str = "text") -> Dict[str,
         "content_sha256": content_id,
         "dims": len(vec) if vec is not None else 0,
         "text_preview": text[:256],
+        "terms": terms,
+        "fingerprint": fp,
+        "is_code": is_code,
+        **({"session": session} if session else {}),
     }
 
     payload = {

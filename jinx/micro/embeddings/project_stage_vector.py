@@ -58,7 +58,7 @@ async def stage_vector_hits(query: str, k: int, *, max_time_ms: int | None = 250
 
         pairs = await asyncio.to_thread(_rank_candidates)
         scored: List[Tuple[float, str, Dict[str, Any]]] = []
-        for idx, s in pairs:
+        for ii, (idx, s) in enumerate(pairs):
             try:
                 file_rel_i, obj_i = items[idx]
             except Exception:
@@ -74,6 +74,9 @@ async def stage_vector_hits(query: str, k: int, *, max_time_ms: int | None = 250
                 # Respect overall budget roughly
                 if (time.perf_counter() - t0) * 1000.0 > max_time_ms:
                     break
+            if (ii % 64) == 63:
+                # Cooperative yield during long candidate loops
+                await asyncio.sleep(0)
         scored.sort(key=lambda x: x[0], reverse=True)
         return scored[:k]
     except Exception:
@@ -82,13 +85,17 @@ async def stage_vector_hits(query: str, k: int, *, max_time_ms: int | None = 250
         t0 = time.perf_counter()
         batch_vecs: List[List[float]] = []
         batch_meta: List[Tuple[str, Dict[str, Any]]] = []  # (file_rel, obj)
-        BATCH = 512
+        try:
+            BATCH = max(128, int(os.getenv("EMBED_PROJECT_COSINE_BATCH", "512")))
+        except Exception:
+            BATCH = 512
 
         async def _flush_batch() -> None:
             nonlocal batch_vecs, batch_meta, scored
             if not batch_vecs:
                 return
-            sims = score_cosine_batch(qv, batch_vecs)
+            # Offload cosine to a worker thread to keep event loop responsive
+            sims = await asyncio.to_thread(score_cosine_batch, qv, batch_vecs)
             for (file_rel_i, obj_i), s in zip(batch_meta, sims):
                 if s < PROJ_SCORE_THRESHOLD:
                     continue
@@ -110,6 +117,7 @@ async def stage_vector_hits(query: str, k: int, *, max_time_ms: int | None = 250
             batch_meta.append((file_rel, obj))
             if len(batch_vecs) >= BATCH:
                 await _flush_batch()
+                # Yield frequently to keep prompt responsive
                 await asyncio.sleep(0)
             if max_time_ms is not None and (time.perf_counter() - t0) * 1000.0 > max_time_ms:
                 break

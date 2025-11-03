@@ -79,7 +79,7 @@ class ProjectEmbeddingsService:
                         break
                 return out_local
             return await asyncio.to_thread(_pull, gen, 256)
-        while True:
+        while not jx_state.shutdown_event.is_set():
             batch = await _get_batch(it, 256)
             if not batch:
                 break
@@ -95,11 +95,18 @@ class ProjectEmbeddingsService:
                     except Exception:
                         pass
             await asyncio.sleep(0)
+            if jx_state.shutdown_event.is_set():
+                break
             if jx_state.throttle_event.is_set():
                 await asyncio.sleep(0.02)
         # Final drain
         if pending:
             for t in asyncio.as_completed(pending):
+                if jx_state.shutdown_event.is_set():
+                    for p in pending:
+                        p.cancel()
+                    await asyncio.gather(*pending, return_exceptions=True)
+                    break
                 try:
                     if await t:
                         mutated = True
@@ -127,7 +134,7 @@ class ProjectEmbeddingsService:
             # Event-driven loop
             try:
                 last_reconcile = time.time()
-                while True:
+                while not jx_state.shutdown_event.is_set():
                     # Batch events for a short period to coalesce bursts
                     await asyncio.sleep(0.15)
                     if jx_state.throttle_event.is_set():
@@ -192,7 +199,7 @@ class ProjectEmbeddingsService:
                             exclude_dirs=EXCLUDE_DIRS,
                             max_file_bytes=MAX_FILE_BYTES,
                         )
-                        while True:
+                        while not jx_state.shutdown_event.is_set():
                             batch2 = await asyncio.to_thread(lambda g, n: [next(g) for _ in range(n) if not hasattr(g, '__exhausted__')], it2, 128)
                             if not batch2:
                                 break
@@ -213,6 +220,11 @@ class ProjectEmbeddingsService:
                             await asyncio.sleep(0)
                         if recon_pending:
                             for t in asyncio.as_completed(recon_pending):
+                                if jx_state.shutdown_event.is_set():
+                                    for p in recon_pending:
+                                        p.cancel()
+                                    await asyncio.gather(*recon_pending, return_exceptions=True)
+                                    break
                                 try:
                                     if await t:
                                         mutated = True
@@ -229,7 +241,7 @@ class ProjectEmbeddingsService:
                     self._watch.stop()
         else:
             # Fallback to periodic scanning loop
-            while True:
+            while not jx_state.shutdown_event.is_set():
                 t0 = time.perf_counter()
                 mutated = False
                 scan_pending: set[asyncio.Task] = set()
@@ -249,7 +261,7 @@ class ProjectEmbeddingsService:
                                 break
                         return out
                     return await asyncio.to_thread(_pull_local, gen, 256)
-                while True:
+                while not jx_state.shutdown_event.is_set():
                     batch3 = await _pull_batch(it3, 256)
                     if not batch3:
                         break
@@ -272,6 +284,11 @@ class ProjectEmbeddingsService:
                         await asyncio.sleep(0.02)
                 if scan_pending:
                     for t in asyncio.as_completed(scan_pending):
+                        if jx_state.shutdown_event.is_set():
+                            for p in scan_pending:
+                                p.cancel()
+                            await asyncio.gather(*scan_pending, return_exceptions=True)
+                            break
                         try:
                             if await t:
                                 mutated = True
@@ -289,6 +306,23 @@ class ProjectEmbeddingsService:
                     await asyncio.sleep(0.02)
 
 
+_proj_task_ref: asyncio.Task | None = None
+
+
 def start_project_embeddings_task(root: str | None = None) -> asyncio.Task[None]:
+    global _proj_task_ref
     svc = ProjectEmbeddingsService(root=root)
-    return asyncio.create_task(svc.run(), name="project-embeddings-service")
+    _proj_task_ref = asyncio.create_task(svc.run(), name="project-embeddings-service")
+    return _proj_task_ref
+
+
+async def stop_project_embeddings_task() -> None:
+    global _proj_task_ref
+    t = _proj_task_ref
+    _proj_task_ref = None
+    if t is not None and not t.done():
+        t.cancel()
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass

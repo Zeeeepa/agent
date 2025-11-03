@@ -2,13 +2,13 @@ from __future__ import annotations
 
 from typing import Any, List, Dict
 
-from .api import spawn, list_programs
 from .patcher_program import AutoPatchProgram as _AutoPatchProgramNew
 from .patcher_submit import (
     submit_write_file as _submit_write_file,
     submit_line_patch as _submit_line_patch,
     submit_symbol_patch as _submit_symbol_patch,
     submit_anchor_insert_after as _submit_anchor_insert_after,
+    submit_regex_patch as _submit_regex_patch,
     submit_autopatch as _submit_autopatch,
     submit_autopatch_ex as _submit_autopatch_ex,
     submit_batch_patch as _submit_batch_patch,
@@ -31,7 +31,8 @@ async def spawn_patcher() -> str:
     """Spawn the AutoPatchProgram and return its id."""
     global _PATCHER_PID, _PATCHER_STARTED
     # Spawn the micro-module implementation of the patcher program
-    pid = await spawn(_AutoPatchProgramNew())
+    from .api import spawn as _spawn
+    pid = await _spawn(_AutoPatchProgramNew())
     _PATCHER_PID = pid
     _PATCHER_STARTED = True
     return pid
@@ -49,7 +50,8 @@ async def ensure_patcher_running() -> str | None:
             # quick path
             return _PATCHER_PID
         # Validate cache against live registry
-        pids = await list_programs()
+        from .api import list_programs as _list_programs
+        pids = await _list_programs()
         if _PATCHER_PID and (_PATCHER_PID in (pids or [])):
             _PATCHER_STARTED = True
             return _PATCHER_PID
@@ -78,6 +80,11 @@ async def submit_symbol_patch(path: str, symbol: str, replacement: str) -> str:
 async def submit_anchor_insert_after(path: str, anchor: str, replacement: str) -> str:
     """Submit an anchor-based insert-after patch task."""
     return await _submit_anchor_insert_after(path, anchor, replacement)
+
+
+async def submit_regex_patch(path: str, pattern: str, replacement: str, *, flags: str | None = None) -> str:
+    """Submit a regex-based patch task (search/replace) with optional flags string (i,m,s,x)."""
+    return await _submit_regex_patch(path, pattern, replacement, flags=flags)
 
 
 async def submit_autopatch(*, path: str | None = None, code: str | None = None, line_start: int | None = None, line_end: int | None = None, symbol: str | None = None, anchor: str | None = None) -> str:

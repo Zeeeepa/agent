@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from typing import List
+import re
 from jinx.micro.text.heuristics import is_code_like as _is_code_like
 
 
@@ -59,4 +60,43 @@ async def auto_context_lines(input_text: str) -> List[str]:
     return lines
 
 
-__all__ = ["auto_context_lines"]
+async def auto_code_lines(input_text: str) -> List[str]:
+    """Return code intelligence macro lines (usage/def) inferred from input.
+
+    Gate with JINX_AUTOMACRO_CODE (default ON). Extract the most salient token
+    from code-like input or from the first callable pattern in text.
+    """
+    try:
+        on = str(os.getenv("JINX_AUTOMACRO_CODE", "1")).lower() not in ("", "0", "false", "off", "no")
+    except Exception:
+        on = True
+    if not on:
+        return []
+    txt = (input_text or "").strip()
+    token = ""
+    # Prefer last identifier before '(' in a simple assignment/call line
+    # e.g., "tk = brain_topk(default_topk)" -> brain_topk
+    m = re.search(r"([A-Za-z_][A-Za-z0-9_]*)\s*\(", txt)
+    if m:
+        token = m.group(1)
+    # fallback: longest identifier-like word
+    if not token:
+        ids = re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\b", txt)
+        ids = sorted(ids, key=len, reverse=True)
+        if ids:
+            token = ids[0]
+    if not token or len(token) < 3:
+        return []
+    try:
+        topk = max(1, int(os.getenv("JINX_MACRO_CODE_TOPK", "8")))
+    except Exception:
+        topk = 8
+    # Build usage + def lines; def is small by default
+    lines = [
+        f"Code usage: {{{{m:code:usage:{token}:{topk}}}}}",
+        f"Code def: {{{{m:code:def:{token}:3}}}}",
+    ]
+    return lines
+
+
+__all__ = ["auto_context_lines", "auto_code_lines"]

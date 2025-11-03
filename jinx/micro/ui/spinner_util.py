@@ -43,10 +43,28 @@ def format_activity_detail(det: Dict[str, Any] | None) -> Tuple[str, Optional[st
     stage = None
     tasks = None
     max_keys = _max_detail_keys()
-    for i, (k, v) in enumerate(det.items()):
+    i = 0
+    for k, v in det.items():
         if i >= max_keys:
             break
+        # Special handling for nested repair detail
+        if k == "repair" and isinstance(v, dict):
+            phase = str(v.get("phase") or "").strip()
+            mods = v.get("mods")
+            mods_count = len(mods) if isinstance(mods, (list, tuple, set)) else (int(mods) if isinstance(mods, int) else None)
+            parts = []
+            if phase:
+                parts.append(f"phase={phase}")
+                stage = f"repair:{phase}"
+            if mods_count:
+                parts.append(f"mods={mods_count}")
+            if parts:
+                items.append("repair{" + ",".join(parts) + "}")
+                i += 1
+            continue
+        # Default formatting
         items.append(f"{k}:{v}")
+        i += 1
         if k == "retr_stage":
             stage = v
         if k == "tasks":

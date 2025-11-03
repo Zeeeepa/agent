@@ -9,6 +9,7 @@ import functools
 from concurrent.futures import ProcessPoolExecutor
 import atexit
 import asyncio as _aio
+import platform as _plat
 
 # TTL caches for retrieval results
 _PRJ_CACHE: Dict[str, Tuple[int, List[Tuple[float, str, Dict[str, Any]]]]] = {}
@@ -68,17 +69,24 @@ from .project_query_core import extract_code_core
 from jinx.micro.text.heuristics import is_code_like as _is_code_like
 from .rerankers.cross_encoder import cross_encoder_rerank as _ce_rerank
 from jinx.micro.brain.attention import get_attention_weights as _atten_get
+from jinx.micro.embeddings.symbol_index import query_symbol_index as _sym_query
+from jinx.micro.embeddings.project_config import resolve_project_root as _resolve_root
 
 # Optional process pool for CPU-bound stages
 try:
     _RAW_PROCPOOL = os.getenv("JINX_RETR_PROCPOOL", None)
     if _RAW_PROCPOOL is None:
-        # Auto: enable if machine has >=4 CPUs
-        _USE_PROCPOOL = (int(os.cpu_count() or 1) >= 4)
+        # Auto: enable if machine has >=4 CPUs, but disable by default on Windows to avoid KeyboardInterrupt hang
+        _USE_PROCPOOL = (int(os.cpu_count() or 1) >= 4) and (_plat.system() != "Windows")
     else:
-        _USE_PROCPOOL = _RAW_PROCPOOL.strip().lower() not in ("", "0", "false", "off", "no")
+        val = _RAW_PROCPOOL.strip().lower()
+        if _plat.system() == "Windows":
+            # On Windows, require explicit 'force' to enable the process pool
+            _USE_PROCPOOL = (val == "force")
+        else:
+            _USE_PROCPOOL = val not in ("", "0", "false", "off", "no")
 except Exception:
-    _USE_PROCPOOL = (int(os.cpu_count() or 1) >= 4)
+    _USE_PROCPOOL = (int(os.cpu_count() or 1) >= 4) and (_plat.system() != "Windows")
 try:
     _RAW_WORKERS = os.getenv("JINX_RETR_PROCPOOL_WORKERS", None)
     if _RAW_WORKERS is None or (str(_RAW_WORKERS).strip() == ""):
@@ -237,6 +245,109 @@ async def retrieve_project_top_k(query: str, k: int | None = None, *, max_time_m
 
     _ATT_MUL = _atten_mult()
 
+    def _query_terms(s: str) -> List[str]:
+        try:
+            return [m.group(0).lower() for m in re.finditer(r"(?u)[A-Za-z0-9_]{3,}", s or "")][:32]
+        except Exception:
+            return []
+
+    def _apply_filename_boost(hits: List[Tuple[float, str, Dict[str, Any]]]) -> List[Tuple[float, str, Dict[str, Any]]]:
+        if not hits:
+            return hits
+        terms = set(_query_terms(q_core or q))
+        if not terms:
+            return hits
+        boosted: List[Tuple[float, str, Dict[str, Any]]] = []
+        for sc, rel, obj in hits:
+            try:
+                file_rel = str((obj.get("meta", {}).get("file_rel") or rel or "")).lower()
+            except Exception:
+                file_rel = str(rel or "").lower()
+            # Tokenize filename stem and path parts
+            parts = re.findall(r"[A-Za-z0-9_]+", file_rel)
+            overlap = len(terms.intersection(parts))
+            if overlap > 0:
+                # Small multiplicative boost, capped
+                mult = 1.0 + min(overlap, 3) * 0.03
+                sc = float(sc or 0.0) * mult
+            boosted.append((sc, rel, obj))
+        boosted.sort(key=lambda h: float(h[0] or 0.0), reverse=True)
+        return boosted
+
+    async def _symbol_hits(qid: str, k_arg: int) -> List[Tuple[float, str, Dict[str, Any]]]:
+        """Lightweight symbol-index hits for identifier-like queries.
+
+        Returns list of (score, rel, obj) prioritizing defs, then calls. Uses a small
+        per-query budget based on remaining time. Preview is read from file with a tiny slice.
+        """
+        if not qid or not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", qid):
+            return []
+        rem_ms = _time_left()
+        if rem_ms is not None and rem_ms < 40:
+            return []
+        try:
+            idx = await _sym_query(qid)
+        except Exception:
+            return []
+        defs = list(idx.get("defs") or [])  # (rel, line)
+        calls = list(idx.get("calls") or [])
+        root = _resolve_root()
+        out: List[Tuple[float, str, Dict[str, Any]]] = []
+        # Helper to add a hit with tiny preview budget (expand to enclosing def/class when possible)
+        async def _add(rel: str, line: int, score: float) -> None:
+            ap = os.path.join(root, rel)
+            pv = ""
+            try:
+                # Read just nearby lines for preview (best-effort)
+                def _pv() -> str:
+                    try:
+                        with open(ap, "r", encoding="utf-8", errors="ignore") as f:
+                            lines = f.readlines()
+                        i = max(1, int(line) - 1)
+                        # Try to find enclosing def/class header above
+                        start = i
+                        try:
+                            j = i
+                            while j > 0:
+                                s = (lines[j-1] or "").lstrip()
+                                if s.startswith("def ") or s.startswith("class "):
+                                    start = j-1
+                                    break
+                                # Stop scanning far above
+                                if i - j > 60:
+                                    break
+                                j -= 1
+                        except Exception:
+                            start = i
+                        lo = max(0, start)
+                        hi = min(len(lines), start + 12)
+                        return ("".join(lines[lo:hi])).strip()[:300]
+                    except Exception:
+                        return ""
+                pv = await asyncio.to_thread(_pv)
+            except Exception:
+                pv = ""
+            meta = {
+                "file_rel": rel,
+                "line_start": int(line),
+                "line_end": int(line),
+                "text_preview": pv,
+                "source": "project",
+            }
+            out.append((float(score), rel, {"meta": meta, "embedding": []}))
+        # Add defs first
+        for rel, ln in defs[: max(1, k_arg)]:
+            await _add(str(rel), int(ln), 0.95)
+            if len(out) >= k_arg:
+                break
+        # Then calls
+        if len(out) < k_arg:
+            for rel, ln in calls[: max(1, k_arg - len(out))]:
+                await _add(str(rel), int(ln), 0.78)
+                if len(out) >= k_arg:
+                    break
+        return out[:k_arg]
+
     async def _maybe_ce_rerank(hits: List[Tuple[float, str, Dict[str, Any]]]) -> List[Tuple[float, str, Dict[str, Any]]]:
         """Optionally apply cross-encoder reranking to top-N hits and combine scores.
 
@@ -332,6 +443,14 @@ async def retrieve_project_top_k(query: str, k: int | None = None, *, max_time_m
 
     # Early precise stages: run concurrently when accumulating (exhaustive mode)
     if accumulate:
+        # Optional symbol-index stage (early)
+        try:
+            sym_hits0 = await _symbol_hits(q_core, k_eff)
+        except Exception:
+            sym_hits0 = []
+        if sym_hits0:
+            _merge(sym_hits0)
+            await asyncio.sleep(0)
         codey_early = _is_code_like(q or "")
         cap_lineexact = _bounded(_time_left(), int(PROJ_STAGE_LINEEXACT_MS * (1.5 if codey_early else 1.0) * _ATT_MUL)) or PROJ_STAGE_LINEEXACT_MS
         cap_literal = _bounded(_time_left(), int(PROJ_STAGE_LITERAL_MS * (1.5 if codey_early else 1.0) * _ATT_MUL)) or PROJ_STAGE_LITERAL_MS
@@ -352,6 +471,13 @@ async def retrieve_project_top_k(query: str, k: int | None = None, *, max_time_m
         await asyncio.sleep(0)
     else:
         # Sequential short-circuit path when not accumulating
+        # Optional symbol-index short-circuit
+        try:
+            sym1 = await _symbol_hits(q_core, 1)
+        except Exception:
+            sym1 = []
+        if sym1:
+            return sym1[:1]
         tm_hits = await _run_sync_stage(stage_tokenmatch_hits, q_core, 1, int(PROJ_STAGE_TOKENMATCH_MS * _ATT_MUL))
         if tm_hits:
             return tm_hits[:1]
@@ -501,6 +627,8 @@ async def retrieve_project_top_k(query: str, k: int | None = None, *, max_time_m
 
         # Return deduped, score-sorted
         out_hits = sorted(collected, key=lambda h: float(h[0] or 0.0), reverse=True)[:k_eff]
+        # Filename/identifier small boosts
+        out_hits = _apply_filename_boost(out_hits)
         # Optional cross-encoder reranking of the final shortlist
         try:
             out_hits = await _maybe_ce_rerank(out_hits)
@@ -636,6 +764,8 @@ async def retrieve_project_top_k(query: str, k: int | None = None, *, max_time_m
             pass
         kw = (await _run_sync_stage(stage_keyword_hits, q, k_eff, int(PROJ_STAGE_KEYWORD_MS * _ATT_MUL))) or []
         out_hits = kw[:k_eff]
+        # Filename/identifier boosts
+        out_hits = _apply_filename_boost(out_hits)
         # Final literal pass
         if not out_hits:
             lit_hits = await _run_sync_stage(stage_literal_hits, (q_core or q), k_eff, int(PROJ_STAGE_LITERAL_MS * _ATT_MUL))

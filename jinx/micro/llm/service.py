@@ -12,7 +12,6 @@ from .macro_registry import MacroContext, expand_dynamic_macros
 from .macro_providers import register_builtin_macros
 from .macro_plugins import load_macro_plugins
 from jinx.micro.conversation.cont import load_last_anchors
-from jinx.micro.runtime.api import list_programs
 import platform
 import sys
 import datetime as _dt
@@ -22,12 +21,14 @@ import asyncio as _asyncio
 from jinx.micro.rt.timing import timing_section
 from jinx.micro.embeddings.unified_context import build_unified_context_for
 from jinx.micro.embeddings.context_compact import compact_context
-from jinx.micro.llm.enrichers import auto_context_lines
+from jinx.micro.llm.enrichers import auto_context_lines, auto_code_lines
 from jinx.micro.llm.enrichers.exports import (
     patch_exports_lines as _patch_exports_lines,
     verify_exports_lines as _verify_exports_lines,
     run_exports_lines as _run_exports_lines,
 )
+from jinx.micro.memory.turn_summaries import read_group_summary as _read_group_summary
+from jinx.micro.runtime.task_ctx import get_current_group as _get_group
 
 
 async def code_primer(prompt_override: str | None = None) -> tuple[str, str]:
@@ -57,6 +58,18 @@ async def _prepare_request(txt: str, *, prompt_override: str | None = None) -> t
     try:
         jx = await compose_dynamic_prompt(jx, key=tag)
         await _yield0()
+        # Inject compact per-group rolling summary (if any)
+        try:
+            gid = _get_group()
+        except Exception:
+            gid = "main"
+        try:
+            gctx = await _read_group_summary(gid, max_chars=1200)
+        except Exception:
+            gctx = ""
+        if gctx:
+            jx = jx + "\n" + gctx + "\n"
+        await _yield0()
         # Unified embeddings context (code+brain+refs+graph+memory)
         try:
             _ctx = await build_unified_context_for(txt or "", max_chars=None, max_time_ms=300)
@@ -80,6 +93,15 @@ async def _prepare_request(txt: str, *, prompt_override: str | None = None) -> t
             lines = await auto_context_lines(txt)
             if lines:
                 jx = jx + "\n" + "\n".join(lines) + "\n"
+        # Auto-inject code intelligence lines (usage/def) to help answer "where is this used?"
+        try:
+            code_auto_on = str(os.getenv("JINX_AUTOMACRO_CODE", "1")).lower() not in ("", "0", "false", "off", "no")
+        except Exception:
+            code_auto_on = True
+        if code_auto_on:
+            clines = await auto_code_lines(txt)
+            if clines:
+                jx = jx + "\n" + "\n".join(clines) + "\n"
         await _yield0()
         # Optionally include recent patch previews/commits from runtime exports
         try:
@@ -116,7 +138,8 @@ async def _prepare_request(txt: str, *, prompt_override: str | None = None) -> t
         except Exception:
             anc = {}
         try:
-            progs = await list_programs()
+            from jinx.micro.runtime.api import list_programs as _list_programs
+            progs = await _list_programs()
         except Exception:
             progs = []
         await _yield0()
@@ -164,7 +187,7 @@ async def _prepare_request(txt: str, *, prompt_override: str | None = None) -> t
             pass
     except Exception:
         pass
-    model = os.getenv("OPENAI_MODEL", "gpt-5")
+    model = os.getenv("OPENAI_MODEL", "gpt-4.1")
     # Sanitize prompts to avoid leaking internal .jinx paths/content
     sx = sanitize_prompt_for_external_api(jx)
     stxt = sanitize_prompt_for_external_api(txt or "")
@@ -197,6 +220,13 @@ async def spark_openai(txt: str, *, prompt_override: str | None = None) -> tuple
             # Fallback to legacy single-sample on error
             async with timing_section("llm.call_legacy"):
                 out = await call_openai(sx, model, stxt)
+        # If still empty (e.g., provider forbidden region soft-path), fallback to legacy path
+        if not (out or "").strip():
+            try:
+                async with timing_section("llm.call_empty_fallback"):
+                    out = await call_openai(sx, model, stxt)
+            except Exception:
+                out = out or ""
         # Get dump path (await, then append in background)
         try:
             req_path = await dump_task
@@ -236,6 +266,19 @@ async def spark_openai_streaming(txt: str, *, prompt_override: str | None = None
         except Exception:
             async with timing_section("llm.call_fallback"):
                 out = await call_openai_validated(sx, model, stxt, code_id=tag)
+        # Empty output guard: fallback to validated, then legacy single-sample as last resort
+        if not (out or "").strip():
+            try:
+                async with timing_section("llm.stream_empty_fallback_validated"):
+                    out = await call_openai_validated(sx, model, stxt, code_id=tag)
+            except Exception:
+                pass
+            if not (out or "").strip():
+                try:
+                    async with timing_section("llm.stream_empty_fallback_legacy"):
+                        out = await call_openai(sx, model, stxt)
+                except Exception:
+                    out = out or ""
         try:
             req_path = await dump_task
         except Exception:

@@ -5,13 +5,7 @@ import asyncio
 from typing import Optional
 
 from jinx.async_utils.fs import read_text_raw
-
-
-def _truthy(name: str, default: str = "1") -> bool:
-    try:
-        return str(os.getenv(name, default)).lower() not in ("", "0", "false", "off", "no")
-    except Exception:
-        return True
+from jinx.micro.common.env import truthy
 
 
 async def _get_size_bytes(path: str) -> int:

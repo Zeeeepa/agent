@@ -25,6 +25,23 @@ class EmbeddingsService:
         await start_realtime_collection(self._cb)
 
 
+_task_ref: Optional[asyncio.Task] = None
+
+
 def start_embeddings_task() -> asyncio.Task[None]:
+    global _task_ref
     svc = EmbeddingsService()
-    return asyncio.create_task(svc.run(), name="embeddings-service")
+    _task_ref = asyncio.create_task(svc.run(), name="embeddings-service")
+    return _task_ref
+
+
+async def stop_embeddings_task() -> None:
+    global _task_ref
+    t = _task_ref
+    _task_ref = None
+    if t is not None and not t.done():
+        t.cancel()
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass

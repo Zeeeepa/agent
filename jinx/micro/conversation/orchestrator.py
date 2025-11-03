@@ -45,6 +45,7 @@ from jinx.micro.conversation.cont import (
     detect_topic_shift as _topic_shift,
     maybe_compact_state_frames as _compact_frames,
 )
+from jinx.micro.memory.turn_summaries import append_group_summary as _append_group_summary
 from jinx.micro.conversation.cont.classify import find_semantic_question as _find_semq
 from jinx.micro.conversation.state_frame import build_state_frame
 from jinx.micro.memory.router import assemble_memroute as _memroute
@@ -67,7 +68,15 @@ from jinx.micro.conversation.memory_program import infer_memory_program as _mem_
 from jinx.micro.embeddings.context_compact import compact_context as _compact_ctx
 from jinx.micro.memory.telemetry import log_metric as _log_metric
 from jinx.micro.rt.coop import coop as _coop
-from jinx.micro.rt.activity import set_activity as _act, clear_activity as _act_clear
+from jinx.micro.rt.activity import set_activity as _act, clear_activity as _act_clear, set_activity_detail as _actdet, clear_activity_detail as _actdet_clear
+from jinx.micro.rt.rt_budget import run_bounded as _bounded_run, env_ms as _env_ms
+from jinx.micro.conversation.phases import (
+    call_llm as _phase_llm,
+    execute_blocks as _phase_exec,
+    build_runtime_base_ctx as _phase_base_ctx,
+    build_runtime_mem_ctx as _phase_mem_ctx,
+    build_project_context_enriched as _phase_proj_ctx,
+)
 
 
 async def shatter(x: str, err: Optional[str] = None) -> None:
@@ -142,12 +151,12 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
                 eff_q = q_raw
             # Launch runtime context retrieval concurrently with project context assembly
             _act("retrieving runtime context")
-            base_ctx_task = asyncio.create_task(build_context_for(eff_q))
+            base_ctx_task = asyncio.create_task(_phase_base_ctx(eff_q))
             # Optional: embeddings-backed memory context (no evergreen), env-gated (default OFF for API)
             mem_ctx_task = None
             try:
                 if str(os.getenv("JINX_EMBED_MEMORY_CTX", "0")).lower() not in ("", "0", "false", "off", "no"):
-                    mem_ctx_task = asyncio.create_task(_build_mem_ctx(eff_q))
+                    mem_ctx_task = asyncio.create_task(_phase_mem_ctx(eff_q))
             except Exception:
                 mem_ctx_task = None
             await _coop()
@@ -159,23 +168,26 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
             _q = eff_q
             # Delegate enrichment/build to the dedicated micro-module (deduplicated logic)
             _act("assembling project context")
-            proj_ctx_task: asyncio.Task[str] = asyncio.create_task(_build_proj_ctx_enriched(_q, user_text=x or "", synth=synth or ""))
-            # Await both contexts; runtime may already be done, otherwise this overlaps work
+            proj_ctx_task: asyncio.Task[str] = asyncio.create_task(_phase_proj_ctx(_q, user_text=x or "", synth=synth or ""))
+            # Await both contexts with strict RT budgets (disable by setting env to 0)
             try:
-                base_ctx = await base_ctx_task
+                _actdet({"stage": "base_ctx", "rem_ms": _env_ms("JINX_STAGE_BASECTX_MS", 220)})
             except Exception:
-                base_ctx = ""
-            # Await memory context if launched (used internally only; not sent to API)
+                pass
+            base_ctx = await base_ctx_task
+            # Await memory context if launched (internal only)
             mem_ctx = ""
+            if 'mem_ctx_task' in locals() and mem_ctx_task is not None:
+                try:
+                    _actdet({"stage": "mem_ctx", "rem_ms": _env_ms("JINX_STAGE_MEMCTX_MS", 160)})
+                except Exception:
+                    pass
+                mem_ctx = await mem_ctx_task
             try:
-                if 'mem_ctx_task' in locals() and mem_ctx_task is not None:
-                    mem_ctx = await mem_ctx_task
+                _actdet({"stage": "proj_ctx", "rem_ms": _env_ms("JINX_STAGE_PROJCTX_MS", 260)})
             except Exception:
-                mem_ctx = ""
-            try:
-                proj_ctx = await proj_ctx_task
-            except Exception:
-                proj_ctx = ""
+                pass
+            proj_ctx = await proj_ctx_task
             await _coop()
             # _build_proj_ctx_enriched already implements its own fallback
             # Continuity: if still empty and this is a short clarification, reuse last cached project context
@@ -205,7 +217,7 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
         # If runtime retrieval wasn't launched (fallback path), ensure base_ctx exists
         if 'base_ctx' not in locals():
             try:
-                base_ctx = await build_context_for(eff_q)
+                base_ctx = await _phase_base_ctx(eff_q)
             except Exception:
                 base_ctx = ""
         if 'mem_ctx' not in locals():
@@ -609,10 +621,7 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
                 pass
 
         _act("calling LLM")
-        if stream_on:
-            out, code_id = await _spark_llm_stream(chains, prompt_override=prompt_override, on_first_block=_early_exec)
-        else:
-            out, code_id = await _spark_llm(chains, prompt_override=prompt_override)
+        out, code_id = await _phase_llm(chains, prompt_override=prompt_override, stream_on=stream_on, on_first_block=_early_exec)
         await _coop()
         _act("normalizing model output")
         # Normalize model output to ensure exactly one <python_{code_id}> block and proper fences
@@ -647,7 +656,7 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
 
         # If early executed successfully, treat as executed to prevent duplicate run/print
         _act("executing code blocks")
-        executed = True if executed_early else await run_blocks(out, code_id, on_exec_error)
+        executed = True if executed_early else await _phase_exec(out, code_id, on_exec_error)
         if not executed:
             await bomb_log(f"No executable <python_{code_id}> block found in model output; displaying raw output.")
             # Already printed above
@@ -677,6 +686,18 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
                 await _append_turn((x or ""), (out or ""))
             except Exception:
                 pass
+            # Update rolling group summary with a text-only agent line
+            try:
+                await _append_group_summary((x or ""), qtext or "")
+            except Exception:
+                pass
+            # Ingest compact memory signal for this turn (group-affine via ContextVar)
+            try:
+                if qtext:
+                    import asyncio as _aio
+                    _aio.create_task(embed_text(qtext, source="state", kind="mem"))
+            except Exception:
+                pass
         else:
             # After successful execution, also surface the latest sandbox log context (avoid duplicate if already printed early)
             if not printed_tail_early:
@@ -688,7 +709,37 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
                 pass
             # Append turn to file-based memory (best-effort)
             try:
-                await _append_turn((x or ""), (out or ""))
+                # Do not persist a literal '<no_response>' as the user line
+                ux = (x or "").strip()
+                await _append_turn((ux if ux != "<no_response>" else ""), (out or ""))
+            except Exception:
+                pass
+            # Update rolling group summary using the full model output (textual)
+            try:
+                await _append_group_summary((x or ""), (out or ""))
+            except Exception:
+                pass
+            # Ingest compact memory signal for this executed turn
+            try:
+                if out:
+                    import asyncio as _aio
+                    # Prefer a trimmed version if too long
+                    _aio.create_task(embed_text((out or "")[:512], source="state", kind="mem"))
+            except Exception:
+                pass
+            # Mark last agent reply time (use loop.time to match input watchdog clock)
+            try:
+                import asyncio as _aio
+                import jinx.state as _jx_state
+                _jx_state.last_agent_reply_ts = float(_aio.get_running_loop().time())
+            except Exception:
+                pass
+        # Non-executed branch: mark last agent reply as well to honor TIMEOUT logic
+        if not executed:
+            try:
+                import asyncio as _aio
+                import jinx.state as _jx_state
+                _jx_state.last_agent_reply_ts = float(_aio.get_running_loop().time())
             except Exception:
                 pass
     except Exception:
@@ -696,8 +747,14 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
         await dec_pulse(50)
     finally:
         _act_clear()
-        # Run memory optimization after each model interaction using a per-turn snapshot
-        snap = await glitch_pulse()
-        # Late import avoids circular import during startup
-        from jinx.micro.memory.optimizer import submit as _opt_submit
-        await _opt_submit(snap)
+        # Run memory optimization after each model interaction using a per-turn snapshot (bounded, skip on shutdown)
+        try:
+            import jinx.state as _jx_state
+            if not _jx_state.shutdown_event.is_set():
+                snap = await glitch_pulse()
+                from jinx.micro.memory.optimizer import submit as _opt_submit
+                _ = await _bounded_run(_opt_submit(snap), _env_ms("JINX_STAGE_MEMOPT_MS", 800))
+        except Exception:
+            pass
+
+

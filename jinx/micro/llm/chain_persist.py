@@ -128,12 +128,17 @@ async def persist_memory(mem_text: str, evergreen_text: str, *, user_text: str =
         mem_raw = _strip_wrapped("memory", mem_text)
         evg_raw = _strip_wrapped("evergreen", evergreen_text)
 
+        # Skip persisting pure inactivity events to avoid memory spam
+        if (user_text or "").strip() == "<no_response>" and not mem_raw and not evg_raw:
+            return
+
         lines = []
         lines.append("---")
         lines.append(f"ts_ms: {ts_ms}")
         if plan_goal:
             lines.append(f"goal: {plan_goal}")
-        if user_text:
+        # Avoid recording '<no_response>' as user text in memory snapshots
+        if user_text and (user_text.strip() != "<no_response>"):
             lines.append(f"user: |\n  {user_text}")
         if mem_raw:
             lines.append("memory: |")

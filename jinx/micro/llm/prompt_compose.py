@@ -9,7 +9,6 @@ from typing import List
 import asyncio
 
 from jinx.micro.conversation.cont import load_last_anchors
-from jinx.micro.runtime.api import list_programs
 from jinx.micro.runtime.exports import collect_export, get_program_export
 
 _VAR_RE = re.compile(r"\{\{var:([a-zA-Z0-9_]+)\}\}")
@@ -114,7 +113,8 @@ async def compose_dynamic_prompt(text: str, *, key: str) -> str:
         if not has_prog:
             return s
         try:
-            pids = await list_programs()
+            from jinx.micro.runtime.api import list_programs as _list_programs
+            pids = await _list_programs()
         except Exception:
             pids = []
         def _run_sub(m: re.Match) -> str:

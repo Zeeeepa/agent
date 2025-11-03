@@ -15,6 +15,7 @@ from .refactor_utils import (
     _import_insertion_index,
 )
 from .refactor_imports import scan_and_rewrite_imports
+from jinx.micro.common.log import log_info, log_error
 
 
 VerifyCB = Callable[[str | None, List[str], str], Awaitable[None]]
@@ -136,9 +137,22 @@ async def handle_refactor_move_symbol(
         ci = create_init if create_init is not None else _truthy("JINX_REFACTOR_CREATE_INIT", "1")
         sh = insert_shim if insert_shim is not None else _truthy("JINX_REFACTOR_INSERT_SHIM", "1")
         ops, _ = await _build_move_plan(src_path, symbol, dst_path, create_init=ci, insert_shim=sh)
+        try:
+            log_info("refactor.move.preview.ok", src=src_path, dst=dst_path, symbol=symbol, ops=len(ops))
+        except Exception:
+            pass
         await report_progress(tid, 22.0, "preview refactor (batch)")
         # Delegate to batch handler (with force to reduce gating friction)
         f = bool(force) if force is not None else _truthy("JINX_REFACTOR_FORCE", "1")
         await _h_batch(tid, ops, f, verify_cb=verify_cb, exports=exports)
     except Exception as e:
+        try:
+            from jinx.micro.common.repair_utils import maybe_schedule_repairs_from_error as _rep
+            await _rep(e)
+        except Exception:
+            pass
+        try:
+            log_error("refactor.move.error", src=src_path, dst=dst_path, symbol=symbol, msg=str(e))
+        except Exception:
+            pass
         await report_result(tid, False, error=f"refactor move failed: {e}")

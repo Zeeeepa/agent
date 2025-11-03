@@ -61,42 +61,50 @@ async def pretty_echo_async(text: str, title: str = "Jinx") -> None:
         await asyncio.to_thread(pretty_echo, text, title)
         return
 
-    width = shutil.get_terminal_size((80, 24)).columns
-    width = max(50, min(width, 120))
-    inner_w = width - 2
+    # Global async print lock to serialize output across concurrent turns
+    global _PRINT_LOCK
+    try:
+        _PRINT_LOCK
+    except NameError:
+        _PRINT_LOCK = asyncio.Lock()  # type: ignore[var-annotated]
 
-    title_str = f" {title} " if title else ""
-    title_len = len(title_str)
-    if title_len and title_len + 2 < inner_w:
-        top = "+-" + title_str + ("-" * (inner_w - title_len - 2)) + "+"
-    else:
-        top = "+" + ("-" * inner_w) + "+"
-    bot = "+" + ("-" * inner_w) + "+"
+    async with _PRINT_LOCK:
+        width = shutil.get_terminal_size((80, 24)).columns
+        width = max(50, min(width, 120))
+        inner_w = width - 2
 
-    ft = FormattedText
-    with patch_stdout(raw=True):
-        print_formatted_text(ft([("", top)]))
-        if not text:
-            print_formatted_text(ft([("", f"|{' ' * inner_w}|")]))
+        title_str = f" {title} " if title else ""
+        title_len = len(title_str)
+        if title_len and title_len + 2 < inner_w:
+            top = "+-" + title_str + ("-" * (inner_w - title_len - 2)) + "+"
         else:
-            count = 0
-            for ln in text.splitlines():
-                wrapped = (
-                    textwrap.wrap(
-                        ln,
-                        width=inner_w,
-                        break_long_words=False,
-                        break_on_hyphens=False,
-                        replace_whitespace=False,
+            top = "+" + ("-" * inner_w) + "+"
+        bot = "+" + ("-" * inner_w) + "+"
+
+        ft = FormattedText
+        with patch_stdout(raw=True):
+            print_formatted_text(ft([("", top)]))
+            if not text:
+                print_formatted_text(ft([("", f"|{' ' * inner_w}|")]))
+            else:
+                count = 0
+                for ln in text.splitlines():
+                    wrapped = (
+                        textwrap.wrap(
+                            ln,
+                            width=inner_w,
+                            break_long_words=False,
+                            break_on_hyphens=False,
+                            replace_whitespace=False,
+                        )
+                        if ln.strip() != ""
+                        else [""]
                     )
-                    if ln.strip() != ""
-                    else [""]
-                )
-                for chunk in wrapped:
-                    pad = inner_w - len(chunk)
-                    print_formatted_text(ft([("", f"|{chunk}{' ' * pad}|")]))
-                    count += 1
-                    if (count % 20) == 0:
-                        # yield every 20 lines
-                        await asyncio.sleep(0)
-        print_formatted_text(ft([("", bot + "\n")]))
+                    for chunk in wrapped:
+                        pad = inner_w - len(chunk)
+                        print_formatted_text(ft([("", f"|{chunk}{' ' * pad}|")]))
+                        count += 1
+                        if (count % 20) == 0:
+                            # yield every 20 lines
+                            await asyncio.sleep(0)
+            print_formatted_text(ft([("", bot + "\n")]))

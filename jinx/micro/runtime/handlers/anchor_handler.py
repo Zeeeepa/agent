@@ -8,6 +8,8 @@ from jinx.micro.runtime.patch import (
     should_autocommit as _should_autocommit,
 )
 from jinx.micro.runtime.watchdog import maybe_warn_filesize
+from jinx.async_utils.fs import read_text_raw
+from jinx.micro.core.edit_core import finalize_commit
 
 VerifyCB = Callable[[str | None, List[str], str], Awaitable[None]]
 
@@ -27,15 +29,20 @@ async def handle_anchor_patch(tid: str, path: str, anchor: str, replacement: str
             await report_result(tid, False, error=f"needs_confirmation: {reason}", result={"path": path, "anchor": anchor, "diff": diff})
             return
         await report_progress(tid, 55.0, f"commit anchor '{anchor}' in {path}")
+        # snapshot for transactional revert
+        try:
+            cur_before = await read_text_raw(path)
+        except Exception:
+            cur_before = ""
         ok_commit, diff2 = await _patch_anchor(path, anchor, replacement, preview=False)
         if ok_commit:
-            warn = await maybe_warn_filesize(path)
             exports["last_patch_commit"] = diff2 or ""
             exports["last_patch_strategy"] = "anchor"
-            if warn:
-                exports["last_watchdog_warn"] = warn
-            await report_result(tid, True, {"path": path, "anchor": anchor, "diff": diff2, **({"watchdog": warn} if warn else {})})
-            await verify_cb(goal=None, files=[path], diff=diff2)
+            core = await finalize_commit([path], diff2 or "", snapshots={path: cur_before or ""}, strategy="anchor")
+            if not core.ok:
+                await report_result(tid, False, error=(core.errors[0] if core.errors else "validation failed"), result={"path": path, "reverted": True})
+                return
+            await report_result(tid, True, {"path": path, "anchor": anchor, "diff": diff2, **({"watchdog": core.warnings} if core.warnings else {})})
         else:
             await report_result(tid, False, error=diff2)
     except Exception as e:

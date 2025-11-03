@@ -4,6 +4,8 @@ from .write_handler import handle_write
 from .line_handler import handle_line_patch
 from .symbol_handler import handle_symbol_patch
 from .anchor_handler import handle_anchor_patch
+from .regex_handler import handle_regex_patch
+from .search_replace_handler import handle_find_replace
 from .auto_handler import handle_auto_patch
 from .batch_handler import handle_batch_patch
 from .dump_handler import (
@@ -19,6 +21,8 @@ __all__ = [
     "handle_line_patch",
     "handle_symbol_patch",
     "handle_anchor_patch",
+    "handle_regex_patch",
+    "handle_find_replace",
     "handle_auto_patch",
     "handle_batch_patch",
     "handle_dump_symbol",

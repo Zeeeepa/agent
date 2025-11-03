@@ -136,7 +136,8 @@ def _cache_put(model: str, text: str, vec: List[float]) -> None:
 async def _call_single(model: str, text: str) -> List[float]:
     # Offline short-circuit
     if not _online_enabled():
-        return _offline_embed(model, text)
+        # Offload CPU-heavy offline embedding to thread to keep event loop responsive
+        return await asyncio.to_thread(_offline_embed, model, text)
     async with _sem:
         await _dump_line(f"call single model={model} len={len(text)}")
         def _worker() -> Any:
@@ -146,11 +147,11 @@ async def _call_single(model: str, text: str) -> List[float]:
             resp = await asyncio.wait_for(asyncio.to_thread(_worker), timeout=max(0.05, _TIMEOUT_MS / 1000))
             vec = resp.data[0].embedding if getattr(resp, "data", None) else []
             if not vec:
-                return _offline_embed(model, text)
+                return await asyncio.to_thread(_offline_embed, model, text)
             return vec
         except Exception as e:
             await _dump_line(f"single error: {type(e).__name__}")
-            return _offline_embed(model, text)
+            return await asyncio.to_thread(_offline_embed, model, text)
 
 
 async def _call_batch(model: str, texts: List[str]) -> List[List[float]]:
@@ -158,7 +159,9 @@ async def _call_batch(model: str, texts: List[str]) -> List[List[float]]:
         return []
     # Offline short-circuit
     if not _online_enabled():
-        return [_offline_embed(model, t) for t in texts]
+        # Offload CPU-heavy offline embedding to thread for each text
+        tasks = [asyncio.to_thread(_offline_embed, model, t) for t in texts]
+        return await asyncio.gather(*tasks)
     async with _sem:
         await _dump_line(f"call batch model={model} n={len(texts)}")
         def _worker() -> Any:
@@ -179,7 +182,7 @@ async def _call_batch(model: str, texts: List[str]) -> List[List[float]]:
             return out
         except Exception as e:
             await _dump_line(f"batch error: {type(e).__name__}")
-            return [_offline_embed(model, t) for t in texts]
+            return await asyncio.gather(*[asyncio.to_thread(_offline_embed, model, t) for t in texts])
 
 
 async def embed_text_cached(text: str, *, model: str) -> List[float]:

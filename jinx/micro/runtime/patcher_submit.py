@@ -25,6 +25,20 @@ async def submit_anchor_insert_after(path: str, anchor: str, replacement: str) -
     return await submit_task("patch.anchor", path, anchor, replacement)
 
 
+async def submit_regex_patch(path: str, pattern: str, replacement: str, *, flags: str | None = None) -> str:
+    """Submit a regex-based patch task (search/replace) with optional flags (i,m,s,x).
+
+    Args:
+        path: file to patch
+        pattern: regex pattern (Python syntax)
+        replacement: replacement string
+        flags: optional regex flags string, e.g. "im" for IGNORECASE and MULTILINE
+    """
+    if flags is None or flags == "":
+        return await submit_task("patch.regex", path, pattern, replacement)
+    return await submit_task("patch.regex", path, pattern, replacement, flags=str(flags))
+
+
 async def submit_autopatch(*, path: str | None = None, code: str | None = None, line_start: int | None = None, line_end: int | None = None, symbol: str | None = None, anchor: str | None = None) -> str:
     """Submit an intelligent autopatch task that selects the best strategy."""
     return await submit_task(

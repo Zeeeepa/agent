@@ -8,6 +8,8 @@ from .project_chunk_types import Chunk
 CHARS_PER_CHUNK = int(os.getenv("EMBED_PROJECT_CHARS_PER_CHUNK", "1200"))
 MIN_CHUNK_CHARS = int(os.getenv("EMBED_PROJECT_MIN_CHUNK_CHARS", "150"))
 MAX_CHUNKS_PER_FILE = int(os.getenv("EMBED_PROJECT_MAX_CHUNKS_PER_FILE", "200"))
+# Small overlap in lines between adjacent chunks to preserve boundary context
+OVERLAP_LINES = int(os.getenv("EMBED_PROJECT_OVERLAP_LINES", "8"))
 
 
 def chunk_text_char(text: str) -> List[Chunk]:
@@ -32,9 +34,15 @@ def chunk_text_char(text: str) -> List[Chunk]:
                 chunks.append({"text": chunk_text, "line_start": start_line, "line_end": i - 1})
             if len(chunks) >= MAX_CHUNKS_PER_FILE:
                 break
-            cur_lines = []
-            cur_len = 0
-            start_line = i
+            # Start next chunk with a small overlap from the end of previous chunk
+            if OVERLAP_LINES > 0 and cur_lines:
+                tail = cur_lines[-min(OVERLAP_LINES, len(cur_lines)) :]
+            else:
+                tail = []
+            cur_lines = list(tail)
+            cur_len = sum(len(x) + 1 for x in cur_lines)
+            # Adjust start_line backward by overlap amount (but not before previous start)
+            start_line = max(1, (i - len(cur_lines)))
         cur_lines.append(ln2)
         cur_len += l
     if cur_lines and len(chunks) < MAX_CHUNKS_PER_FILE:

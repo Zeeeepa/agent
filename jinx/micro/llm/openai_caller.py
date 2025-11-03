@@ -161,10 +161,10 @@ async def call_openai_stream_first_block(
                 raise RuntimeError(chunk)
             if chunk:
                 buf.append(chunk)
-                if (not fired) and (ltag in chunk or buf):
+                if not fired:
                     text = "".join(buf)
-                    li = text.find(ltag)
-                    if li != -1:
+                    if ltag in text:
+                        li = text.find(ltag)
                         ri = text.find(rtag, li + len(ltag))
                         if ri != -1:
                             body = text[li + len(ltag): ri]

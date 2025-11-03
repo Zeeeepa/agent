@@ -5,6 +5,7 @@ from typing import List
 
 from jinx.async_utils.fs import read_text_raw
 from jinx.micro.embeddings.project_config import ROOT as PROJECT_ROOT
+from jinx.micro.common.env import truthy as _truthy
 
 
 def _abs_path(p: str) -> str:
@@ -14,13 +15,6 @@ def _abs_path(p: str) -> str:
         return p
     base = PROJECT_ROOT or os.getcwd()
     return os.path.normpath(os.path.join(base, p))
-
-
-def _truthy(name: str, default: str = "1") -> bool:
-    try:
-        return str(os.getenv(name, default)).strip().lower() not in ("", "0", "false", "off", "no")
-    except Exception:
-        return True
 
 
 def _module_name_from_path(path: str) -> str:

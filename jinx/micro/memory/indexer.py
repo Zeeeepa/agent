@@ -3,12 +3,14 @@ from __future__ import annotations
 import os
 import time
 import asyncio
+import contextlib
 from typing import List
 
 from jinx.micro.embeddings.pipeline import embed_text as _embed_text
 from jinx.micro.memory.storage import memory_dir
 from jinx.micro.memory.ingest_ranker import build_candidates as _build_candidates
 from jinx.micro.memory.ingest_dedup import filter_new_lines as _filter_new_lines, update_ledger as _update_ledger
+import jinx.state as jx_state
 
 
 async def ingest_memory(compact: str | None, evergreen: str | None) -> None:
@@ -62,6 +64,9 @@ async def ingest_memory(compact: str | None, evergreen: str | None) -> None:
     except Exception:
         conc = 3
 
+    # Fast exit on shutdown
+    if jx_state.shutdown_event.is_set():
+        return
     # Throttle between runs
     stamp = os.path.join(memory_dir(), ".emb_last_run")
     try:
@@ -100,22 +105,52 @@ async def ingest_memory(compact: str | None, evergreen: str | None) -> None:
 
     async def _embed_one(s: str) -> None:
         # Check global budget before starting
+        if jx_state.shutdown_event.is_set():
+            return
         if max_time_ms > 0 and (time.perf_counter() - t0) * 1000.0 > max_time_ms:
             return
         async with sem:
             try:
+                if jx_state.shutdown_event.is_set():
+                    return
                 if per_call_timeout > 0:
                     await asyncio.wait_for(_embed_text(s, source="state", kind="mem"), timeout=per_call_timeout / 1000.0)
                 else:
                     await _embed_text(s, source="state", kind="mem")
+            except asyncio.CancelledError:
+                # Cooperative cancel: exit quietly under shutdown/timeout
+                return
             except Exception:
                 return
 
     # Launch tasks up to k_total or global budget
     tasks = [asyncio.create_task(_embed_one(s)) for s in new_lines[:k_total]]
     if tasks:
+        # Build gather task explicitly so we can await it again under timeout/cancel
+        g_task = asyncio.gather(*tasks, return_exceptions=True)
         try:
-            await asyncio.gather(*tasks, return_exceptions=True)
+            # Guard with overall timeout slightly above budget to avoid pending tasks at shutdown
+            overall = max_time_ms / 1000.0 + 0.5 if max_time_ms > 0 else None
+            if overall is not None and overall > 0:
+                await asyncio.wait_for(g_task, timeout=overall)
+            else:
+                await g_task
+        except asyncio.TimeoutError:
+            # Cancel leftovers on timeout
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+            # Ensure the gather task itself is awaited to retrieve exceptions
+            with contextlib.suppress(BaseException):
+                await g_task
+        except asyncio.CancelledError:
+            # On cancellation, propagate after cancelling children
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+            with contextlib.suppress(BaseException):
+                await g_task
+            raise
         except Exception:
             pass
 
