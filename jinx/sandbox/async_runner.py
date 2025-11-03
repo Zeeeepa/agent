@@ -1,10 +1,14 @@
+"""Advanced async sandbox runner with process isolation and timeout management."""
+
 from __future__ import annotations
 
 import asyncio
 import multiprocessing
 import os
+import time
 from datetime import datetime
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Optional
+from dataclasses import dataclass
 
 from jinx.sandbox.executor import blast_zone
 from jinx.retry import detonate_payload
@@ -14,8 +18,37 @@ from jinx.sandbox.utils import make_run_log_path, async_rename_run_log
 from jinx.micro.exec.run_exports import write_last_run
 
 
+@dataclass
+class SandboxMetrics:
+    """Track sandbox execution metrics."""
+    total_runs: int = 0
+    successful_runs: int = 0
+    failed_runs: int = 0
+    timeout_runs: int = 0
+    avg_runtime_ms: float = 0.0
+
+
+_sandbox_metrics = SandboxMetrics()
+
+
 async def run_sandbox(code: str, callback: Callable[[str | None], Awaitable[None]] | None = None) -> None:
-    """Run code in a separate process and surface results asynchronously."""
+    """Run code in isolated process with advanced timeout and error handling.
+    
+    Features:
+    - Process isolation for safety
+    - Hard real-time timeout enforcement
+    - Async-friendly design
+    - Metrics tracking
+    - Stream logging
+    - Error detection and recovery
+    
+    Args:
+        code: Python code to execute
+        callback: Optional async callback with error message (None on success)
+    """
+    global _sandbox_metrics
+    
+    t0 = time.perf_counter()
     with multiprocessing.Manager() as m:
         r = m.dict()
 
@@ -50,10 +83,22 @@ async def run_sandbox(code: str, callback: Callable[[str | None], Awaitable[None
                 raise Exception(f"Payload mutation error: {e}")
 
         try:
+            # Track execution
+            _sandbox_metrics.total_runs += 1
+            
             # No retries/no delay to avoid any extra waiting for sandbox runs
             await detonate_payload(async_sandbox_task, retries=1, delay=0)
+            
+            # Update timing metrics
+            elapsed_ms = (time.perf_counter() - t0) * 1000.0
+            count = _sandbox_metrics.total_runs
+            _sandbox_metrics.avg_runtime_ms = (
+                (_sandbox_metrics.avg_runtime_ms * (count - 1) + elapsed_ms) / count
+            )
+            
             out, err = r.get("output", ""), r.get("error")
             log_path = r.get("log_path")
+            
             if out:
                 await bomb_log(out, CLOCKWORK_GHOST)
             # Sentinel-based error detection: if the code explicitly printed an ERROR line,
@@ -72,6 +117,13 @@ async def run_sandbox(code: str, callback: Callable[[str | None], Awaitable[None
                     pass
             if err:
                 await bomb_log(err)
+                # Check if timeout
+                if "Timeout" in str(err):
+                    _sandbox_metrics.timeout_runs += 1
+                _sandbox_metrics.failed_runs += 1
+            else:
+                _sandbox_metrics.successful_runs += 1
+            
             if log_path:
                 # Rename log file to Jinx-styled status name before announcing path (non-blocking)
                 log_path = await async_rename_run_log(log_path, status=("error" if err else "ok"))
@@ -84,6 +136,7 @@ async def run_sandbox(code: str, callback: Callable[[str | None], Awaitable[None
             if callback:
                 await callback(err)
         except Exception as e:
+            _sandbox_metrics.failed_runs += 1
             await bomb_log(f"System exile: {e}")
             # Best effort: index as error if log path is known
             try:
@@ -93,3 +146,14 @@ async def run_sandbox(code: str, callback: Callable[[str | None], Awaitable[None
                     _ = await async_rename_run_log(lp, status="error")
             except Exception:
                 pass
+
+
+def get_sandbox_metrics() -> SandboxMetrics:
+    """Get sandbox execution metrics."""
+    return SandboxMetrics(
+        total_runs=_sandbox_metrics.total_runs,
+        successful_runs=_sandbox_metrics.successful_runs,
+        failed_runs=_sandbox_metrics.failed_runs,
+        timeout_runs=_sandbox_metrics.timeout_runs,
+        avg_runtime_ms=_sandbox_metrics.avg_runtime_ms
+    )

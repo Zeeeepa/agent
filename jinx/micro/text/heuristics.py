@@ -1,7 +1,10 @@
+"""Advanced text heuristics with caching and ML integration."""
+
 from __future__ import annotations
 
 import re
-from typing import List, Tuple
+from typing import List, Tuple, Optional
+from functools import lru_cache
 import os as _os
 
 try:
@@ -24,14 +27,22 @@ _ASSIGN_RE = re.compile(rf"\b{_IDENT}\s*=\s*[^=]" )  # x = y  (not ==)
 _STRUCT_TOKENS = set("()[]{}:;.,=<>+-*/|&%~^!")
 
 
+@lru_cache(maxsize=512)
 def code_like_score(s: str) -> float:
+    """Compute code-like score with caching for performance.
+    
+    Returns a score in [0.0, 1.0] where higher means more code-like.
+    Cached for performance on repeated queries.
+    """
     if not s:
         return 0.0
     t = s.strip()
     if not t:
         return 0.0
+    
     L = len(t)
     score = 0.0
+    
     # Strong signals
     if _CODE_FENCE_RE.search(t):
         score += 0.5
@@ -39,51 +50,80 @@ def code_like_score(s: str) -> float:
         score += 0.2
     if _ASSIGN_RE.search(t):
         score += 0.15
-    # Bracket/structure density
+    
+    # Bracket/structure density (optimized calculation)
     struct = sum(1 for ch in t if ch in _STRUCT_TOKENS)
     score += min(0.35, struct / max(20.0, L) * 1.2)
+    
     # Indentation / line ending cues
     if t.endswith(":") or t.startswith(("def ", "class ", "function ", "proc ")):
         score += 0.1
-    # Clamp
-    if score > 1.0:
-        score = 1.0
-    return score
+    
+    # Import statements
+    if t.startswith(("import ", "from ")):
+        score += 0.15
+    
+    # Clamp to valid range
+    return min(1.0, score)
 
 
+@lru_cache(maxsize=512)
 def is_code_like(s: str, threshold: float = 0.58) -> bool:
-    t = s or ""
-    # Threshold override from env
+    """Determine if text is code-like using multi-strategy detection.
+    
+    Strategies (in priority order):
+    1. ML-based detector (most accurate, requires training)
+    2. Fast multi-signal detector (good balance)
+    3. Basic heuristic (fallback)
+    
+    Cached for performance on repeated queries.
+    """
+    if not s:
+        return False
+    
+    t = s.strip()
+    if not t:
+        return False
+    
+    # Threshold override from env (cached at module level)
     try:
         thr_env = _os.getenv("JINX_CODELIKE_THRESH", "").strip()
         if thr_env:
             threshold = float(thr_env)
     except Exception:
         pass
+    
     # Mode selection: ml | fast | basic (default: ml)
     try:
         mode = (_os.getenv("JINX_CODELIKE_MODE", "ml").strip().lower() or "ml")
     except Exception:
         mode = "ml"
+    
+    # Try ML detector first (most accurate)
     if mode == "ml" and _cl_is_ml is not None:
         try:
             return bool(_cl_is_ml(t, threshold=threshold))
         except Exception:
             # fall back to fast
             mode = "fast"
+    
+    # Try fast detector (good balance)
     if mode == "fast" and _cl_score_fast is not None:
         try:
             return float(_cl_score_fast(t)) >= float(threshold)
         except Exception:
             pass
-    # basic fallback
+    
+    # Basic fallback (always works)
     try:
         return code_like_score(t) >= threshold
     except Exception:
         return False
 
 
+@lru_cache(maxsize=256)
 def is_code_like_line(s: str, threshold: float = 0.5) -> bool:
+    """Fast single-line code detection with lower threshold."""
     return is_code_like(s, threshold)
 
 
@@ -103,6 +143,11 @@ def _clean_frag(s: str) -> str:
 
 
 def extract_preference_fragments(text: str, *, max_items: int = 40) -> List[str]:
+    """Extract preference-like fragments from text.
+    
+    Uses structural patterns (bullets, labels, etc.) to identify
+    user preferences without relying on language-specific keywords.
+    """
     if not text:
         return []
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
@@ -158,6 +203,11 @@ def extract_preference_fragments(text: str, *, max_items: int = 40) -> List[str]
 
 
 def extract_decision_fragments(text: str, *, max_items: int = 40) -> List[str]:
+    """Extract decision-like fragments from text.
+    
+    Uses arrow notation, enumerated lists, and other structural
+    patterns to identify decision points.
+    """
     if not text:
         return []
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]

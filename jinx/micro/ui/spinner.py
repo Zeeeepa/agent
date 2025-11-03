@@ -19,6 +19,7 @@ from jinx.spinner import ascii_mode as _ascii_mode, can_render as _can_render
 from jinx.spinner import get_spinner_frames, get_hearts
 import jinx.state as state
 from .spinner_util import format_activity_detail, parse_env_bool, parse_env_int
+from jinx.micro.rt.backpressure import update_from_lag, clear_throttle_if_ttl
 
 # Lazy import with auto-install of prompt_toolkit
 ensure_optional(["prompt_toolkit"])  # installs if missing
@@ -58,26 +59,10 @@ async def sigil_spin(evt: asyncio.Event) -> None:
                     state.lag_ema_ms = float(lag_ema_ms)
                 except Exception:
                     pass
-                # Simple hysteresis: raise throttle on sustained high lag, clear on sustained low lag
+                # Hysteresis via backpressure helpers (TTL-aware)
                 try:
-                    if lag_ema_ms > 120.0:
-                        hi_cnt += 1; lo_cnt = 0
-                    elif lag_ema_ms < 50.0:
-                        lo_cnt += 1; hi_cnt = 0
-                    else:
-                        hi_cnt = max(0, hi_cnt - 1); lo_cnt = max(0, lo_cnt - 1)
-                    # Clear via TTL first if present
-                    try:
-                        tz = float(getattr(state, "throttle_unset_ts", 0.0) or 0.0)
-                    except Exception:
-                        tz = 0.0
-                    if tz and now >= tz:
-                        state.throttle_event.clear()
-                        state.throttle_unset_ts = 0.0
-                    elif hi_cnt >= 4:
-                        state.throttle_event.set()
-                    elif lo_cnt >= 8 and not tz:
-                        state.throttle_event.clear()
+                    clear_throttle_if_ttl(now)
+                    update_from_lag(lag_ema_ms, hi_ms=120.0, lo_ms=50.0)
                 except Exception:
                     pass
                 await asyncio.sleep(0.08)
@@ -196,18 +181,8 @@ async def sigil_spin(evt: asyncio.Event) -> None:
                     clr = "ansibrightgreen"
                 # Lag-driven throttle hysteresis in print mode as well
                 try:
-                    # TTL-based clear takes precedence
-                    try:
-                        tz = float(getattr(state, "throttle_unset_ts", 0.0) or 0.0)
-                    except Exception:
-                        tz = 0.0
-                    if tz and now >= tz:
-                        state.throttle_event.clear()
-                        state.throttle_unset_ts = 0.0
-                    elif lag_ema_ms > 120.0:
-                        state.throttle_event.set()
-                    elif lag_ema_ms < 50.0 and not tz:
-                        state.throttle_event.clear()
+                    clear_throttle_if_ttl(now)
+                    update_from_lag(lag_ema_ms, hi_ms=120.0, lo_ms=50.0)
                 except Exception:
                     pass
                 # Build single-line render with optional lag

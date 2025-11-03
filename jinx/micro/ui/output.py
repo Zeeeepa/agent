@@ -4,6 +4,7 @@ import shutil
 import textwrap
 import asyncio
 import importlib
+from .locks import get_print_lock
 
 
 def pretty_echo(text: str, title: str = "Jinx") -> None:
@@ -61,14 +62,8 @@ async def pretty_echo_async(text: str, title: str = "Jinx") -> None:
         await asyncio.to_thread(pretty_echo, text, title)
         return
 
-    # Global async print lock to serialize output across concurrent turns
-    global _PRINT_LOCK
-    try:
-        _PRINT_LOCK
-    except NameError:
-        _PRINT_LOCK = asyncio.Lock()  # type: ignore[var-annotated]
-
-    async with _PRINT_LOCK:
+    # Use micro-modular print lock
+    async with get_print_lock():
         width = shutil.get_terminal_size((80, 24)).columns
         width = max(50, min(width, 120))
         inner_w = width - 2

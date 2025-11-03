@@ -31,7 +31,20 @@ def _run() -> int:
             _install()
         except Exception:
             pass
-        # Lazy import orchestrator after resilience is installed
+        # Avoid package shadowing when this script name matches the package name
+        # Inject a lightweight package stub into sys.modules that points to the real package directory
+        try:
+            import os as _os, types as _types
+            pkg_dir = _os.path.join(_os.path.dirname(__file__), "jinx")
+            if _os.path.isdir(pkg_dir):
+                import sys as _sys
+                if "jinx" not in _sys.modules:
+                    _pkg = _types.ModuleType("jinx")
+                    setattr(_pkg, "__path__", [pkg_dir])  # mark as package
+                    _sys.modules["jinx"] = _pkg
+        except Exception:
+            pass
+        # Lazy import orchestrator after resilience and anti-shadowing are in place
         from jinx.orchestrator import main as jinx_main
         jinx_main()
         return 0

@@ -16,6 +16,15 @@ from .embed_cache import embed_text_cached
 from jinx.micro.runtime.task_ctx import get_current_group as _get_group
 from .project_terms import extract_terms as _extract_terms
 from .ann_index_runtime import search_ann_items as _search_ann_runtime
+from jinx.micro.rt.slicer import TimeSlicer
+try:
+    from .prefetch_cache import get_base as _pref_get_base
+except Exception:
+    _pref_get_base = None  # type: ignore[assignment]
+try:
+    from jinx.micro.runtime.seeds import get_seeds as _get_seeds
+except Exception:
+    _get_seeds = None  # type: ignore[assignment]
 
 DEFAULT_TOP_K = int(os.getenv("EMBED_TOP_K", "5"))
 # Balanced defaults; adapt at runtime based on query length
@@ -90,6 +99,12 @@ async def retrieve_top_k(query: str, k: int | None = None, *, max_time_ms: int |
     t0 = time.perf_counter()
     # Precompute query terms once
     q_terms = _terms_of(q)
+    # Time-slice gating: cooperative yield via TimeSlicer to keep UI responsive
+    try:
+        _SLICE_MS = max(4, int(os.getenv("EMBED_SLICE_MS", "12")))
+    except Exception:
+        _SLICE_MS = 12
+    ts = TimeSlicer(ms=_SLICE_MS)
     # Session affinity (prefer current per-turn group; fallback to env)
     try:
         _sess_cv = (_get_group() or "").strip()
@@ -128,6 +143,7 @@ async def retrieve_top_k(query: str, k: int | None = None, *, max_time_ms: int |
         _recent_vecs.append(obj.get("embedding") or [])
         if len(_recent_objs) >= k_eff * 2:  # cap to a small multiple of k
             break
+        await ts.maybe_yield()
     if _recent_vecs:
         # Offload cosine batch to threads to avoid blocking the event loop
         sims = await asyncio.to_thread(score_cosine_batch, qv, _recent_vecs)
@@ -188,6 +204,8 @@ async def retrieve_top_k(query: str, k: int | None = None, *, max_time_ms: int |
         if (ix % 256) == 255:
             # Periodic yield during accumulation to keep prompt responsive
             await asyncio.sleep(0)
+        else:
+            await ts.maybe_yield()
     # Prioritize session-matching items and cap
     items: List[Tuple[str, Dict[str, Any]]] = (items_grp + items_oth)[:cap]
 
@@ -236,6 +254,8 @@ async def retrieve_top_k(query: str, k: int | None = None, *, max_time_ms: int |
             if (idx_iter % 64) == 63:
                 # Cooperative yield to keep prompt responsive during long ANN loops
                 await asyncio.sleep(0)
+            else:
+                await ts.maybe_yield()
     else:
         # Batch cosine fallback
         try:
@@ -289,6 +309,8 @@ async def retrieve_top_k(query: str, k: int | None = None, *, max_time_ms: int |
             elif (idx % 64) == 63:
                 # Periodic yield even before batch flush to prevent UI stalls on large sets
                 await asyncio.sleep(0)
+            else:
+                await ts.maybe_yield()
         if buf_vecs and len(scored) < k_eff and (eff_budget is None or (time.perf_counter() - t0) * 1000.0 <= eff_budget):
             await _flush_async()
 
@@ -298,8 +320,46 @@ async def retrieve_top_k(query: str, k: int | None = None, *, max_time_ms: int |
 
 async def build_context_for(query: str, *, k: int | None = None, max_chars: int = 1500, max_time_ms: int | None = 220) -> str:
     """Build a compact context from top-k snippets (ordered by timestamp)."""
+    # Fast-path: return prefetched base context when present
+    try:
+        if _pref_get_base is not None:
+            pref = _pref_get_base(query)
+            if pref:
+                return pref
+    except Exception:
+        pass
     k = k or DEFAULT_TOP_K
     hits = await retrieve_top_k(query, k=k, max_time_ms=max_time_ms)
+    # Opportunistic expansion with seeds/predictions (small extra budget)
+    try:
+        seeds = (_get_seeds(top_n=10) if _get_seeds is not None else [])  # type: ignore[misc]
+    except Exception:
+        seeds = []
+    exp_hits: list[tuple[float, str, dict]] = []
+    if seeds:
+        try:
+            exp_q = (query + " " + " ".join(seeds)).strip()
+            if exp_q != (query or ""):
+                extra_ms = int((max_time_ms or 220) * 0.6)
+                exp_hits = await retrieve_top_k(exp_q, k=max(1, k // 2), max_time_ms=extra_ms)
+        except Exception:
+            exp_hits = []
+    # Merge with dedupe by preview text
+    if exp_hits:
+        try:
+            def _pv(h):
+                try:
+                    return (h[2].get("meta", {}).get("text_preview") or "").strip()
+                except Exception:
+                    return ""
+            seen_pv = { _pv(h) for h in hits if _pv(h) }
+            for h in exp_hits:
+                pv = _pv(h)
+                if pv and pv not in seen_pv:
+                    hits.append(h)
+                    seen_pv.add(pv)
+        except Exception:
+            pass
     if not hits:
         return ""
     seen: set[str] = set()

@@ -1,10 +1,14 @@
+"""Advanced local memory builder with optimization and caching."""
+
 from __future__ import annotations
 
 import os
 import re
 import json
 import time
-from typing import Dict, List, Tuple, Any
+from typing import Dict, List, Tuple, Any, Optional, Set
+from functools import lru_cache
+from dataclasses import dataclass
 
 from jinx.config import ALL_TAGS
 from jinx.micro.embeddings.project_identifiers import extract_identifiers
@@ -30,53 +34,93 @@ def _memory_dir() -> str:
     root = PROJECT_ROOT or os.getcwd()
     return os.path.join(root, sub)
 
-
 _MEM_DIR = _memory_dir()
 
 
 # -------- Utilities --------
 
-_TAG_ALT = "|".join(sorted(ALL_TAGS))
-_TOOL_BLOCK_RE = re.compile(fr"<(?:{_TAG_ALT})_[^>]+>.*?</(?:{_TAG_ALT})_[^>]+>", re.DOTALL)
-_PATH_RE = re.compile(r"(?:[A-Za-z]:\\[^\r\n]+|(?:\.|\.{1,2})?/(?:[^\s/]+/)*[^\s/]+\.[A-Za-z0-9]{1,6})")
- 
-_SET_RE = re.compile(r"\b([A-Z_]{2,})\s*=\s*([^\s,;]+)")
+# Cached regex compilation for performance
+@lru_cache(maxsize=1)
+def _get_tool_block_regex() -> re.Pattern:
+    """Build and cache tool block regex."""
+    tag_alt = "|".join(sorted(ALL_TAGS))
+    return re.compile(fr"<(?:{tag_alt})_[^>]+>.*?</(?:{tag_alt})_[^>]+>", re.DOTALL)
 
-# PII redactors
+# Pre-compiled patterns
+_PATH_RE = re.compile(r"(?:[A-Za-z]:\\[^\r\n]+|(?:\.|\.{1,2})?/(?:[^\s/]+/)*[^\s/]+\.[A-Za-z0-9]{1,6})")
+_SET_RE = re.compile(r"\b([A-Z_]{2,})\s*=\s*([^\s,;]+)")
 _EMAIL_RE = re.compile(r"\b[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+\b")
 _TOKEN_RE = re.compile(r"\b[A-Za-z0-9+/=_-]{24,}\b")
+_ROLE_RE = re.compile(r"^\s*(User|Jinx|Error|State|Note):\s*(.*)$", re.IGNORECASE)
+_TRAILING_ROLE_RE = re.compile(r"\s+(?:User|Jinx):\s*$")
+_MULTI_SPACE_RE = re.compile(r"\s+")
+_MULTI_NEWLINE_RE = re.compile(r"\n{3,}")
 
 
 def _strip_tool_blocks(text: str) -> Tuple[str, List[str]]:
+    """Strip tool blocks and return cleaned text with extracted blocks.
+    
+{{ ... }}
+    Optimizations:
+    - Cached regex
+    - Single pass through text
+    - Efficient string operations
+    """
     if not text:
         return "", []
+    
     blocks: List[str] = []
+    tool_block_re = _get_tool_block_regex()
+    
     def _collect(m: re.Match) -> str:
-        blk = (m.group(0) or "").strip()
-        if blk:
-            blocks.append(blk)
+        blk = m.group(0)
+        if blk and blk.strip():
+            blocks.append(blk.strip())
         return ""
-    cleaned = _TOOL_BLOCK_RE.sub(_collect, text)
-    # collapse excessive blank lines
-    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    
+    # Remove tool blocks
+    cleaned = tool_block_re.sub(_collect, text)
+    
+    # Collapse excessive blank lines (use cached regex)
+    cleaned = _MULTI_NEWLINE_RE.sub("\n\n", cleaned).strip()
+    
     return cleaned, blocks
 
 
 def _dedupe_consecutive(lines: List[str]) -> List[str]:
+    """Deduplicate consecutive identical lines with efficient algorithm.
+    
+    Optimizations:
+    - Single pass O(n)
+    - Early termination on differences
+    - Memory-efficient without extra copies
+    """
+    if not lines:
+        return []
+    
+    if len(lines) == 1:
+        return lines[:]
+    
     out: List[str] = []
     i = 0
+    
     while i < len(lines):
         cur = lines[i]
-        j = i + 1
         rep = 1
-        while j < len(lines) and lines[j] == cur:
+        
+        # Count consecutive repeats
+        while i + rep < len(lines) and lines[i + rep] == cur:
             rep += 1
-            j += 1
+        
+        # Add with repeat count if applicable
         if rep > 1:
             out.append(f"{cur} (repeated {rep}x)")
         else:
             out.append(cur)
-        i = j
+        
+        # Skip past all repeats
+        i += rep
+    
     return out
 
 
@@ -100,22 +144,26 @@ def _build_compact(transcript: str, max_lines: int) -> str:
         if not buf:
             return
         text = " ".join(buf)
-        text = re.sub(r"\s+", " ", text).strip()
+        text = _MULTI_SPACE_RE.sub(" ", text).strip()
+        
         if not text:
             buf = []
             return
+        
         if cur_role in ("User", "Jinx"):
             # Trim very long lines to keep memory lean
             try:
                 lim = int(os.getenv("JINX_MEM_COMPACT_LINE_MAX_CHARS", "320"))
             except Exception:
                 lim = 320
-            # Remove stray trailing role labels at the end of the text
-            try:
-                text = re.sub(r"\s+(?:User|Jinx):\s*$", "", text)
-            except Exception:
-                pass
-            text = text[:lim]
+            
+            # Remove stray trailing role labels (use cached regex)
+            text = _TRAILING_ROLE_RE.sub("", text)
+            
+            # Truncate to limit
+            if len(text) > lim:
+                text = text[:lim]
+            
             out.append(f"{cur_role}: {text}")
         else:
             # Fallback: treat as note
@@ -123,15 +171,16 @@ def _build_compact(transcript: str, max_lines: int) -> str:
         buf = []
 
     for ln in raw:
-        # Robust label parse (leading spaces allowed)
-        m = re.match(r"^\s*(User|Jinx|Error|State|Note):\s*(.*)$", ln, re.IGNORECASE)
+        # Robust label parse (leading spaces allowed) - use cached regex
+        m = _ROLE_RE.match(ln)
         if m:
-            label = (m.group(1) or "").strip().lower()
-            val = (m.group(2) or "").strip()
+            label = m.group(1).strip().lower()
+            val = m.group(2).strip() if m.group(2) else ""
+            
             if label in ("user", "jinx"):
                 _flush()
                 cur_role = "User" if label == "user" else "Jinx"
-                buf = ([val] if val else [])
+                buf = [val] if val else []
                 continue
             else:
                 _flush()

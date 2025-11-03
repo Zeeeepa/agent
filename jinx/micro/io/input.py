@@ -19,6 +19,7 @@ from jinx.log_paths import TRIGGER_ECHOES, BLUE_WHISPERS
 from jinx.async_utils.queue import try_put_nowait
 import jinx.state as jx_state
 from jinx.micro.ui.spinner_util import format_activity_detail, parse_env_bool, parse_env_int
+from jinx.micro.rt.backpressure import set_throttle_ttl
 
 
 # Ensure prompt_toolkit is present at import time to avoid installing in an active event loop
@@ -78,11 +79,14 @@ async def neon_input(qe: asyncio.Queue[str]) -> None:
         activity.set()
         # Short-lived preemption: raise throttle briefly on user typing to keep UI responsive
         try:
-            jx_state.throttle_event.set()
-            # Spinner/toolbar loop will auto-clear when TTL expires
-            setattr(jx_state, "throttle_unset_ts", float(time.perf_counter()) + 0.35)
+            set_throttle_ttl(0.35)
         except Exception:
-            pass
+            # Fallback to legacy behavior if backpressure module unavailable
+            try:
+                jx_state.throttle_event.set()
+                setattr(jx_state, "throttle_unset_ts", float(time.perf_counter()) + 0.35)
+            except Exception:
+                pass
 
     async def kaboom_watch() -> None:
         """Emit <no_response> after inactivity using a reactive timer.

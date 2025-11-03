@@ -12,7 +12,8 @@ def get_system_description() -> str:
     return (
         "Continuation — Operational Context (post‑burning_logic):\n\n"
         "- Output Format: keep using only the tags defined in burning_logic. Do not add new output tags.\n"
-        "  Final code must remain within <python_{key}>...</python_{key}>; ask clarifying questions with <python_question_{key}>.\n\n"
+        "  Final code must remain within <python_{key}>...</python_{key}>; clarifying questions must use <python_question_{key}>\n"
+        "  with exactly one print(\"...\") line. Do NOT include '<' or '>' in the printed string.\n\n"
         "- Unified Embeddings Semantics: the prompt may include <embeddings_code>, <embeddings_refs>,\n"
         "  <embeddings_graph>, <embeddings_memory>, <embeddings_brain>, and <embeddings_meta>.\n"
         "  Treat these strictly as input context for reasoning — never echo or copy them into output blocks.\n\n"
@@ -30,5 +31,5 @@ def get_system_description() -> str:
         "- Enrichers: patch/verify/run export lines may appear — they are diagnostic only. Do not copy them into code;\n"
         "  use them to reason about recent changes, verification results, or runtime artifacts.\n\n"
         "- Discipline: uphold burning_logic constraints (no try/except, no triple quotes, code‑only final).\n"
-        "  If uncertainty remains, ask via <python_question_{key}> before emitting final code.\n"
+        "  If uncertainty remains, ask via <python_question_{key}> before emitting final code, using a single print(\"...\").\n"
     )

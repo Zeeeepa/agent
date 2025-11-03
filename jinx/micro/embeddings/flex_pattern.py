@@ -21,11 +21,18 @@ def make_flex_code_pattern(src: str, *, ignore_case: bool = False) -> Optional[r
     try:
         s = _WS.sub(" ", s)
         esc = re.escape(s)
+        # Collapse spaces to flexible whitespace
         esc = esc.replace(r"\ ", r"\s+")
+        # Allow flexible spacing around common punctuation
         esc = esc.replace(r"\.", r"\s*\.\s*")
         esc = esc.replace(r"\(", r"\s*\(\s*")
         esc = esc.replace(r"\)", r"\s*\)\s*")
         esc = esc.replace(r"\,", r"\s*,\s*")
+        # Allow flexible spacing around '=' and optional type annotation before '='
+        # First, allow spaces around '='
+        esc = esc.replace(r"\=", r"\s*=\s*")
+        # Then, upgrade to accept optional ': type' annotation before '=' (single-line, capped length)
+        esc = esc.replace(r"\s*=\s*", r"(?:\s*:\s*[^=\n]{0,80}\s*)?\s*=\s*")
         flags = re.DOTALL | (re.IGNORECASE if ignore_case else 0)
         return re.compile(esc, flags)
     except Exception:

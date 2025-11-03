@@ -21,6 +21,7 @@ from jinx.micro.embeddings.retrieval import build_context_for
 from jinx.micro.embeddings.project_retrieval import build_project_context_for, build_project_context_multi_for
 from jinx.micro.embeddings.pipeline import embed_text
 from jinx.conversation.formatting import build_header, ensure_header_block_separation
+from jinx.micro.embeddings.unifier import build_unified_brain_block as _build_unified_brain
 from jinx.micro.memory.storage import read_evergreen
 from jinx.micro.memory.storage import read_channel as _read_channel
 from jinx.micro.conversation.memory_sanitize import sanitize_transcript_for_memory
@@ -235,6 +236,12 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
                 plan_ctx = await build_planner_context(_q)
         except Exception:
             plan_ctx = ""
+        # Eagerly embed planner context (trimmed) for state retrieval coverage
+        if plan_ctx:
+            try:
+                asyncio.create_task(embed_text((plan_ctx or "")[:512], source="state", kind="plan"))
+            except Exception:
+                pass
         # Optional continuity block for the main brain
         try:
             cont_block = _render_cont_block(
@@ -245,6 +252,12 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
             )
         except Exception:
             cont_block = ""
+        # Eagerly embed continuity block (trimmed) for state retrieval coverage
+        if cont_block:
+            try:
+                asyncio.create_task(embed_text((cont_block or "")[:512], source="state", kind="cont"))
+            except Exception:
+                pass
         await _coop()
         # Optional: auto-turns resolver — hybrid (fast+LLM) that injects a tiny <turns> block when the user asks about Nth message
         turns_block = ""
@@ -297,6 +310,12 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
                             turns_block = f"<turns>\n[Pair:{idx}]\n{tiny}\n</turns>"
                 except Exception:
                     turns_block = ""
+        # Eagerly embed turns block (trimmed) for state retrieval coverage
+        if turns_block:
+            try:
+                asyncio.create_task(embed_text((turns_block or "")[:512], source="state", kind="turns"))
+            except Exception:
+                pass
 
         # Optional: memory program — plan+execute ops (memroute/pins/topics/channels). Prefer this over simple selector.
         memsel_block = ""
@@ -404,6 +423,12 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
                 pass
 
         # Do NOT send <embeddings_memory> to API by default; keep only base/project/planner/continuity (+ optional <turns>/<memory_selected>)
+        # Eagerly embed memory selection block (trimmed) for state retrieval coverage
+        if memsel_block:
+            try:
+                asyncio.create_task(embed_text((memsel_block or "")[:512], source="state", kind="memsel"))
+            except Exception:
+                pass
         ctx = "\n".join([c for c in [base_ctx, proj_ctx, plan_ctx, cont_block, turns_block, memsel_block] if c])
         # Optional compaction for orchestrator chains (default ON)
         try:
@@ -537,6 +562,13 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
 
         # Assemble header using shared formatting utilities
         header_text = build_header(ctx, mem_text, task_text, error_text, evergreen_text)
+        # Unified brain: fuse <embeddings_*> + <memory> + <task> (+evergreen) into a single guidance block
+        try:
+            unified_brain = _build_unified_brain(ctx or "", mem_text or "", task_text or "", evergreen_text or "")
+        except Exception:
+            unified_brain = ""
+        if unified_brain:
+            header_text = (header_text + "\n\n" + unified_brain) if header_text else unified_brain
         if header_text:
             chains = header_text + ("\n\n" + chains if chains else "")
         # Optional: lightweight telemetry about context block sizes

@@ -30,6 +30,15 @@ from jinx.watchdog import start_watchdog_task
 from jinx.micro.embeddings.retrieval_core import shutdown_proc_pool as _retr_pool_shutdown
 from jinx.micro.net.client import prewarm_openai_client as _prewarm_openai
 from jinx.micro.runtime.api import stop_selfstudy as _stop_selfstudy
+from jinx.micro.runtime.plugins import (
+    start_plugins as _start_plugins,
+    stop_plugins as _stop_plugins,
+    set_plugin_context as _set_plugin_ctx,
+    PluginContext as _PluginContext,
+    publish_event as _publish_event,
+)
+from jinx.micro.runtime.builtin_plugins import register_builtin_plugins as _reg_builtin_plugins
+from jinx.micro.runtime.autoconfig import apply_auto_defaults as _auto_defaults
 
 async def pulse_core(settings: Settings | None = None) -> None:
     """Run the main asynchronous processing loop.
@@ -43,6 +52,11 @@ async def pulse_core(settings: Settings | None = None) -> None:
     """
     show_banner()
 
+    # Autonomous defaults (no manual setup required)
+    try:
+        _auto_defaults(settings)
+    except Exception:
+        pass
     # Resolve settings and apply compatibility state
     cfg = settings or Settings.from_env()
     cfg.apply_to_state()
@@ -102,6 +116,12 @@ async def pulse_core(settings: Settings | None = None) -> None:
         ]
 
         try:
+            # Start optional plugins prior to supervised jobs
+            with contextlib.suppress(Exception):
+                loop = asyncio.get_running_loop()
+                _set_plugin_ctx(_PluginContext(loop=loop, shutdown_event=jx_state.shutdown_event, settings=cfg, publish=_publish_event))
+                _reg_builtin_plugins()
+                await _start_plugins()
             # Run supervised set; returns when shutdown_event is set
             await run_supervisor(job_specs, jx_state.shutdown_event, cfg)
         except (asyncio.CancelledError, KeyboardInterrupt):
@@ -117,6 +137,8 @@ async def pulse_core(settings: Settings | None = None) -> None:
                 await stop_project_embeddings_task()
                 # Cancel/await self-study tasks started by ensure_runtime()
                 await _stop_selfstudy()
+                # Stop optional plugins last
+                await _stop_plugins()
             # Ensure ProcessPoolExecutor is torn down to avoid atexit join hang
             with contextlib.suppress(Exception):
                 _retr_pool_shutdown()

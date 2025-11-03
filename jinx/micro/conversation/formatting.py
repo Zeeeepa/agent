@@ -32,39 +32,33 @@ def ensure_header_block_separation(text: str) -> str:
     - </task>                [blank line]  <error>
     """
     t = normalize_unicode_spaces(text)
-    # Normalize any whitespace (including existing newlines) between blocks to exactly one blank line
-    t = re.sub(r"(</embeddings_context>)[\s\u00A0\u2007\u202F]*(<evergreen>)", r"\1\n\n\2", t)
-    t = re.sub(r"(</embeddings_context>)[\s\u00A0\u2007\u202F]*(<embeddings_code>)", r"\1\n\n\2", t)
-    t = re.sub(r"(</embeddings_context>)[\s\u00A0\u2007\u202F]*(<embeddings_refs>)", r"\1\n\n\2", t)
-    t = re.sub(r"(</embeddings_context>)[\s\u00A0\u2007\u202F]*(<embeddings_memory>)", r"\1\n\n\2", t)
-    t = re.sub(r"(</embeddings_context>)[\s\u00A0\u2007\u202F]*(<plan_kernels>)", r"\1\n\n\2", t)
-    t = re.sub(r"(</embeddings_code>)[\s\u00A0\u2007\u202F]*(<evergreen>)", r"\1\n\n\2", t)
-    t = re.sub(r"(</embeddings_code>)[\s\u00A0\u2007\u202F]*(<embeddings_refs>)", r"\1\n\n\2", t)
-    t = re.sub(r"(</embeddings_code>)[\s\u00A0\u2007\u202F]*(<embeddings_memory>)", r"\1\n\n\2", t)
-    t = re.sub(r"(</embeddings_code>)[\s\u00A0\u2007\u202F]*(<plan_kernels>)", r"\1\n\n\2", t)
-    t = re.sub(r"(</embeddings_refs>)[\s\u00A0\u2007\u202F]*(<evergreen>)", r"\1\n\n\2", t)
-    t = re.sub(r"(</embeddings_refs>)[\s\u00A0\u2007\u202F]*(<plan_kernels>)", r"\1\n\n\2", t)
-    t = re.sub(r"(</embeddings_refs>)[\s\u00A0\u2007\u202F]*(<embeddings_memory>)", r"\1\n\n\2", t)
-    t = re.sub(r"(</embeddings_code>)[\s\u00A0\u2007\u202F]*(<memory>)", r"\1\n\n\2", t)
-    t = re.sub(r"(</embeddings_code>)[\s\u00A0\u2007\u202F]*(<task>)", r"\1\n\n\2", t)
-    t = re.sub(r"(</embeddings_code>)[\s\u00A0\u2007\u202F]*(<error>)", r"\1\n\n\2", t)
-    t = re.sub(r"(</embeddings_memory>)[\s\u00A0\u2007\u202F]*(<evergreen>)", r"\1\n\n\2", t)
-    t = re.sub(r"(</embeddings_memory>)[\s\u00A0\u2007\u202F]*(<embeddings_code>)", r"\1\n\n\2", t)
-    t = re.sub(r"(</embeddings_memory>)[\s\u00A0\u2007\u202F]*(<embeddings_refs>)", r"\1\n\n\2", t)
-    t = re.sub(r"(</embeddings_memory>)[\s\u00A0\u2007\u202F]*(<memory>)", r"\1\n\n\2", t)
-    t = re.sub(r"(</embeddings_memory>)[\s\u00A0\u2007\u202F]*(<task>)", r"\1\n\n\2", t)
-    t = re.sub(r"(</embeddings_memory>)[\s\u00A0\u2007\u202F]*(<error>)", r"\1\n\n\2", t)
-    t = re.sub(r"(</evergreen>)[\s\u00A0\u2007\u202F]*(<memory>)", r"\1\n\n\2", t)
-    t = re.sub(r"(</plan_kernels>)[\s\u00A0\u2007\u202F]*(<evergreen>)", r"\1\n\n\2", t)
-    t = re.sub(r"(</plan_kernels>)[\s\u00A0\u2007\u202F]*(<memory>)", r"\1\n\n\2", t)
-    t = re.sub(r"(</plan_kernels>)[\s\u00A0\u2007\u202F]*(<task>)", r"\1\n\n\2", t)
-    t = re.sub(r"(</plan_kernels>)[\s\u00A0\u2007\u202F]*(<error>)", r"\1\n\n\2", t)
-    t = re.sub(r"(</embeddings_refs>)[\s\u00A0\u2007\u202F]*(<memory>)", r"\1\n\n\2", t)
-    t = re.sub(r"(</embeddings_refs>)[\s\u00A0\u2007\u202F]*(<task>)", r"\1\n\n\2", t)
-    t = re.sub(r"(</embeddings_refs>)[\s\u00A0\u2007\u202F]*(<error>)", r"\1\n\n\2", t)
-    t = re.sub(r"(</memory>)[\s\u00A0\u2007\u202F]*(<task>)", r"\1\n\n\2", t)
-    t = re.sub(r"(</task>)[\s\u00A0\u2007\u202F]*(<error>)", r"\1\n\n\2", t)
-    return t
+    # Generic normalization: ensure exactly one blank line between any recognized closing and opening tags
+    tags = [
+        "embeddings_context",
+        "embeddings_code",
+        "embeddings_refs",
+        "embeddings_memory",
+        "embeddings_brain",
+        "embeddings_graph",
+        "evergreen",
+        "plan_kernels",
+        "memory",
+        "task",
+        "error",
+        "memory_context",
+        "memory_graph",
+    ]
+    alts = "|".join(tags)
+    pat = re.compile(rf"(</(?:{alts})>)[\s\u00A0\u2007\u202F]*(<(?:{alts})>)", re.IGNORECASE)
+    # Apply repeatedly to catch cascaded joins
+    prev = None
+    cur = t
+    for _ in range(4):
+        nxt = pat.sub(r"\1\n\n\2", cur)
+        if nxt == cur:
+            break
+        cur = nxt
+    return cur
 
 
 def build_header(ctx: str | None, mem_text: str | None, task_text: str | None, error_text: str | None = None, evergreen_text: str | None = None) -> str:

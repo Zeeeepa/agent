@@ -5,6 +5,7 @@ import re as _re
 
 from .context_builder import build_project_context_for, build_project_context_multi_for  # noqa: F401
 from .memory_context import build_memory_context_for
+from .unifier import build_unified_brain_block
 
 
 def _split_queries(q: str) -> List[str]:
@@ -43,6 +44,17 @@ async def build_unified_context_for(query: str, *, max_chars: Optional[int] = No
         except Exception:
             body = ""
     if body and body.strip():
+        # Try to augment with memory context (small budget) and a unified brain block
+        try:
+            mem_lines = await build_memory_context_for(q, max_chars=600, max_time_ms=160)
+        except Exception:
+            mem_lines = ""
+        try:
+            brain = build_unified_brain_block(body, mem_lines or "", q, "")
+        except Exception:
+            brain = ""
+        if brain:
+            return (body + "\n\n" + brain)
         return body
     # Fallback to memory-only context
     try:

@@ -478,24 +478,43 @@ async def retrieve_project_top_k(query: str, k: int | None = None, *, max_time_m
             sym1 = []
         if sym1:
             return sym1[:1]
-        tm_hits = await _run_sync_stage(stage_tokenmatch_hits, q_core, 1, int(PROJ_STAGE_TOKENMATCH_MS * _ATT_MUL))
-        if tm_hits:
-            return tm_hits[:1]
-        await asyncio.sleep(0)
-
         codey_seq = _is_code_like(q or "")
-        cap_lineexact2 = _bounded(_time_left(), int(PROJ_STAGE_LINEEXACT_MS * (1.5 if codey_seq else 1.0) * _ATT_MUL)) or PROJ_STAGE_LINEEXACT_MS
-        le_hits = await _run_sync_stage(stage_lineexact_hits, q_core, 1, cap_lineexact2)
-        if le_hits:
-            return le_hits[:1]
-        await asyncio.sleep(0)
+        # For code-like queries: prioritize precise line-exact, then literal, then tokenmatch
+        if codey_seq:
+            cap_lineexact2 = _bounded(_time_left(), int(PROJ_STAGE_LINEEXACT_MS * 1.5 * _ATT_MUL)) or PROJ_STAGE_LINEEXACT_MS
+            le_hits = await _run_sync_stage(stage_lineexact_hits, q_core, 1, cap_lineexact2)
+            if le_hits:
+                return le_hits[:1]
+            await asyncio.sleep(0)
 
-        # Literal exact/flex immediately after line-exact for code-like queries
-        cap_literal2 = _bounded(_time_left(), int(PROJ_STAGE_LITERAL_MS * (1.5 if codey_seq else 1.0) * _ATT_MUL)) or PROJ_STAGE_LITERAL_MS
-        lit_early = await _run_sync_stage(stage_literal_hits, (q_core or q), 1, cap_literal2)
-        if lit_early:
-            return lit_early[:1]
-        await asyncio.sleep(0)
+            cap_literal2 = _bounded(_time_left(), int(PROJ_STAGE_LITERAL_MS * 1.5 * _ATT_MUL)) or PROJ_STAGE_LITERAL_MS
+            lit_early = await _run_sync_stage(stage_literal_hits, (q_core or q), 1, cap_literal2)
+            if lit_early:
+                return lit_early[:1]
+            await asyncio.sleep(0)
+
+            tm_hits = await _run_sync_stage(stage_tokenmatch_hits, q_core, 1, int(PROJ_STAGE_TOKENMATCH_MS * _ATT_MUL))
+            if tm_hits:
+                return tm_hits[:1]
+            await asyncio.sleep(0)
+        else:
+            # Non code-like: tokenmatch first, then line-exact/literal
+            tm_hits = await _run_sync_stage(stage_tokenmatch_hits, q_core, 1, int(PROJ_STAGE_TOKENMATCH_MS * _ATT_MUL))
+            if tm_hits:
+                return tm_hits[:1]
+            await asyncio.sleep(0)
+
+            cap_lineexact2 = _bounded(_time_left(), int(PROJ_STAGE_LINEEXACT_MS * _ATT_MUL)) or PROJ_STAGE_LINEEXACT_MS
+            le_hits = await _run_sync_stage(stage_lineexact_hits, q_core, 1, cap_lineexact2)
+            if le_hits:
+                return le_hits[:1]
+            await asyncio.sleep(0)
+
+            cap_literal2 = _bounded(_time_left(), int(PROJ_STAGE_LITERAL_MS * _ATT_MUL)) or PROJ_STAGE_LITERAL_MS
+            lit_early = await _run_sync_stage(stage_literal_hits, (q_core or q), 1, cap_literal2)
+            if lit_early:
+                return lit_early[:1]
+            await asyncio.sleep(0)
 
         # Open-buffer search to catch unsaved code in editors
         ob_hits = await _run_sync_stage(stage_openbuffer_hits, (q_core or q), 1, 140 if codey_seq else 100)

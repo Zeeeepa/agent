@@ -24,6 +24,15 @@ from .project_retrieval_config import (
     PROJ_CONSOLIDATE_PER_FILE,
     PROJ_USAGE_REFS_LIMIT,
 )
+import jinx.state as jx_state
+try:
+    from .prefetch_cache import get_project as _pref_get_project
+except Exception:
+    _pref_get_project = None  # type: ignore[assignment]
+try:
+    from jinx.micro.runtime.seeds import get_seeds as _get_seeds
+except Exception:
+    _get_seeds = None  # type: ignore[assignment]
 from .project_snippet import build_snippet
 from .snippet_cache import make_snippet_cache_key, get_cached_snippet, put_cached_snippet
 from .graph_cache import get_symbol_graph_cached, find_usages_cached
@@ -61,6 +70,14 @@ THROTTLE_LOCK: asyncio.Lock = asyncio.Lock()
 
 
 async def build_project_context_for(query: str, *, k: int | None = None, max_chars: int | None = None, max_time_ms: int | None = 300) -> str:
+    # Fast-path: if prefetch cache has a recent context for this query, return it.
+    try:
+        if _pref_get_project is not None:
+            pref = _pref_get_project(query)
+            if pref:
+                return pref
+    except Exception:
+        pass
     k = k or PROJ_DEFAULT_TOP_K
     # Brain activation: derive unified concepts from project+memory+KG to expand query
     try:
@@ -103,6 +120,16 @@ async def build_project_context_for(query: str, *, k: int | None = None, max_cha
     exp_query = (query or "").strip()
     if brain_terms:
         exp_query = (exp_query + " " + " ".join(brain_terms)).strip()
+    # Centralized seeds (cog/foresight/oracle/hypersigil) with TTL + dedupe
+    try:
+        if _get_seeds is not None:
+            seeds_terms = list(_get_seeds(top_n=12) or [])
+        else:
+            seeds_terms = []
+    except Exception:
+        seeds_terms = []
+    if seeds_terms:
+        exp_query = (exp_query + " " + " ".join(seeds_terms)).strip()
 
     # In parallel, kick off memory retrieval when enabled (biased with brain tokens)
     try:
@@ -124,7 +151,7 @@ async def build_project_context_for(query: str, *, k: int | None = None, max_cha
         except Exception:
             mem_task = None
 
-    # Retrieve hits for both original and expanded queries, then merge
+    # Retrieve hits for original, brain-expanded, and opportunistically memory-expanded queries, then merge
     hits_base = await retrieve_project_top_k(query, k=k, max_time_ms=max_time_ms)
     hits_exp: list[tuple[float, str, dict]] = []
     if exp_query != (query or ""):
@@ -132,6 +159,43 @@ async def build_project_context_for(query: str, *, k: int | None = None, max_cha
             hits_exp = await retrieve_project_top_k(exp_query, k=k, max_time_ms=max_time_ms)
         except Exception:
             hits_exp = []
+    # Opportunistic memory-derived expansion (without blocking): extract quick tokens from mem_task if ready
+    hits_mem: list[tuple[float, str, dict]] = []
+    mem_query = (query or "").strip()
+    if mem_task is not None:
+        try:
+            mem_terms: list[str] = []
+            if mem_task.done():
+                mem_lines = await mem_task
+                try:
+                    # Quick token pass over a few lines to avoid latency; prefer alnum terms >=3 chars
+                    seen_mt: set[str] = set()
+                    for ln in (mem_lines or [])[:8]:
+                        for m in _re.finditer(r"(?u)[\w\.]{3,}", ln or ""):
+                            tok = (m.group(0) or "").strip().lower()
+                            if tok and tok not in seen_mt:
+                                mem_terms.append(tok)
+                                seen_mt.add(tok)
+                            if len(mem_terms) >= 8:
+                                break
+                        if len(mem_terms) >= 8:
+                            break
+                except Exception:
+                    mem_terms = []
+            if mem_terms:
+                mem_query = (mem_query + " " + " ".join(mem_terms)).strip()
+                if mem_query != (query or "") and mem_query != exp_query:
+                    try:
+                        # Use a smaller time budget for the memory-augmented pass
+                        mm = int((max_time_ms or 300) * 0.6)
+                    except Exception:
+                        mm = max_time_ms or 300
+                    try:
+                        hits_mem = await retrieve_project_top_k(mem_query, k=k, max_time_ms=mm)
+                    except Exception:
+                        hits_mem = []
+        except Exception:
+            hits_mem = []
     # Merge with dedupe by (file_rel, ls, le)
     def _kof(h: tuple[float, str, dict]) -> tuple:
         sc, rel, obj = h
@@ -139,7 +203,7 @@ async def build_project_context_for(query: str, *, k: int | None = None, max_cha
         return (str(m.get("file_rel") or rel), int(m.get("line_start") or 0), int(m.get("line_end") or 0))
     seen_k: set[tuple] = set()
     hits: list[tuple[float, str, dict]] = []
-    for lst in (hits_base or []), (hits_exp or []):
+    for lst in (hits_base or []), (hits_exp or []), (hits_mem or []):
         for h in lst:
             kx = _kof(h)
             if kx in seen_k:
@@ -594,6 +658,16 @@ async def build_project_context_multi_for(queries: List[str], *, k: int | None =
     sem = asyncio.Semaphore(_SNIP_CONC)
 
     q_join = " ".join(queries)[:512]
+    # Include seeds into the combined query to bias multi retrieval
+    try:
+        if _get_seeds is not None:
+            s_terms = _get_seeds(top_n=10)
+        else:
+            s_terms = []
+    except Exception:
+        s_terms = []
+    if s_terms:
+        q_join = (q_join + " " + " ".join(s_terms))[:768]
     codey_join = _is_code_like(q_join or "")
     # Brain activation (multi)
     try:
