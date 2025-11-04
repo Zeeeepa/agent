@@ -2,31 +2,63 @@
 
 # Jinx — Autonomous Engineering Agent
 
-I’m Jinx. An autonomous engineering agent built for teams that ship. I convert intent into execution: understand goals, generate code, validate, run in a sandbox, and deliver — auditable and reproducible by design.
+I’m **Jinx** — an autonomous engineering agent built for teams that ship. I turn intent into execution: understand goals, generate code, validate, sandbox, and deliver — all auditable and reproducible by design.
 
-Enterprise standards. Minimal surface area. Maximum signal. Licensed under MIT.
+> Enterprise-grade. Minimal surface area. Maximum signal.
 
-> Built for engineers. Comfortable in regulated environments. Consistent about reliability.
+---
 
 ## 🚀 Features
 
-- **Autonomous loop** with safe, sandboxed code execution
-- **Durable memory**: `<evergreen>` facts + compact rolling context
-- **Embeddings retrieval** from recent dialogue/sandbox for grounded answers
-- **Retry/timeout** wrappers around model calls; structured OpenAI request logging
-- **Zero‑friction setup**: optional dependencies ensured at runtime
-- **Extensible prompts** via `jinx/prompts/` and configuration
-- **Real‑time snippet caching** (TTL + LRU + coalescing) with file‑watcher invalidation
-- **Micro‑modular architecture**: thin facades in `jinx/embeddings/*`, logic in `jinx/micro/*`
+* **Autonomous loop** — understand → generate → verify → execute → refine.
+* **Sandboxed runtime** — isolated async process for secure code execution.
+* **Durable memory** — persistent `<evergreen>` store + rolling context compression.
+* **Semantic embeddings** — retrieve relevant dialogue or code context.
+* **Cognitive core (Brain)** — concept tracking, framework detection, adaptive reasoning.
+* **Structured logging** — full trace of model inputs, outputs, and execution results.
+* **Micro‑modular architecture** — lightweight, extendable, fault‑tolerant.
+
+> Designed for reliability. Built for regulated and production‑grade environments.
+
+---
+
+## 🧩 How It Works
+
+```
+User Intent → [jinx.py Entrypoint]
+                ↓
+ [Conversation Orchestrator] → Injects Memory + Embeddings
+                ↓
+             [LLM / Model]
+                ↓
+        Generated Code → [Sandbox Execution]
+                ↓
+         Validation → Update Memory → Log
+```
+
+### Core Components
+
+* **Entrypoint:** `jinx.py` — initializes async orchestrator.
+* **Orchestrator:** `jinx/conversation/orchestrator.py` — fuses context, memory, and embeddings.
+* **Memory System:** `jinx/memory/storage.py`, `jinx/memory/optimizer.py` — handles `<evergreen>` and transcript compaction.
+* **Embeddings Engine:** `jinx/embeddings/retrieval.py`, `jinx/micro/embeddings/*` — semantic slicing and ANN retrieval.
+* **Brain Module:** `jinx/micro/brain/*` — concept attention and cognitive linking.
+* **Sandbox:** `jinx/sandbox/*` — non‑blocking subprocess for executing generated code.
+* **Logging:** `jinx/log_paths.py` — structured logs, audit‑ready.
+
+Together, these layers form Jinx’s autonomous reasoning cycle.
+
+---
 
 ## ⭐ Star History
 
 <p align="center">
   <a href="https://star-history.com/#machinegpt/agent&Date">
-    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=machinegpt/agent&type=Date&theme=dark" onerror="this.src='https://api.star-history.com/svg?repos=machinegpt/agent&type=Date'" />
+    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=machinegpt/agent&type=Date&theme=dark" />
   </a>
 </p>
 
+---
 
 ## 🔧 Environment Setup
 
@@ -35,7 +67,7 @@ Before setting up the project, it's recommended to create a virtual environment.
 
 Learn about virtual environments: [Python Packaging Guide](https://packaging.python.org/en/latest/guides/installing-using-pip-and-virtual-environments/)
 
-Create and activate a virtual environment:
+Before running Jinx, create a virtual environment:
 
 **Windows:**
 
@@ -80,78 +112,78 @@ cp .env.example .env
 ```
 
 ## 🧠 Quick Start
-To start the agent:
 
 From a local clone:
-```
+
+```bash
 python jinx.py
 ```
 
-## 📚 Usage Notes
+This launches an interactive REPL. Describe a goal — Jinx plans, writes code, tests it in sandbox, and returns results.
 
-- Place your OpenAI API key in `.env` or system env before start
-- Logs live under `log/` (transcript, sandbox, general, embeddings, OpenAI dumps)
-- On errors, the system auto-decays a "pulse" to trigger retries and self-healing
+---
 
-## ✨ Contributions
+## 📚 Example Interaction
 
-Contributions, suggestions, bug reports and fixes are welcome!
+**User:** “Write a Python function to compute factorial and add tests.”
 
-For new features, components, or extensions, please open an issue and discuss before sending a PR.
+**Jinx:**
 
-## 💖 This project exists in its current state thanks to all the people who contribute
-<a href="https://github.com/machinegpt/agent/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=machinegpt/agent" />
-</a>
+* Generates `factorial(n)` implementation.
+* Creates test (`assert factorial(5) == 120`).
+* Executes safely in sandbox.
+* If failed — refines until success.
 
-## Disclaimer
-This project uses code generated by an AI assistant named Jinx. While Jinx is designed to produce high-quality Python code, not all generated code is manually reviewed. Use with caution, especially in production environments.
+> Result: *Function implemented, validated, and logged.*
 
 ---
 
 ## 🏗️ Architecture Overview
 
-The runtime is layered, async-first, and auditable:
+The runtime is async‑first and auditable:
 
-- **Entrypoint**: `jinx.py`
-- **Conversation Orchestrator**: `jinx/conversation/orchestrator.py`
-  - Builds standardized headers via `jinx/conversation/formatting.py`
-  - Integrates embeddings context (`jinx/embeddings/retrieval.py`)
-  - Injects durable `<evergreen>` facts (`jinx/memory/storage.py` → `read_evergreen()`)
-  - Invokes the model (`jinx/openai_service.py`) and executes code blocks in sandbox
-- **Memory Optimization**: `jinx/memory/optimizer.py`
-  - Compacts transcript into `<mem_compact>` and persists `<mem_evergreen>`
-  - Writes state via `jinx/memory/storage.py`
-- **Embeddings**: `jinx/embeddings/pipeline.py`, `jinx/embeddings/retrieval.py`
-  - Facades live in `jinx/embeddings/*`; heavy retrieval/snippet logic in `jinx/micro/embeddings/*`
-- **Sandbox**: `jinx/sandbox/*` (separate process, non-blocking)
-- **Logging**: targets defined in `jinx/log_paths.py`; OpenAI request dumps under `log/openai/*`
-- **Prompts**: configured via `jinx/config.py`, defined under `jinx/prompts/`
+* **Entrypoint** → `jinx.py`
+* **Conversation Orchestrator** → dialogue + embeddings + memory injection
+* **Memory Layer** → persistent + compacted context
+* **Embeddings Engine** → ANN‑based semantic recall
+* **Brain Module** → concept recognition and linking
+* **Sandbox Runtime** → secure subprocess for isolated execution
+* **Logging** → complete audit trail under `/log/`
 
-## 📄 License
-
-This project is licensed under the **MIT License**. See the [`LICENSE`](LICENSE) file for details.
-
-## 🧪 Testing Tips
-
-- Keep services small and injectable. The `jinx/contracts.py` file outlines optional Protocols to guide decoupling.
-- For sandboxed execution, assert on log file contents rather than stdout.
+---
 
 ## 🔐 Security & Compliance
 
-- **Secrets**: Provide keys via `.env` or environment variables (see `.env.example`). Keys are not logged.
-- **Sandbox boundary**: All code generated by the model executes in an isolated sandbox process. This is a safety layer, not a hard security boundary.
-- **Logging scope**: Structured logs live under `log/`. Avoid placing sensitive data in prompts. OpenAI request dumps capture instructions and input payloads for auditability.
-- **Data retention**: Evergreen memory stores durable facts you explicitly surface; ephemeral transcript is compacted routinely.
-- **Network/Dependencies**: Optional dependencies are ensured at runtime; pin if your environment requires deterministic builds.
+* **Secrets:** Managed via `.env` (never logged).
+* **Sandbox:** All model code runs isolated; not a hard boundary, but a safety layer.
+* **Logging:** Structured; avoid sensitive data in prompts.
 
-## 🤖 Responsible AI
+---
 
-- Human-in-the-loop recommended for critical paths.
-- Deterministic audit trail: inputs, headers, model outputs, and executed code are logged.
-- No training occurs on your data within this repository. External model behavior is governed by your chosen provider’s policies.
+## ✨ Contributions
+
+Contributions, suggestions, and feature proposals are welcome.
+
+* Open issues for discussion before PRs.
+* Follow modular design — see `jinx/contracts.py`.
+
+<a href="https://github.com/machinegpt/agent/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=machinegpt/agent" />
+</a>
+
+---
+
+## 📄 License
+
+Released under the **MIT License**. See [`LICENSE`](LICENSE) for details.
+
+---
 
 ## 💬 Support
 
-- File issues and feature requests in GitHub Issues.
-- For questions and design proposals, open a Discussion or start with an Issue to scope the change.
+* File issues and feature requests in [GitHub Issues](https://github.com/machinegpt/agent/issues)
+* Start a Discussion for architectural or design topics.
+
+---
+
+**Jinx — a system learning to build and evolve itself.**
