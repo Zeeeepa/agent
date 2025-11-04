@@ -58,13 +58,22 @@ class MemoryService:
             return 0
 
     async def query(self, query_text: str, *, k: int = 8, policy: str = "any", preview_chars: int = 200) -> List[Dict[str, Any]]:
-        """Hybrid memory retrieval: ranker + vector + optional cross-encoder rerank.
+        """Hybrid memory retrieval with adaptive parameters from brain systems.
 
         Returns a list of dicts: {text, source, scores:{vec, ce, base, final}, meta:{...}}.
         """
         q = (query_text or "").strip()
         if not q:
             return []
+        
+        # Use adaptive k if default
+        if k == 8:
+            try:
+                from jinx.micro.brain import select_retrieval_params
+                k_adaptive, _ = await select_retrieval_params(q)
+                k = k_adaptive
+            except Exception:
+                pass
         # Allocation between ranker and vector results
         try:
             frac_vec = float(os.getenv("JINX_MEM_Q_VEC_FRAC", "0.5"))

@@ -20,6 +20,18 @@ async def dec_pulse(amount: int) -> None:
     if jx_state.pulse <= 0:
         jx_state.pulse = 0
         hard = str(os.getenv("JINX_PULSE_HARD_SHUTDOWN", "0")).strip().lower() in {"1", "true", "yes", "on"}
+        
+        # Record pulse exhaustion
+        try:
+            from jinx.micro.runtime.crash_diagnostics import record_operation
+            record_operation(
+                "pulse_exhausted",
+                details={'hard_shutdown': hard, 'amount': amount},
+                success=not hard
+            )
+        except Exception:
+            pass
+        
         if hard:
             # Signal the runtime to shut down gracefully
             jx_state.shutdown_event.set()

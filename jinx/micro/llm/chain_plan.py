@@ -10,16 +10,24 @@ from jinx.micro.llm.chain_resilience import record_success, record_failure, save
 
 
 async def run_planner(user_text: str, *, max_subqueries: Optional[int] = None, planner_ms: Optional[int] = 400) -> Dict[str, Any]:
-    """Run a minimal planning step to produce a few short sub-queries.
+    """Enhanced planner with brain systems integration and ML optimization.
 
-    Returns a dict like: {"sub_queries": [...], "note": "..."}
-    At most one LLM call; gated by JINX_CHAINED_REASONING.
+    Returns a dict like: {"sub_queries": [...], "note": "...", "ml_params": {...}}
+    Uses brain systems for query enhancement and adaptive parameters.
     """
-    # Planner is always enabled; keep running for any non-empty input
-
     txt = (user_text or "").strip()
     if not txt:
         return {"sub_queries": [], "note": "empty"}
+    
+    # Enhance query with brain systems BEFORE planning
+    enhanced_txt = txt
+    import os
+    if os.getenv('JINX_BRAIN_ENHANCE_PLANNER', '1') in ('1', 'true', 'on'):
+        from jinx.micro.brain import expand_query
+        expanded = await expand_query(txt)
+        if expanded and expanded.confidence > 0.6:
+            enhanced_txt = expanded.expanded
+            await trace_plan({"phase": "enhanced", "confidence": expanded.confidence})
 
     evid = await collect_pre_evidence(txt)
     planner_input = txt if not evid else (f"<user>\n{txt}\n</user>\n\n<evidence>\n{evid}\n</evidence>")

@@ -26,6 +26,54 @@ from jinx.micro.rt.backpressure import set_throttle_ttl
 ensure_optional(["prompt_toolkit"])  # installs if missing
 
 
+async def _simple_input_loop(qe: asyncio.Queue[str]) -> None:
+    """Simple input loop fallback for Windows PowerShell when prompt_toolkit fails."""
+    print("\nJinx ready (simple input mode)")
+    print("Type your requests and press Enter\n")
+    
+    while True:
+        # Check for shutdown FIRST
+        if jx_state.shutdown_event.is_set():
+            break
+        
+        try:
+            # Get input from user
+            try:
+                loop = asyncio.get_running_loop()
+                user_input = await loop.run_in_executor(None, lambda: input("> "))
+                
+                if user_input.strip():
+                    # Try to log, but don't fail if logging fails
+                    try:
+                        await bomb_log(user_input, TRIGGER_ECHOES)
+                    except Exception:
+                        pass  # Logging failure shouldn't stop input
+                    
+                    # Put in queue - THIS IS CRITICAL
+                    await qe.put(user_input.strip())
+                
+            except EOFError:
+                # Ctrl+D pressed - normal exit
+                break
+            except KeyboardInterrupt:
+                # Ctrl+C pressed - normal exit
+                break
+            except Exception as e:
+                # Input error - log but CONTINUE (don't break!)
+                try:
+                    await bomb_log(f"Input error: {e}", BLUE_WHISPERS)
+                except Exception:
+                    pass
+                # Continue loop - don't break!
+            
+            # Small yield to other tasks
+            await asyncio.sleep(0.01)
+            
+        except Exception as e:
+            # Outer exception handler - also don't break!
+            await asyncio.sleep(0.1)  # Small delay before retry
+
+
 async def neon_input(qe: asyncio.Queue[str]) -> None:
     """Read user input and feed it into the provided queue.
 
@@ -34,15 +82,42 @@ async def neon_input(qe: asyncio.Queue[str]) -> None:
     qe : asyncio.Queue[str]
         Target queue for sanitized user input.
     """
-    # Lazily import prompt_toolkit symbols
-    _ptk = importlib.import_module("prompt_toolkit")
-    _ptk_keys = importlib.import_module("prompt_toolkit.key_binding")
-    _ptk_fmt = importlib.import_module("prompt_toolkit.formatted_text")
-    PromptSession = getattr(_ptk, "PromptSession")
-    KeyBindings = getattr(_ptk_keys, "KeyBindings")
-    FormattedText = getattr(_ptk_fmt, "FormattedText")
+    # Try to use prompt_toolkit, fallback to simple input if fails
+    use_prompt_toolkit = True
+    PromptSession = None
+    KeyBindings = None
+    FormattedText = None
+    
+    try:
+        # Lazily import prompt_toolkit symbols
+        _ptk = importlib.import_module("prompt_toolkit")
+        _ptk_keys = importlib.import_module("prompt_toolkit.key_binding")
+        _ptk_fmt = importlib.import_module("prompt_toolkit.formatted_text")
+        PromptSession = getattr(_ptk, "PromptSession")
+        KeyBindings = getattr(_ptk_keys, "KeyBindings")
+        FormattedText = getattr(_ptk_fmt, "FormattedText")
+        
+        # Test if prompt_toolkit can initialize (quick test)
+        # Don't actually create session here to avoid blocking
+        
+    except Exception as e:
+        # Prompt_toolkit не работает, используем fallback
+        use_prompt_toolkit = False
+        try:
+            await bomb_log(f"prompt_toolkit unavailable (fallback to simple input): {e}", BLUE_WHISPERS)
+        except Exception:
+            pass  # Even logging can fail, don't care
+    
+    if not use_prompt_toolkit or PromptSession is None:
+        # Simple input fallback для Windows PowerShell
+        return await _simple_input_loop(qe)
 
-    finger_wire = KeyBindings()
+    # Try to create session - if this fails, use simple input
+    try:
+        finger_wire = KeyBindings()
+    except Exception as e:
+        print(f"KeyBindings failed: {e}")
+        return await _simple_input_loop(qe)
 
     def _toolbar() -> "FormattedText":
         show_det = parse_env_bool("JINX_SPINNER_ACTIVITY_DETAIL", True)
@@ -64,7 +139,12 @@ async def neon_input(qe: asyncio.Queue[str]) -> None:
         text = f"❤ {pulse} | {act or 'ready'} [{age:.1f}s]{det_str} (total {total:.1f}s)"
         return FormattedText([("", text)])
 
-    sess = PromptSession(key_bindings=finger_wire, bottom_toolbar=_toolbar)
+    # Try to create PromptSession - this is where "No Windows console" error occurs
+    try:
+        sess = PromptSession(key_bindings=finger_wire, bottom_toolbar=_toolbar)
+    except Exception as e:
+        # PromptSession failed - use simple fallback
+        return await _simple_input_loop(qe)
     boom_clock: dict[str, float] = {"time": asyncio.get_running_loop().time()}
     activity = asyncio.Event()
     # Gate to emit <no_response> only once per inactivity period (until next activity)
@@ -161,15 +241,38 @@ async def neon_input(qe: asyncio.Queue[str]) -> None:
     try:
         prompt_task: asyncio.Task[str] | None = None
         shutdown_task: asyncio.Task[bool] | None = None  # Event.wait() resolves to True
+        consecutive_errors = 0
+        max_consecutive_errors = 5
+        
         while True:
+            # If too many consecutive errors, fall back to simple input
+            if consecutive_errors >= max_consecutive_errors:
+                print("\n[Switching to simple input mode due to errors]")
+                return await _simple_input_loop(qe)
             try:
                 # Race the prompt against a shutdown signal to exit promptly
-                pt: asyncio.Task[str] = asyncio.create_task(sess.prompt_async("\n"))
+                try:
+                    pt: asyncio.Task[str] = asyncio.create_task(sess.prompt_async("\n"))
+                except Exception as e:
+                    # prompt_async failed - switch to simple input
+                    watch_task.cancel()
+                    pulse_task.cancel()
+                    with contextlib.suppress(Exception):
+                        await watch_task
+                        await pulse_task
+                    return await _simple_input_loop(qe)
+                
                 # Ensure any exception (including BaseException like KeyboardInterrupt) is retrieved
                 def _swallow_task_exc(t: asyncio.Task) -> None:
                     try:
                         # Using result() to also re-raise BaseException subclasses
                         _ = t.result()
+                    except KeyboardInterrupt:
+                        # Don't cancel during KeyboardInterrupt - let it propagate naturally
+                        return
+                    except asyncio.CancelledError:
+                        # Already cancelled, nothing to do
+                        return
                     except BaseException:
                         pass
                 pt.add_done_callback(_swallow_task_exc)
@@ -194,6 +297,7 @@ async def neon_input(qe: asyncio.Queue[str]) -> None:
                 if v.strip():
                     await bomb_log(v, TRIGGER_ECHOES)
                     await qe.put(v.strip())
+                    consecutive_errors = 0  # Reset on success
                 # expose tasks for final cleanup
                 prompt_task = pt
                 shutdown_task = st
@@ -204,7 +308,9 @@ async def neon_input(qe: asyncio.Queue[str]) -> None:
                         await prompt_task
                 break
             except Exception as e:  # pragma: no cover - guard rail for TTY issues
+                consecutive_errors += 1
                 await bomb_log(f"ERROR INPUT chaos keys went rogue: {e}")
+                await asyncio.sleep(0.5)  # Brief delay before retry
     finally:
         # Ensure watchdog is cancelled when input loop exits
         watch_task.cancel()

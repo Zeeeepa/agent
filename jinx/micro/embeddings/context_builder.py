@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import asyncio
+import time
 from typing import Any, Dict, List, Tuple
 
 from .project_rerank import rerank_hits_unified
@@ -70,15 +71,36 @@ THROTTLE_LOCK: asyncio.Lock = asyncio.Lock()
 
 
 async def build_project_context_for(query: str, *, k: int | None = None, max_chars: int | None = None, max_time_ms: int | None = 300) -> str:
+    """Build project context with adaptive ML-driven parameters."""
+    t0 = time.perf_counter()
+    
     # Fast-path: if prefetch cache has a recent context for this query, return it.
     try:
         if _pref_get_project is not None:
             pref = _pref_get_project(query)
             if pref:
+                # Record cache hit outcome
+                try:
+                    from jinx.micro.brain.outcome_tracker import record_outcome
+                    asyncio.create_task(record_outcome('context_build', True, {'cache_hit': True, 'query_len': len(query)}))
+                except Exception:
+                    pass
                 return pref
     except Exception:
         pass
-    k = k or PROJ_DEFAULT_TOP_K
+    
+    # Use adaptive retrieval parameters if k not specified
+    if k is None:
+        try:
+            from jinx.micro.brain.adaptive_retrieval import select_retrieval_params
+            k_adaptive, timeout_adaptive = await select_retrieval_params(query)
+            k = k_adaptive
+            if max_time_ms is None:
+                max_time_ms = timeout_adaptive
+        except Exception:
+            k = PROJ_DEFAULT_TOP_K
+    else:
+        k = k
     # Brain activation: derive unified concepts from project+memory+KG to expand query
     try:
         _brain_enable = os.getenv("EMBED_BRAIN_ENABLE", "1").strip().lower() not in ("", "0", "false", "off", "no")
@@ -608,6 +630,28 @@ async def build_project_context_for(query: str, *, k: int | None = None, max_cha
             await _att_rec(keys, weight=1.0)
     except Exception:
         pass
+    
+    # Record outcome for learning
+    elapsed_ms = (time.perf_counter() - t0) * 1000
+    try:
+        from jinx.micro.brain.outcome_tracker import record_outcome
+        success = len(parts) > 0
+        asyncio.create_task(record_outcome(
+            'context_build',
+            success,
+            {
+                'query_len': len(query),
+                'k': k,
+                'hits': len(hits_sorted) if 'hits_sorted' in locals() else 0,
+                'parts': len(parts),
+                'total_chars': len(final_text),
+                'brain_enabled': _brain_enable if '_brain_enable' in locals() else False,
+            },
+            latency_ms=elapsed_ms
+        ))
+    except Exception:
+        pass
+    
     return final_text
 
 

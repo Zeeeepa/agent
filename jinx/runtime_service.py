@@ -8,6 +8,7 @@ friendly, and side-effect contained for testability.
 from __future__ import annotations
 
 import asyncio
+import os
 from jinx.banner_service import show_banner
 import concurrent.futures as _cf
 from jinx.utils import chaos_patch
@@ -114,6 +115,24 @@ async def pulse_core(settings: Settings | None = None) -> None:
             SupervisedJob(name="autotune", start=lambda: start_autotune_task(q_in, cfg)),
             SupervisedJob(name="watchdog", start=lambda: start_watchdog_task(cfg)),
         ]
+        
+        # Add self-healing and health monitoring (if enabled)
+        try:
+            if str(os.getenv("JINX_SELF_HEALING", "1")).lower() not in ("", "0", "false", "off", "no"):
+                from jinx.micro.runtime.health_monitor import start_health_monitoring
+                
+                async def _start_health():
+                    await start_health_monitoring()
+                    # Keep alive
+                    while not jx_state.shutdown_event.is_set():
+                        await asyncio.sleep(1.0)
+                    return None
+                
+                job_specs.append(
+                    SupervisedJob(name="health-monitor", start=lambda: asyncio.create_task(_start_health()))
+                )
+        except Exception:
+            pass
 
         try:
             # Start optional plugins prior to supervised jobs
@@ -124,21 +143,90 @@ async def pulse_core(settings: Settings | None = None) -> None:
                 await _start_plugins()
             # Run supervised set; returns when shutdown_event is set
             await run_supervisor(job_specs, jx_state.shutdown_event, cfg)
-        except (asyncio.CancelledError, KeyboardInterrupt):
+        except (asyncio.CancelledError, KeyboardInterrupt) as e:
             # Signal global shutdown to all components
             jx_state.shutdown_event.set()
+            
+            # Give tasks a moment to notice shutdown
+            try:
+                await asyncio.sleep(0.1)
+            except Exception:
+                pass
+        except RecursionError:
+            # Deep recursion during shutdown, force exit
+            jx_state.shutdown_event.set()
+            import sys
+            sys.exit(1)
         finally:
             # Stop auxiliary background workers first
-            with contextlib.suppress(Exception):
+            try:
                 await stop_error_worker()
+            except Exception:
+                pass
+            
+            try:
                 await stop_memory_optimizer()
+            except Exception:
+                pass
+            
+            try:
                 # Ensure embeddings services are cancelled/awaited for clean shutdown
                 await stop_embeddings_task()
+            except Exception:
+                pass
+            
+            try:
                 await stop_project_embeddings_task()
+            except Exception:
+                pass
+            
+            try:
                 # Cancel/await self-study tasks started by ensure_runtime()
                 await _stop_selfstudy()
+            except Exception:
+                pass
+            
+            try:
                 # Stop optional plugins last
                 await _stop_plugins()
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+            
+            # Ensure all pending tasks are properly cleaned up (avoid deep recursion)
+            try:
+                loop = asyncio.get_running_loop()
+                # Get only top-level tasks, not nested ones
+                pending = [
+                    t for t in asyncio.all_tasks(loop) 
+                    if not t.done() and t != asyncio.current_task()
+                ]
+                
+                # Cancel tasks one by one with shallow cancellation
+                for task in pending:
+                    try:
+                        task.cancel()
+                    except RecursionError:
+                        # If recursion error, skip this task
+                        pass
+                
+                # Wait with timeout to prevent hanging
+                if pending:
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.gather(*pending, return_exceptions=True),
+                            timeout=2.0
+                        )
+                    except asyncio.TimeoutError:
+                        # Some tasks didn't finish, that's ok
+                        pass
+            except RecursionError:
+                # Deep recursion detected, bail out gracefully
+                pass
+            except Exception:
+                pass
+            
             # Ensure ProcessPoolExecutor is torn down to avoid atexit join hang
             with contextlib.suppress(Exception):
                 _retr_pool_shutdown()

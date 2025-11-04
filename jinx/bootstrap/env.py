@@ -33,3 +33,11 @@ def load_env(paths: Iterable[str] | None = None) -> None:
             dotenv.load_dotenv(override=False)
     except Exception:
         pass
+    
+    # Apply autonomous configuration after .env is loaded
+    try:
+        from jinx.micro.runtime.autoconfig import apply_auto_defaults
+        apply_auto_defaults()
+    except Exception:
+        # Non-fatal: continue without auto-config
+        pass

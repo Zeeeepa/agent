@@ -7,12 +7,50 @@ import re as _re
 import time
 from collections import deque, defaultdict
 from typing import Sequence
+from functools import lru_cache
 from jinx.conversation.orchestrator import shatter
 from jinx.spinner_service import sigil_spin
 import jinx.state as jx_state
 from jinx.micro.runtime.task_ctx import current_group
 from jinx.micro.rt.backpressure import clear_throttle_if_ttl
 from jinx.micro.runtime.plugins import publish_event as _publish_event
+
+
+@lru_cache(maxsize=2048)
+def _has_discourse_markers(text: str) -> bool:
+    """Detect discourse markers using structure analysis with caching.
+    
+    Instead of hardcoded keyword lists, uses linguistic patterns:
+    - Conjunctions and connectors at typical positions
+    - Clause structure indicators (commas, semicolons)
+    - Sentence complexity indicators
+    """
+    if not text or len(text) < 10:
+        return False
+    
+    text_lower = text.lower()
+    
+    # Structural indicators of discourse (not single commands)
+    # Look for:
+    # 1. Multiple commas (clause structure)
+    if text.count(',') >= 2:
+        return True
+    
+    # 2. Semicolons (complex sentences)
+    if ';' in text and text.count(';') < 3:  # But not just semicolon-separated list
+        return True
+    
+    # 3. Common connectors at word boundaries (not just substring match)
+    # Use regex for word boundary matching to avoid false positives
+    connector_pattern = r'\b(however|therefore|because|although|moreover|furthermore|nevertheless|consequently|thus|hence|whereas)\b'
+    if _re.search(connector_pattern, text_lower):
+        return True
+    
+    # 4. Question + explanation pattern
+    if '?' in text and text.rfind('?') < len(text) * 0.7:  # Question not at end
+        return True
+    
+    return False
 
 
 # Advanced multi-message splitting with semantic awareness
@@ -68,7 +106,8 @@ def _split_if_multi(msg: str, group_id: str) -> Sequence[str] | None:
     lines = [ln.strip() for ln in stripped.split('\n') if ln.strip()]
     if 2 <= len(lines) <= _MAX_SPLIT:
         # Check if they look like short commands (all under 100 chars)
-        if all(len(ln) < 100 and not any(kw in ln.lower() for kw in ['however', 'therefore', 'because', 'although']) for ln in lines):
+        # Exclude lines with discourse markers (complex sentences)
+        if all(len(ln) < 100 and not _has_discourse_markers(ln) for ln in lines):
             return lines
     
     return None
@@ -107,10 +146,8 @@ async def frame_shift(q: asyncio.Queue[str]) -> None:
     except Exception:
         _SIMPLE_SCAN = 0
     # Threshold for embeddings-based locator classifier margin (pos - neg)
-    try:
-        _LOC_THRESH = float(os.getenv("JINX_LOCATOR_THRESH", "0.06"))
-    except Exception:
-        _LOC_THRESH = 0.06
+    # Now adaptive via threshold learner
+    _LOC_THRESH = 0.06  # fallback only
     # Multi-split of a single inbound message into sub-requests
     try:
         _SPLIT_ON = str(os.getenv("JINX_MULTI_SPLIT_ENABLE", "1")).lower() not in ("", "0", "false", "off", "no")
@@ -241,15 +278,25 @@ async def frame_shift(q: asyncio.Queue[str]) -> None:
             sc = None
         return float(sc) if sc is not None else 0.0
 
-    def _pop_next(dq: deque[str], prefer_simple: bool) -> str | None:
+    async def _pop_next_async(dq: deque[str], prefer_simple: bool) -> str | None:
+        """Async version with adaptive threshold."""
         if not dq:
             return None
         if not prefer_simple or _SIMPLE_SCAN <= 0:
             return dq.popleft()
+        
+        # Get adaptive threshold from learner
+        thresh = _LOC_THRESH  # fallback
+        try:
+            from jinx.micro.brain.threshold_learner import select_threshold as _sel_th
+            thresh = await _sel_th('locator_thresh')
+        except Exception:
+            pass
+        
         # Embeddings-based preference: scan first N pending for highest cached locator score
         n = min(len(dq), _SIMPLE_SCAN + 1)
         best_idx = -1
-        best_sc = _LOC_THRESH
+        best_sc = thresh
         # Enumerate without consuming: convert small head slice to list
         i = 0
         for m in dq:
@@ -267,6 +314,13 @@ async def frame_shift(q: asyncio.Queue[str]) -> None:
             dq.rotate(-best_idx)
             item = dq.popleft()
             dq.rotate(best_idx)
+            # Record outcome asynchronously
+            try:
+                from jinx.micro.brain.threshold_learner import record_threshold_outcome as _rec_th
+                success = True  # selected fast-lane item
+                asyncio.create_task(_rec_th('locator_thresh', thresh, success))
+            except Exception:
+                pass
             return item
         except Exception:
             # Fallback: pop head
@@ -276,6 +330,11 @@ async def frame_shift(q: asyncio.Queue[str]) -> None:
         while True:
             # Respect global shutdown fast-path
             if jx_state.shutdown_event.is_set():
+                try:
+                    from jinx.micro.logger.debug_logger import debug_log_sync
+                    debug_log_sync("Shutdown event detected - exiting loop", "FRAME_SHIFT")
+                except Exception:
+                    pass
                 break
             # Periodically clear throttle via TTL
             try:
@@ -333,7 +392,7 @@ async def frame_shift(q: asyncio.Queue[str]) -> None:
                         dq = pending_by_group.get(gid)
                         if not dq:
                             continue
-                        raw = _pop_next(dq, prefer_simple)
+                        raw = await _pop_next_async(dq, prefer_simple)
                         if raw is None:
                             continue
                         msg = _strip_group_tag(raw)

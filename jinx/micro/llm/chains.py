@@ -1,6 +1,7 @@
 from __future__ import annotations
+import asyncio
 import os
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from jinx.micro.llm.chain_utils import truthy_env
 from jinx.micro.llm.chain_evidence import gather_planner_evidence
@@ -26,11 +27,60 @@ from jinx.micro.llm.chain_render import (
 from jinx.micro.llm.chain_context import gather_context_for_subs
 from jinx.micro.llm.chain_finalize import finalize_context
 from jinx.micro.llm.kernel_sanitizer import sanitize_kernels
+from jinx.micro.llm.context_processor import process_all_context, build_agent_context_summary
 
 
 async def run_planner(user_text: str, *, max_subqueries: int | None = None, planner_ms: int | None = 400) -> Dict[str, Any]:
-    """Delegate to micro-module implementation for planner call."""
-    return await _run_planner(user_text, max_subqueries=max_subqueries, planner_ms=planner_ms)
+    """Enhanced planner with brain systems integration and ML processing."""
+    # Integrate with brain systems for enhanced planning
+    brain_enhanced = await _enhance_with_brain_systems(user_text)
+    result = await _run_planner(brain_enhanced or user_text, max_subqueries=max_subqueries, planner_ms=planner_ms)
+    
+    # Process with ML systems
+    if result and result.get('sub_queries'):
+        result = await _ml_enhance_plan(result)
+    
+    return result
+
+
+async def _enhance_with_brain_systems(user_text: str) -> Optional[str]:
+    """Enhance query with brain systems intelligence."""
+    if not user_text:
+        return None
+    
+    # Try to use query expansion from brain
+    expanded = None
+    if os.getenv('JINX_BRAIN_ENHANCE_PLANNER', '1') in ('1', 'true', 'on'):
+        from jinx.micro.brain import expand_query
+        expanded_result = await expand_query(user_text)
+        if expanded_result and expanded_result.confidence > 0.6:
+            expanded = expanded_result.expanded
+    
+    return expanded
+
+
+async def _ml_enhance_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
+    """Enhance plan with ML intelligence."""
+    # Use brain systems to score and optimize subqueries
+    if os.getenv('JINX_BRAIN_ML_ENHANCE', '1') not in ('1', 'true', 'on'):
+        return plan
+    
+    from jinx.micro.brain import get_adaptive_manager
+    
+    # Optimize retrieval parameters based on query complexity
+    mgr = await get_adaptive_manager()
+    sub_queries = plan.get('sub_queries', [])
+    
+    if sub_queries:
+        # Use adaptive retrieval to determine optimal k for subqueries
+        context = {
+            'subquery_count': len(sub_queries),
+            'plan_complexity': len(str(plan))
+        }
+        k, timeout = await mgr.select_params('planner', context)
+        plan['ml_params'] = {'k': k, 'timeout_ms': timeout}
+    
+    return plan
 
 
 async def build_planner_context(user_text: str) -> str:

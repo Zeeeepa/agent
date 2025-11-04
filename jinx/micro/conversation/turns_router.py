@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import re
-from typing import Optional, Dict
+from typing import Optional, Dict, Set
+from functools import lru_cache
+import threading
 
 # Language-agnostic turns detection.
 # Returns {"kind": "user|jinx|pair", "index": int} or None.
@@ -10,15 +12,72 @@ _FULLWIDTH = str.maketrans({
     "０":"0","１":"1","２":"2","３":"3","４":"4","５":"5","６":"6","７":"7","８":"8","９":"9"
 })
 
-_ROLE_TOKENS = {
-    "jinx": "jinx",
-    "assistant": "jinx",
-    "agent": "jinx",
-    "bot": "jinx",
-    "user": "user",
-    "human": "user",
-    "operator": "user",
-}
+class RoleMapper:
+    """Extensible role token mapping with thread safety."""
+    
+    _instance: 'RoleMapper | None' = None
+    _lock = threading.RLock()
+    
+    def __init__(self):
+        self._role_map: Dict[str, str] = {}
+        self._setup_default_mappings()
+    
+    @classmethod
+    def get_instance(cls) -> 'RoleMapper':
+        """Thread-safe singleton access."""
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = cls()
+        return cls._instance
+    
+    def _setup_default_mappings(self) -> None:
+        """Initialize default role token mappings."""
+        # Assistant/Agent role tokens
+        assistant_tokens = [
+            "jinx", "assistant", "agent", "bot", "ai", 
+            "cascade", "system", "model"
+        ]
+        for token in assistant_tokens:
+            self._role_map[token] = "jinx"
+        
+        # User/Human role tokens
+        user_tokens = [
+            "user", "human", "operator", "person", 
+            "me", "my", "you", "your"
+        ]
+        for token in user_tokens:
+            self._role_map[token] = "user"
+    
+    def add_mapping(self, token: str, role: str) -> None:
+        """Add custom role token mapping."""
+        with self._lock:
+            if role in {"jinx", "user", "pair"}:
+                self._role_map[token.lower()] = role
+    
+    @lru_cache(maxsize=1024)
+    def detect_role(self, text: str) -> str:
+        """Detect role from text with caching."""
+        if not text:
+            return "pair"
+        
+        t = text.lower()
+        
+        # Check for role tokens with word boundary matching for accuracy
+        for token, role in self._role_map.items():
+            # Use word boundary regex for better precision
+            if re.search(rf'\b{re.escape(token)}\b', t):
+                return role
+        
+        # Default to pair (safer and still useful)
+        return "pair"
+
+
+# Global role mapper instance
+_role_mapper = RoleMapper.get_instance()
+
+# Legacy compatibility
+_ROLE_TOKENS = _role_mapper._role_map.copy()
 
 _NEAR_MSG_PATTERNS = [
     # Explicit markers
@@ -83,13 +142,8 @@ def _extract_index(text: str) -> Optional[int]:
 
 
 def _detect_kind(text: str) -> str:
-    t = (text or "").lower()
-    # Role tokens (language-agnostic-ish): prefer explicit role if present
-    for tok, role in _ROLE_TOKENS.items():
-        if tok in t:
-            return role
-    # Default to pair (safer and still useful)
-    return "pair"
+    """Detect conversation role kind from text."""
+    return _role_mapper.detect_role(text)
 
 
 def detect_turn_query(text: str) -> Optional[Dict[str, object]]:

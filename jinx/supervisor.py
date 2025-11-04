@@ -126,6 +126,12 @@ async def run_supervisor(jobs: list[SupervisedJob], shutdown_event: asyncio.Even
                     continue
                 if ex is None:
                     # Natural completion; do not restart
+                    try:
+                        from jinx.micro.logger.debug_logger import debug_log_sync
+                        debug_log_sync(f"Task '{name}' completed normally - NOT restarting", "SUPERVISOR")
+                        debug_log_sync(f"Remaining active tasks: {len(tasks)}", "SUPERVISOR")
+                    except Exception:
+                        pass
                     continue
                 if not rt.supervise_tasks:
                     continue
@@ -190,7 +196,24 @@ async def run_supervisor(jobs: list[SupervisedJob], shutdown_event: asyncio.Even
                     break
                 _start(name)
     finally:
-        # cancel all active
+        # cancel all active (with recursion protection)
         for t in tasks.values():
-            t.cancel()
-        await asyncio.gather(*tasks.values(), return_exceptions=True)
+            try:
+                t.cancel()
+            except RecursionError:
+                # Skip tasks that cause deep recursion
+                pass
+        
+        # Wait for tasks with timeout to prevent hanging
+        if tasks:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*tasks.values(), return_exceptions=True),
+                    timeout=3.0
+                )
+            except asyncio.TimeoutError:
+                # Some tasks didn't finish, that's acceptable
+                pass
+            except RecursionError:
+                # Deep recursion in gather, bail out
+                pass

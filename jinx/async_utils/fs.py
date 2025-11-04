@@ -17,11 +17,39 @@ T = TypeVar('T')
 async def read_text_raw(path: str) -> str:
     """Read entire text file if it exists else return empty string (no strip)."""
     try:
-        if await ospath.exists(path):
-            async with aiofiles.open(path, "r", encoding="utf-8") as f:
-                return await f.read()
+        if not path:
+            return ""
+        
+        # Ensure path exists
+        if not await ospath.exists(path):
+            return ""
+        
+        # Check if it's a file
+        if not await ospath.isfile(path):
+            return ""
+        
+        # Check if event loop is running
+        try:
+            loop = _asyncio.get_running_loop()
+        except RuntimeError:
+            # No running loop, return empty
+            return ""
+        
+        async with aiofiles.open(path, "r", encoding="utf-8", errors='ignore') as f:
+            try:
+                content = await f.read()
+                return content if content else ""
+            except RuntimeError:
+                # Loop closed during operation
+                return ""
+    except (OSError, IOError, UnicodeDecodeError):
+        # File access errors - return empty
+        return ""
+    except RuntimeError:
+        # Event loop closed
         return ""
     except Exception:
+        # Any other error - return empty but don't crash
         return ""
 
 

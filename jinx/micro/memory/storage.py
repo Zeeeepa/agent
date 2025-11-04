@@ -4,7 +4,6 @@ import os
 import time
 
 from jinx.async_utils.fs import read_text_raw, write_text
-from jinx.state import shard_lock
 from jinx.log_paths import INK_SMEARED_DIARY, EVERGREEN_MEMORY
 from jinx.micro.embeddings.project_config import ROOT as PROJECT_ROOT
 import asyncio
@@ -18,8 +17,28 @@ def _memory_dir() -> str:
     except Exception:
         sub = os.path.join(".jinx", "memory")
     root = PROJECT_ROOT or os.getcwd()
-    return os.path.join(root, sub)
+    mem_dir = os.path.join(root, sub)
+    
+    # Ensure memory directory exists
+    try:
+        os.makedirs(mem_dir, exist_ok=True)
+    except Exception:
+        pass
+    
+    return mem_dir
 
+
+def _ensure_log_dir() -> None:
+    """Ensure log directory exists."""
+    try:
+        log_dir = "log"
+        os.makedirs(log_dir, exist_ok=True)
+    except Exception:
+        pass
+
+
+# Initialize log directory on import
+_ensure_log_dir()
 
 # Canonical memory paths
 _MEM_DIR = _memory_dir()

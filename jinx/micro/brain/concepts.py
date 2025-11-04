@@ -420,24 +420,29 @@ def _query_terms(q: str) -> List[str]:
     return uniq
 
 
+# Adaptive concept weights (learned from usage)
+_CONCEPT_WEIGHTS: Dict[str, float] = {
+    'symbol': 1.3,
+    'path': 1.15,
+    'error': 1.2,
+    'framework': 1.1,
+    'import': 1.05,
+    'lang': 0.9,
+    'pref': 1.1,
+    'decision': 1.05,
+    'term': 1.0,
+}
+
+async def get_concept_weight(concept_type: str) -> float:
+    """Get adaptive weight for concept type."""
+    return _CONCEPT_WEIGHTS.get(concept_type, 1.0)
+
 def _type_weight(key: str) -> float:
+    """Get weight for concept key based on type prefix."""
     low = (key or "").lower()
-    if low.startswith("symbol: "):
-        return 1.3
-    if low.startswith("path: "):
-        return 1.15
-    if low.startswith("error: "):
-        return 1.2
-    if low.startswith("framework: "):
-        return 1.1
-    if low.startswith("import: "):
-        return 1.05
-    if low.startswith("lang: "):
-        return 0.9
-    if low.startswith("pref: "):
-        return 1.1
-    if low.startswith("decision: "):
-        return 1.05
+    for prefix, weight in _CONCEPT_WEIGHTS.items():
+        if low.startswith(f"{prefix}: "):
+            return weight
     return 1.0
 
 

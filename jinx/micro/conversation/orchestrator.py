@@ -82,9 +82,12 @@ from jinx.micro.conversation.phases import (
 
 async def shatter(x: str, err: Optional[str] = None) -> None:
     """Drive a single conversation step and optionally handle an error context."""
+    from jinx.micro.logger.debug_logger import debug_log
+    await debug_log(f"START processing: {x[:80]}", "SHATTER")
     try:
         # Ensure micro-program runtime and event bridge are active before any code execution
         try:
+            await debug_log("Ensuring runtime...", "SHATTER")
             await _ensure_runtime()
             # Ensure the background AutoPatchProgram is running so model code can submit edits
             try:
@@ -96,9 +99,12 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
                 await _ensure_verifier()
             except Exception:
                 pass
-        except Exception:
+            await debug_log("Runtime ready", "SHATTER")
+        except Exception as e:
+            await debug_log(f"Runtime setup error: {e}", "SHATTER")
             pass
         # Append the user input to the transcript first to ensure ordering
+        await debug_log("Appending to transcript...", "SHATTER")
         if x and x.strip():
             await blast_mem(f"User: {x.strip()}")
             # Also embed the raw user input for retrieval (source: dialogue) in background
@@ -106,14 +112,17 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
                 asyncio.create_task(embed_text(x.strip(), source="dialogue", kind="user"))
             except Exception:
                 pass
+        await debug_log("Reading transcript...", "SHATTER")
         _act("reading transcript")
         synth = await glitch_pulse()
         await _coop()
         # Do not include the transcript in 'chains' since it is placed into <memory>
         # Do not inject error text into the body chains; it will live in <error>
+        await debug_log("Building chains...", "SHATTER")
         _act("building prompt header")
         chains, decay = build_chains("", None)
         await _coop()
+        await debug_log(f"Chains built, decay={decay}", "SHATTER")
         # Build standardized header blocks in a stable order before the main chains
         # 1) <embeddings_context> from recent dialogue/sandbox using current input as query,
         #    plus project code embeddings context assembled from emb/ when available
@@ -151,6 +160,7 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
             else:
                 eff_q = q_raw
             # Launch runtime context retrieval concurrently with project context assembly
+            await debug_log("Launching context retrieval tasks...", "SHATTER")
             _act("retrieving runtime context")
             base_ctx_task = asyncio.create_task(_phase_base_ctx(eff_q))
             # Optional: embeddings-backed memory context (no evergreen), env-gated (default OFF for API)
@@ -161,9 +171,11 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
             except Exception:
                 mem_ctx_task = None
             await _coop()
-        except Exception:
+        except Exception as e:
+            await debug_log(f"Exception in context launch: {e}", "SHATTER")
             base_ctx_task = asyncio.create_task(asyncio.sleep(0.0))  # type: ignore
         # Always build project context; retrieval enforces its own tight budgets
+        await debug_log("Building project context...", "SHATTER")
         proj_ctx = ""
         try:
             _q = eff_q
@@ -175,7 +187,16 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
                 _actdet({"stage": "base_ctx", "rem_ms": _env_ms("JINX_STAGE_BASECTX_MS", 220)})
             except Exception:
                 pass
-            base_ctx = await base_ctx_task
+            await debug_log("Awaiting base_ctx_task...", "SHATTER")
+            try:
+                base_ctx = await base_ctx_task
+                await debug_log("base_ctx_task done", "SHATTER")
+            except asyncio.CancelledError as e:
+                await debug_log("base_ctx_task TIMEOUT/CANCELLED - continuing with empty context", "SHATTER")
+                base_ctx = ""  # Graceful degradation
+            except Exception as e:
+                await debug_log(f"base_ctx_task failed: {e}", "SHATTER")
+                base_ctx = ""  # Graceful degradation
             # Await memory context if launched (internal only)
             mem_ctx = ""
             if 'mem_ctx_task' in locals() and mem_ctx_task is not None:
@@ -188,8 +209,24 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
                 _actdet({"stage": "proj_ctx", "rem_ms": _env_ms("JINX_STAGE_PROJCTX_MS", 260)})
             except Exception:
                 pass
-            proj_ctx = await proj_ctx_task
+            await debug_log("Awaiting proj_ctx_task...", "SHATTER")
+            try:
+                proj_ctx = await proj_ctx_task
+                await debug_log("proj_ctx_task done", "SHATTER")
+            except asyncio.CancelledError as e:
+                await debug_log("proj_ctx_task TIMEOUT/CANCELLED - continuing with empty context", "SHATTER")
+                proj_ctx = ""  # Graceful degradation - continue without project context
+            except Exception as e:
+                await debug_log(f"proj_ctx_task failed: {e}", "SHATTER")
+                proj_ctx = ""  # Graceful degradation
             await _coop()
+            await debug_log(f"Contexts retrieved: base={len(base_ctx)}, proj={len(proj_ctx)}", "SHATTER")
+            
+            # Check if shutdown requested
+            import jinx.state as _jx_state
+            if _jx_state.shutdown_event.is_set():
+                await debug_log("SHUTDOWN EVENT IS SET! Exiting...", "SHATTER")
+                return
             # _build_proj_ctx_enriched already implements its own fallback
             # Continuity: if still empty and this is a short clarification, reuse last cached project context
             if not proj_ctx:
@@ -208,11 +245,13 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
                 if reuse:
                     proj_ctx = reuse
                     reuse_for_log = True
-        except Exception:
+        except Exception as e:
             # If project assembly failed early, still await runtime context task
+            await debug_log(f"Exception in project context assembly: {e}", "SHATTER")
             try:
                 base_ctx = await base_ctx_task
-            except Exception:
+            except Exception as e2:
+                await debug_log(f"Exception awaiting base_ctx_task in fallback: {e2}", "SHATTER")
                 base_ctx = ""
             proj_ctx = ""
         # If runtime retrieval wasn't launched (fallback path), ensure base_ctx exists
@@ -603,12 +642,14 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
             await dec_pulse(decay)
         # Final normalization guard
         chains = ensure_header_block_separation(chains)
+        await debug_log(f"Final chains prepared, len={len(chains)}", "SHATTER")
         # Use a dedicated recovery prompt only when fixing an error; otherwise default prompt
         prompt_override = "burning_logic_recovery" if (err and err.strip()) else None
         # Streaming fast-path (env-gated): early-run on first complete code block
         executed_early: bool = False
         printed_tail_early: bool = False
         stream_on = str(os.getenv("JINX_LLM_STREAM_FASTPATH", "1")).lower() not in ("", "0", "false", "off", "no")
+        await debug_log("Ready to call LLM", "SHATTER")
 
         # Early execution callback (receives code body and code_id)
         async def _early_exec(body: str, cid: str) -> None:
@@ -653,7 +694,9 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
                 pass
 
         _act("calling LLM")
+        await debug_log("Calling LLM...", "SHATTER")
         out, code_id = await _phase_llm(chains, prompt_override=prompt_override, stream_on=stream_on, on_first_block=_early_exec)
+        await debug_log(f"LLM returned {len(out)} chars, code_id={code_id}", "SHATTER")
         await _coop()
         _act("normalizing model output")
         # Normalize model output to ensure exactly one <python_{code_id}> block and proper fences
@@ -688,7 +731,9 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
 
         # If early executed successfully, treat as executed to prevent duplicate run/print
         _act("executing code blocks")
+        await debug_log(f"Executing... (early_executed={executed_early})", "SHATTER")
         executed = True if executed_early else await _phase_exec(out, code_id, on_exec_error)
+        await debug_log(f"Execution complete (executed={executed})", "SHATTER")
         if not executed:
             await bomb_log(f"No executable <python_{code_id}> block found in model output; displaying raw output.")
             # Already printed above
@@ -774,10 +819,31 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
                 _jx_state.last_agent_reply_ts = float(_aio.get_running_loop().time())
             except Exception:
                 pass
-    except Exception:
-        await bomb_log(traceback.format_exc())
+    except Exception as e:
+        await debug_log(f"EXCEPTION: {e}", "SHATTER")
+        tb_str = traceback.format_exc()
+        await bomb_log(tb_str)
+        
+        # Attempt self-healing
+        try:
+            from jinx.micro.runtime.self_healing import auto_heal_error
+            
+            healed = await auto_heal_error(
+                type(e).__name__,
+                str(e),
+                tb_str
+            )
+            
+            if healed:
+                await debug_log("Self-healing successful! Continuing...", "SHATTER")
+                # Don't decay pulse if healed
+                return
+        except Exception:
+            pass
+        
         await dec_pulse(50)
     finally:
+        await debug_log("Finally block - cleaning up", "SHATTER")
         _act_clear()
         # Run memory optimization after each model interaction using a per-turn snapshot (bounded, skip on shutdown)
         try:
@@ -788,5 +854,6 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
                 _ = await _bounded_run(_opt_submit(snap), _env_ms("JINX_STAGE_MEMOPT_MS", 800))
         except Exception:
             pass
+        await debug_log("END - function complete", "SHATTER")
 
 

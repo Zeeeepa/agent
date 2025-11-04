@@ -1,4 +1,7 @@
-"""Advanced autotune system with adaptive ML-based optimization."""
+"""Advanced autotune system with adaptive ML-based optimization.
+
+Integrates with brain modules for intelligent parameter tuning.
+"""
 
 from __future__ import annotations
 
@@ -101,6 +104,15 @@ def start_autotune_task(q_in: "asyncio.Queue[str]", settings: Settings) -> "asyn
         # Sliding window for trend detection
         saturation_history: deque[float] = deque(maxlen=20)
         sample_count = 0
+        
+        # Integrate with threshold learner for adaptive ratios
+        try:
+            from jinx.micro.brain.threshold_learner import select_threshold as _sel_th, record_threshold_outcome as _rec_th
+            use_learner = True
+        except Exception:
+            use_learner = False
+            _sel_th = None  # type: ignore
+            _rec_th = None  # type: ignore
 
         while True:
             try:
@@ -132,8 +144,18 @@ def start_autotune_task(q_in: "asyncio.Queue[str]", settings: Settings) -> "asyn
                     # Detect sustained trend for more stable switching
                     recent_trend = sum(saturation_history[-5:]) / min(5, len(saturation_history)) if saturation_history else 0.0
                     
+                    # Use adaptive thresholds from learner if available
+                    enable_thresh = rt.saturate_enable_ratio
+                    disable_thresh = rt.saturate_disable_ratio
+                    if use_learner and _sel_th:
+                        try:
+                            enable_thresh = await _sel_th('saturate_enable')
+                            disable_thresh = await _sel_th('saturate_disable')
+                        except Exception:
+                            pass
+                    
                     # Enable priority when sustained saturation is high
-                    if not rt.use_priority_queue and avg_ratio >= rt.saturate_enable_ratio and recent_trend >= rt.saturate_enable_ratio * 0.8:
+                    if not rt.use_priority_queue and avg_ratio >= enable_thresh and recent_trend >= enable_thresh * 0.8:
                         rt.use_priority_queue = True
                         # Reduce budget for tighter real-time guarantees
                         rt.hard_rt_budget_ms = max(10, min(rt.hard_rt_budget_ms, baseline_budget, 25))
@@ -143,7 +165,7 @@ def start_autotune_task(q_in: "asyncio.Queue[str]", settings: Settings) -> "asyn
                         metrics.total_adjustments += 1
                         metrics.current_budget_ms = rt.hard_rt_budget_ms
                     # Disable priority when saturation is low
-                    elif rt.use_priority_queue and avg_ratio <= rt.saturate_disable_ratio and recent_trend <= rt.saturate_disable_ratio * 1.2:
+                    elif rt.use_priority_queue and avg_ratio <= disable_thresh and recent_trend <= disable_thresh * 1.2:
                         rt.use_priority_queue = False
                         rt.hard_rt_budget_ms = baseline_budget
                         last_switch = now
@@ -163,6 +185,18 @@ def start_autotune_task(q_in: "asyncio.Queue[str]", settings: Settings) -> "asyn
                             "peak_saturation": metrics.peak_saturation,
                         }
                     })
+                    
+                    # Record outcome to learner
+                    if use_learner and _rec_th:
+                        try:
+                            # Success = moved in the right direction (enabled when high, disabled when low)
+                            success = (rt.use_priority_queue and avg_ratio > 0.7) or (not rt.use_priority_queue and avg_ratio < 0.3)
+                            if rt.use_priority_queue:
+                                await _rec_th('saturate_enable', enable_thresh, success)
+                            else:
+                                await _rec_th('saturate_disable', disable_thresh, success)
+                        except Exception:
+                            pass
                     
                     # Log significant changes
                     try:

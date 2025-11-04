@@ -40,20 +40,22 @@ async def code_primer(prompt_override: str | None = None) -> tuple[str, str]:
 
 
 async def _prepare_request(txt: str, *, prompt_override: str | None = None) -> tuple[str, str, str, str, str]:
-    """Compose instructions and return (jx, tag, model, sx, stxt)."""
+    """Compose instructions with brain systems integration and ML enhancement."""
     jx, tag = await code_primer(prompt_override)
-    # Cooperative yield helpers (env-gated)
-    def _yield_on() -> bool:
-        try:
-            return str(os.getenv("JINX_COOP_YIELD", "1")).lower() not in ("", "0", "false", "off", "no")
-        except Exception:
-            return True
+    
+    # Cooperative yield - always enabled for RT constraints
     async def _yield0() -> None:
-        if _yield_on():
-            try:
-                await _asyncio.sleep(0)
-            except Exception:
-                pass
+        await _asyncio.sleep(0)
+    
+    # Process with context processor for machine-level understanding
+    if txt and ("<embeddings_" in txt or "<user>" in txt or "<evidence>" in txt):
+        from jinx.micro.llm.context_processor import process_all_context, build_agent_context_summary
+        context_data = process_all_context(txt)
+        agent_summary = build_agent_context_summary(context_data)
+        
+        # Inject agent summary as machine-level context
+        if agent_summary:
+            jx = jx + f"\n<!-- Machine Context Summary:\n{agent_summary}\n-->\n"
     # Expand dynamic prompt macros in real time (vars/env/anchors/sys/runtime/exports + custom providers)
     try:
         jx = await compose_dynamic_prompt(jx, key=tag)
@@ -165,9 +167,15 @@ async def _prepare_request(txt: str, *, prompt_override: str | None = None) -> t
             async with _init_lock:
                 if not getattr(spark_openai, "_macro_inited", False):
                     try:
+                        from jinx.micro.logger.debug_logger import debug_log
+                        await debug_log("Registering builtin macros...", "MACROS")
                         await register_builtin_macros()
-                    except Exception:
-                        pass
+                        await debug_log("✓ Builtin macros registered", "MACROS")
+                    except Exception as e:
+                        try:
+                            await debug_log(f"✗ Failed to register builtin macros: {e}", "MACROS")
+                        except Exception:
+                            pass
                     try:
                         await load_macro_plugins()
                     except Exception:
@@ -177,7 +185,27 @@ async def _prepare_request(txt: str, *, prompt_override: str | None = None) -> t
             max_exp = int(os.getenv("JINX_PROMPT_MACRO_MAX", "50"))
         except Exception:
             max_exp = 50
+        
+        # Check for macros in prompt
+        import re
+        from jinx.micro.logger.debug_logger import debug_log
+        macro_pattern = r'<\$(\w+)(?:\s+[^>]+)?>'
+        macros_found = re.findall(macro_pattern, jx)
+        
+        if macros_found:
+            await debug_log(f"Found {len(macros_found)} macros in prompt: {', '.join(set(macros_found))}", "MACROS")
+        else:
+            await debug_log("No macros found in prompt", "MACROS")
+        
+        await debug_log(f"Expanding macros (max={max_exp})...", "MACROS")
+        jx_before_len = len(jx)
         jx = await expand_dynamic_macros(jx, ctx, max_expansions=max_exp)
+        jx_after_len = len(jx)
+        
+        if jx_after_len != jx_before_len:
+            await debug_log(f"✓ Expansion changed prompt size: {jx_before_len} → {jx_after_len} chars", "MACROS")
+        else:
+            await debug_log(f"No expansion occurred (size unchanged: {jx_before_len} chars)", "MACROS")
         await _yield0()
         # Best-effort token hint (chars/4 heuristic) for dynamic memory budgets
         try:

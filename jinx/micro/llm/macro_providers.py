@@ -30,10 +30,16 @@ def _norm_preview(x: str, lim: int) -> str:
 
 
 async def _emb_handler(args: List[str], ctx: MacroContext) -> str:
+    from jinx.micro.logger.debug_logger import debug_log
+    await debug_log(f"Called with args={args}", "MACRO:emb")
+    
     try:
         scope = (args[0] if args else "dialogue").strip().lower()
     except Exception:
         scope = "dialogue"
+    
+    await debug_log(f"Scope={scope}", "MACRO:emb")
+    
     n = 0
     q = ""
     # parse args like [scope, N, q=...]
@@ -60,7 +66,10 @@ async def _emb_handler(args: List[str], ctx: MacroContext) -> str:
         except Exception:
             q = ""
     if not q:
+        await debug_log("✗ No query text available", "MACRO:emb")
         return ""
+    
+    await debug_log(f"Query='{q[:50]}...' k={n}", "MACRO:emb")
     try:
         ms = max(50, int(os.getenv("JINX_MACRO_EMB_MS", "180")))
     except Exception:
@@ -72,7 +81,9 @@ async def _emb_handler(args: List[str], ctx: MacroContext) -> str:
 
     out: List[str] = []
     if scope in ("dialogue", "dlg"):
+        await debug_log("Retrieving from dialogue embeddings...", "MACRO:emb")
         hits = await _dlg_topk(q, k=n, max_time_ms=ms)
+        await debug_log(f"Got {len(hits)} hits from dialogue", "MACRO:emb")
         for _score, _src, obj in hits:
             meta = obj.get("meta", {})
             pv = (meta.get("text_preview") or "").strip()
@@ -80,7 +91,9 @@ async def _emb_handler(args: List[str], ctx: MacroContext) -> str:
                 continue
             out.append(_norm_preview(pv, lim))
     elif scope in ("project", "proj"):
+        await debug_log("Retrieving from project embeddings...", "MACRO:emb")
         hits = await _proj_topk(q, k=n, max_time_ms=ms)
+        await debug_log(f"Got {len(hits)} hits from project", "MACRO:emb")
         for _score, file_rel, obj in hits:
             meta = obj.get("meta", {})
             pv = (meta.get("text_preview") or "").strip()
@@ -95,11 +108,14 @@ async def _emb_handler(args: List[str], ctx: MacroContext) -> str:
                 else:
                     out.append(f"[{file_rel}]")
     else:
+        await debug_log(f"✗ Unknown scope: {scope}", "MACRO:emb")
         return ""
 
     # Compact single-line result for inline prompt usage
     out = [s for s in out if s]
-    return " | ".join(out[:n])
+    result = " | ".join(out[:n])
+    await debug_log(f"✓ Returning {len(out)} results ({len(result)} chars)", "MACRO:emb")
+    return result
 
 
 async def _memfacts_handler(args: List[str], ctx: MacroContext) -> str:
