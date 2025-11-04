@@ -74,7 +74,9 @@ async def _prepare_request(txt: str, *, prompt_override: str | None = None) -> t
         await _yield0()
         # Unified embeddings context (code+brain+refs+graph+memory)
         try:
-            _ctx = await build_unified_context_for(txt or "", max_chars=None, max_time_ms=300)
+            # Use configurable timeout for unified context
+            unified_timeout = int(os.getenv("EMBED_UNIFIED_MAX_TIME_MS", "3000"))
+            _ctx = await build_unified_context_for(txt or "", max_chars=None, max_time_ms=unified_timeout)
         except Exception:
             _ctx = ""
         have_unified_ctx = bool((_ctx or "").strip())

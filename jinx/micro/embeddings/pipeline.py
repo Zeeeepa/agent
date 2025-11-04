@@ -14,13 +14,11 @@ from .embed_cache import embed_text_cached
 from .project_terms import extract_terms as _extract_terms
 from .fingerprint import simhash as _simhash
 from jinx.micro.text.heuristics import is_code_like as _is_code_like
-from jinx.micro.runtime.task_ctx import get_current_group as _get_group
-
 _RECENT_MAX = 200
 _recent: Deque[Dict[str, Any]] = deque(maxlen=_RECENT_MAX)
 
 
-async def embed_text(text: str, *, source: str, kind: str = "text") -> Dict[str, Any]:
+async def embed_text(text: str, *, source: str = "default", persist: bool = True, use_cache: bool = True) -> Optional[Dict[str, Any]]:
     """Create an embedding for text and persist versioned artifact.
 
     Storage layout:

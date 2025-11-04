@@ -107,10 +107,46 @@ def apply_auto_defaults(settings: Any | None = None) -> None:
     # Self-healing system (AI-powered auto-repair)
     _set_default("JINX_SELF_HEALING", "1")
     
+    # ML System (complete ML infrastructure)
+    _set_default("JINX_ML_SYSTEM", "1")
+    
+    # Dynamic configuration plugin (AI-powered auto-tuning)
+    _set_default("JINX_DYNAMIC_CONFIG", "1")
+    
     # Context retrieval timeouts (increased for reliability)
     _set_default("JINX_STAGE_BASECTX_MS", "500")  # Base context: 500ms
-    _set_default("JINX_STAGE_PROJCTX_MS", "2000")  # Project context: 2s (embeddings can be slow)
+    _set_default("JINX_STAGE_PROJCTX_MS", "5000")  # Project context: 5s (embeddings exhaustive)
     _set_default("JINX_STAGE_MEMCTX_MS", "500")  # Memory context: 500ms
+    
+    # =================================================================
+    # EMBEDDINGS SYSTEM - МАКСИМАЛЬНАЯ МОЩНОСТЬ
+    # =================================================================
+    
+    # Project embeddings (emb/files) - полная активация
+    _set_default("EMBED_PROJECT_ENABLE", "1")
+    _set_default("EMBED_PROJECT_TOP_K", "50")  # Увеличено с 20 до 50 результатов
+    _set_default("EMBED_PROJECT_EXHAUSTIVE", "1")  # EXHAUSTIVE MODE - все stages!
+    _set_default("EMBED_PROJECT_NO_STAGE_BUDGETS", "0")  # Keep budgets for RT
+    _set_default("EMBED_PROJECT_TOTAL_CODE_BUDGET", "50000")  # Увеличено с 20KB до 50KB
+    
+    # Unified context budget (used in LLM service)
+    _set_default("EMBED_UNIFIED_MAX_TIME_MS", "3000")  # 3 секунды на unified context
+    
+    # Score threshold (lower = more results)
+    _set_default("EMBED_PROJECT_SCORE_THRESHOLD", "0.15")  # Снижено с 0.22 до 0.15
+    
+    # Callgraph enrichment (relationships)
+    _set_default("EMBED_PROJECT_CALLGRAPH", "1")
+    _set_default("EMBED_PROJECT_CALLGRAPH_TOP_HITS", "5")  # Увеличено с 3 до 5
+    _set_default("EMBED_PROJECT_CALLGRAPH_CALLERS_LIMIT", "5")  # Увеличено
+    _set_default("EMBED_PROJECT_CALLGRAPH_CALLEES_LIMIT", "5")  # Увеличено
+    
+    # Full Python scope extraction
+    _set_default("EMBED_PROJECT_ALWAYS_FULL_PY_SCOPE", "1")
+    _set_default("EMBED_PROJECT_FULL_SCOPE_TOP_N", "10")  # Top 10 get full scope
+    
+    # Snippet sizing
+    _set_default("EMBED_PROJECT_SNIPPET_PER_HIT_CHARS", "2000")  # Увеличено с 1600
     
     # =================================================================
     # BRAIN SYSTEMS (27 SYSTEMS) - All enabled automatically

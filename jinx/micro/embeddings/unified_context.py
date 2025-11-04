@@ -30,17 +30,32 @@ async def build_unified_context_for(query: str, *, max_chars: Optional[int] = No
     q = (query or "").strip()
     if not q:
         return ""
+    # Debug logging
+    try:
+        from jinx.micro.logger.debug_logger import debug_log
+        await debug_log(f"build_unified_context_for('{q[:50]}', max_time_ms={max_time_ms})", "EMBEDDINGS")
+    except Exception:
+        pass
+    
     # Prefer multi when user provided several sentences/lines
     body = ""
     subs = _split_queries(q)
     if len(subs) >= 2:
         try:
             body = await build_project_context_multi_for(subs, max_chars=max_chars, max_time_ms=max_time_ms)
+            try:
+                await debug_log(f"build_project_context_multi_for returned {len(body)} chars", "EMBEDDINGS")
+            except Exception:
+                pass
         except Exception:
             body = ""
     if not (body or "").strip():
         try:
             body = await build_project_context_for(q, max_chars=max_chars, max_time_ms=max_time_ms)
+            try:
+                await debug_log(f"build_project_context_for returned {len(body)} chars", "EMBEDDINGS")
+            except Exception:
+                pass
         except Exception:
             body = ""
     if body and body.strip():
@@ -51,14 +66,27 @@ async def build_unified_context_for(query: str, *, max_chars: Optional[int] = No
             mem_lines = ""
         try:
             brain = build_unified_brain_block(body, mem_lines or "", q, "")
+            try:
+                await debug_log(f"build_unified_brain_block returned {len(brain)} chars", "EMBEDDINGS")
+            except Exception:
+                pass
         except Exception:
             brain = ""
         if brain:
+            try:
+                await debug_log(f"Unified context total: {len(body + brain)} chars", "EMBEDDINGS")
+            except Exception:
+                pass
             return (body + "\n\n" + brain)
         return body
     # Fallback to memory-only context
     try:
-        return await build_memory_context_for(q, max_chars=1200, max_time_ms=220)
+        result = await build_memory_context_for(q, max_chars=1200, max_time_ms=220)
+        try:
+            await debug_log(f"Fallback to memory-only context: {len(result)} chars", "EMBEDDINGS")
+        except Exception:
+            pass
+        return result
     except Exception:
         return ""
 

@@ -175,10 +175,22 @@ async def build_project_context_for(query: str, *, k: int | None = None, max_cha
 
     # Retrieve hits for original, brain-expanded, and opportunistically memory-expanded queries, then merge
     hits_base = await retrieve_project_top_k(query, k=k, max_time_ms=max_time_ms)
+    
+    # Debug logging
+    try:
+        from jinx.micro.logger.debug_logger import debug_log
+        await debug_log(f"retrieve_project_top_k('{query[:50]}') returned {len(hits_base)} hits", "EMBEDDINGS")
+    except Exception:
+        pass
+    
     hits_exp: list[tuple[float, str, dict]] = []
     if exp_query != (query or ""):
         try:
             hits_exp = await retrieve_project_top_k(exp_query, k=k, max_time_ms=max_time_ms)
+            try:
+                await debug_log(f"retrieve_project_top_k(expanded) returned {len(hits_exp)} hits", "EMBEDDINGS")
+            except Exception:
+                pass
         except Exception:
             hits_exp = []
     # Opportunistic memory-derived expansion (without blocking): extract quick tokens from mem_task if ready

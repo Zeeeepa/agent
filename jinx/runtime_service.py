@@ -133,6 +133,49 @@ async def pulse_core(settings: Settings | None = None) -> None:
                 )
         except Exception:
             pass
+        
+        # === INITIALIZE ML SYSTEM ===
+        try:
+            if str(os.getenv("JINX_ML_SYSTEM", "1")).lower() not in ("", "0", "false", "off", "no"):
+                from jinx.micro.runtime.ml_orchestrator import get_ml_orchestrator
+                from jinx.micro.runtime.performance_optimizer import get_performance_optimizer
+                from jinx.micro.runtime.auto_scaler import get_auto_scaler
+                from jinx.micro.runtime.startup_validator import validate_ml_system
+                
+                # Validate ML system on startup
+                success, validation_report = await validate_ml_system()
+                
+                if success:
+                    # Initialize ML orchestrator (coordinates all ML components)
+                    asyncio.create_task(get_ml_orchestrator())
+                    
+                    # Initialize performance optimizer
+                    asyncio.create_task(get_performance_optimizer())
+                    
+                    # Initialize auto scaler (load balancing + circuit breaker)
+                    asyncio.create_task(get_auto_scaler())
+                else:
+                    # Log validation failure but continue (graceful degradation)
+                    try:
+                        from jinx.micro.logger.debug_logger import debug_log
+                        await debug_log(
+                            f"ML System validation failed - running in degraded mode",
+                            "STARTUP"
+                        )
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        
+        # Initialize dynamic configuration plugin (AI-powered auto-tuning)
+        try:
+            if str(os.getenv("JINX_DYNAMIC_CONFIG", "1")).lower() not in ("", "0", "false", "off", "no"):
+                from jinx.micro.runtime.dynamic_config_plugin import get_dynamic_config_plugin
+                
+                # Initialize plugin in background
+                asyncio.create_task(get_dynamic_config_plugin())
+        except Exception:
+            pass
 
         try:
             # Start optional plugins prior to supervised jobs

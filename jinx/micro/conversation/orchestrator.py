@@ -5,6 +5,7 @@ from typing import Optional
 import os
 import re
 import asyncio
+import time
 
 from jinx.logging_service import glitch_pulse, bomb_log, blast_mem
 from jinx.openai_service import spark_openai
@@ -84,6 +85,23 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
     """Drive a single conversation step and optionally handle an error context."""
     from jinx.micro.logger.debug_logger import debug_log
     await debug_log(f"START processing: {x[:80]}", "SHATTER")
+    
+    # === DYNAMIC CONFIGURATION ADAPTATION ===
+    # AI-powered configuration tuning based on request type
+    request_start_time = time.time()
+    try:
+        from jinx.micro.runtime.dynamic_config_plugin import adapt_config_for_request
+        
+        # Build context for task detection
+        adaptation_context = {
+            'recent_error': bool(err),
+            'transcript_size': 0,  # Will be filled below
+        }
+        
+        await adapt_config_for_request(x, adaptation_context)
+    except Exception:
+        pass  # Silent fail - don't break on adaptation errors
+    
     try:
         # Ensure micro-program runtime and event bridge are active before any code execution
         try:
@@ -845,6 +863,18 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
     finally:
         await debug_log("Finally block - cleaning up", "SHATTER")
         _act_clear()
+        
+        # === RECORD OPERATION RESULT FOR LEARNING ===
+        try:
+            from jinx.micro.runtime.dynamic_config_plugin import record_request_result
+            
+            request_latency = (time.time() - request_start_time) * 1000  # Convert to ms
+            request_success = True  # If we reached finally without unhandled exception, it's success
+            
+            await record_request_result(request_success, request_latency, x)
+        except Exception:
+            pass
+        
         # Run memory optimization after each model interaction using a per-turn snapshot (bounded, skip on shutdown)
         try:
             import jinx.state as _jx_state
