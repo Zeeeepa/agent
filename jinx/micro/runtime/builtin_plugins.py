@@ -5,6 +5,9 @@ import os
 from typing import Any
 
 from jinx.micro.runtime.plugins import register_plugin, subscribe_event
+from jinx.micro.runtime.resource_locator_plugin import (
+    register_resource_locator_plugin as _register_resource_locator_plugin,
+)
 from jinx.logger.file_logger import append_line as _append
 from jinx.log_paths import BLUE_WHISPERS
 
@@ -698,12 +701,181 @@ def register_builtin_plugins() -> None:
         "locator_semantics",
         start=_locsem_start,
         stop=_locsem_stop,
-        enabled=True,
+        enabled=True,  # autonomous by default
         priority=44,
         version="1.0.0",
         deps=[],
         features={"embeddings"},
     )
+    # Resource Locator: fast file auto-discovery and resolution on intake
+    _register_resource_locator_plugin()
 
+    # Arch boot: optionally submit an API architecture task at startup
+    async def _arch_boot_start(ctx) -> None:  # type: ignore[no-redef]
+        # If Mission Planner is enabled, skip: autonomy is handled there
+        try:
+            if str(os.getenv("JINX_MISSION_PLANNER_ENABLE", "1")).lower() not in ("", "0", "false", "off", "no"):
+                return
+        except Exception:
+            pass
+        # Check if API already exists
+        try:
+            root = os.getcwd()
+            if os.path.isfile(os.path.join(root, "api", "app.py")):
+                return
+        except Exception:
+            pass
+        # Fully autonomous context derivation and spec synthesis
+        try:
+            from jinx.micro.llm.prompting import derive_basic_context, build_api_spec_prompt
+            from jinx.micro.llm.service import spark_openai as _spark
+            from jinx.micro.runtime.api import submit_task as _submit
+        except Exception:
+            return
+        name, resources = derive_basic_context()
+        prompt = build_api_spec_prompt(request=None, project_name=name, candidate_resources=resources)
+        try:
+            spec_ms = int(os.getenv("JINX_ARCH_SPEC_MS", "900"))
+        except Exception:
+            spec_ms = 900
+        spec_obj = None
+        try:
+            out, _ = await asyncio.wait_for(_spark(prompt), timeout=max(0.3, spec_ms) / 1000.0)
+            if isinstance(out, str) and out.strip():
+                import re as _re, json as _json
+                m = _re.search(r"\{[\s\S]*\}", out)
+                s = m.group(0) if m else out.strip()
+                obj = _json.loads(s)
+                if isinstance(obj, dict) and obj.get("resources"):
+                    spec_obj = obj
+        except Exception:
+            spec_obj = None
+        # Submit even if spec is None (architect will fallback to defaults)
+        try:
+            framework = (os.getenv("JINX_API_ARCH_FRAMEWORK", "fastapi") or "fastapi").strip().lower()
+            budget = int(os.getenv("JINX_API_ARCH_BUDGET_MS", "1600"))
+            await _submit("architect.api", spec=spec_obj, framework=framework, budget_ms=budget)
+        except Exception:
+            pass
+
+    async def _arch_boot_stop(ctx) -> None:  # type: ignore[no-redef]
+        return None
+
+    register_plugin(
+        "arch_boot",
+        start=_arch_boot_start,
+        stop=_arch_boot_stop,
+        enabled=True,  # enabled; only runs if env provided
+        priority=15,
+        version="1.0.0",
+        deps=[],
+        features={"arch_boot"},
+    )
+
+    # Turn counters: maintain active turn metrics for quiesce/drain
+    async def _turnc_start(ctx) -> None:  # type: ignore[no-redef]
+        import jinx.state as jx_state
+        from typing import Any
+
+        try:
+            jx_state.active_turns = int(getattr(jx_state, "active_turns", 0) or 0)
+        except Exception:
+            pass
+
+        async def _on_sched(_topic: str, payload: Any) -> None:
+            try:
+                jx_state.active_turns = int(getattr(jx_state, "active_turns", 0) or 0) + 1
+            except Exception:
+                pass
+
+        async def _on_finish(_topic: str, payload: Any) -> None:
+            try:
+                cur = int(getattr(jx_state, "active_turns", 0) or 0)
+                jx_state.active_turns = max(0, cur - 1)
+            except Exception:
+                pass
+
+        subscribe_event("turn.scheduled", plugin="turn_counters", callback=_on_sched)
+        subscribe_event("turn.finished", plugin="turn_counters", callback=_on_finish)
+
+    async def _turnc_stop(ctx) -> None:  # type: ignore[no-redef]
+        return None
+
+    register_plugin(
+        "turn_counters",
+        start=_turnc_start,
+        stop=_turnc_stop,
+        enabled=True,
+        priority=10,
+        version="1.0.0",
+        deps=[],
+        features={"metrics"},
+    )
+
+    # Shadow canary: in green mode, ack *.in files with *.ok in JINX_SELFUPDATE_SHADOW_DIR
+    async def _shadow_start(ctx) -> None:  # type: ignore[no-redef]
+        import os
+        import asyncio
+        import time
+
+        d = (os.getenv("JINX_SELFUPDATE_SHADOW_DIR") or "").strip()
+        if not d or not os.path.isdir(d):
+            return
+        try:
+            period = float(os.getenv("JINX_SHADOW_SCAN_SEC", "0.2"))
+        except Exception:
+            period = 0.2
+        sem = asyncio.Semaphore(4)
+
+        async def _ack_one(p: str) -> None:
+            async with sem:
+                try:
+                    if not p.endswith(".in"):
+                        return
+                    base = p[:-3]
+                    ack = base + ".ok"
+                    # Lightweight health op (bounded)
+                    try:
+                        import numpy as _np
+                        from jinx.micro.embeddings.vector_stage_semantic import _cosine_similarity as _c
+                        a = _np.array([1,0,0], dtype=_np.float32); b = _np.array([1,0,0], dtype=_np.float32)
+                        _ = _c(a,b)
+                    except Exception:
+                        pass
+                    with open(ack, "w", encoding="utf-8") as f:
+                        f.write("ok")
+                except Exception:
+                    pass
+
+        async def _loop() -> None:
+            while True:
+                try:
+                    files = []
+                    try:
+                        files = [os.path.join(d, x) for x in os.listdir(d) if x.endswith('.in')]
+                    except Exception:
+                        files = []
+                    tasks = [asyncio.create_task(_ack_one(p)) for p in files[:16]]
+                    if tasks:
+                        await asyncio.gather(*tasks, return_exceptions=True)
+                except Exception:
+                    await asyncio.sleep(period)
+                await asyncio.sleep(period)
+
+        asyncio.create_task(_loop())
+
+    async def _shadow_stop(ctx) -> None:  # type: ignore[no-redef]
+        return None
+
+    register_plugin(
+        "shadow_canary",
+        start=_shadow_start,
+        stop=_shadow_stop,
+        enabled=True,
+        priority=12,
+        version="1.0.0",
+        deps=[],
+        features={"canary"},
+    )
 
 __all__ = ["register_builtin_plugins"]

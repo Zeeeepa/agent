@@ -31,6 +31,7 @@ from jinx.watchdog import start_watchdog_task
 from jinx.micro.embeddings.retrieval_core import shutdown_proc_pool as _retr_pool_shutdown
 from jinx.micro.net.client import prewarm_openai_client as _prewarm_openai
 from jinx.micro.runtime.api import stop_selfstudy as _stop_selfstudy
+from jinx.micro.runtime.api import ensure_runtime as _ensure_runtime
 from jinx.micro.runtime.plugins import (
     start_plugins as _start_plugins,
     stop_plugins as _stop_plugins,
@@ -40,6 +41,7 @@ from jinx.micro.runtime.plugins import (
 )
 from jinx.micro.runtime.builtin_plugins import register_builtin_plugins as _reg_builtin_plugins
 from jinx.micro.runtime.autoconfig import apply_auto_defaults as _auto_defaults
+from jinx.micro.runtime.self_update_handshake import set_online as _hs_online, set_healthy as _hs_healthy
 
 async def pulse_core(settings: Settings | None = None) -> None:
     """Run the main asynchronous processing loop.
@@ -87,6 +89,18 @@ async def pulse_core(settings: Settings | None = None) -> None:
     # Prewarm OpenAI client synchronously (safe outside event loop busy sections)
     try:
         _prewarm_openai()
+    except Exception:
+        pass
+
+    # Ensure micro-runtime bridge/self-study/repair are started before main jobs
+    try:
+        await _ensure_runtime()
+    except Exception:
+        pass
+
+    # Mark runtime as online for self-update green handshake (no-op if not in green mode)
+    try:
+        _hs_online()
     except Exception:
         pass
 
@@ -172,29 +186,29 @@ async def pulse_core(settings: Settings | None = None) -> None:
             if str(os.getenv("JINX_DYNAMIC_CONFIG", "1")).lower() not in ("", "0", "false", "off", "no"):
                 from jinx.micro.runtime.dynamic_config_plugin import get_dynamic_config_plugin
                 
-                # Initialize plugin in background
                 asyncio.create_task(get_dynamic_config_plugin())
         except Exception:
             pass
 
         try:
-            # Start optional plugins prior to supervised jobs
+            # Start optional plugins prior to supervised
             with contextlib.suppress(Exception):
                 loop = asyncio.get_running_loop()
                 _set_plugin_ctx(_PluginContext(loop=loop, shutdown_event=jx_state.shutdown_event, settings=cfg, publish=_publish_event))
                 _reg_builtin_plugins()
                 await _start_plugins()
-            # Run supervised set; returns when shutdown_event is set
-            await run_supervisor(job_specs, jx_state.shutdown_event, cfg)
-        except (asyncio.CancelledError, KeyboardInterrupt) as e:
-            # Signal global shutdown to all components
-            jx_state.shutdown_event.set()
-            
-            # Give tasks a moment to notice shutdown
+            # Mark runtime healthy after plugins start and before entering supervisor loop
             try:
-                await asyncio.sleep(0.1)
+                _hs_healthy()
             except Exception:
                 pass
+            # small settle delay
+            try:
+                await asyncio.sleep(0.05)
+            except Exception:
+                pass
+            # Run supervised set; returns when shutdown_event is set
+            await run_supervisor(job_specs, jx_state.shutdown_event, cfg)
         except RecursionError:
             # Deep recursion during shutdown, force exit
             jx_state.shutdown_event.set()

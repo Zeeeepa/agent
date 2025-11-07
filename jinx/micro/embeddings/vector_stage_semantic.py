@@ -16,7 +16,7 @@ import numpy as np
 from typing import List, Tuple, Dict, Any
 
 from .project_retrieval_config import PROJ_MAX_FILES, PROJ_MAX_CHUNKS_PER_FILE
-from .project_iterator import iter_project_chunks
+from .project_scan_store import iter_project_chunks
 
 
 async def semantic_search(

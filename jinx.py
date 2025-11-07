@@ -36,12 +36,22 @@ def _run() -> int:
         try:
             import os as _os, types as _types
             pkg_dir = _os.path.join(_os.path.dirname(__file__), "jinx")
+            # Blue-green override: allow alternate package dir via env
+            ov = (_os.getenv("JINX_PACKAGE_DIR") or "").strip()
+            if ov and _os.path.isdir(ov):
+                pkg_dir = ov
             if _os.path.isdir(pkg_dir):
                 import sys as _sys
                 if "jinx" not in _sys.modules:
                     _pkg = _types.ModuleType("jinx")
                     setattr(_pkg, "__path__", [pkg_dir])  # mark as package
                     _sys.modules["jinx"] = _pkg
+        except Exception:
+            pass
+        # Kernel boot (resilience, env, auto-config, prewarm)
+        try:
+            from jinx.kernel import boot as _kernel_boot
+            _kernel_boot()
         except Exception:
             pass
         # Lazy import orchestrator after resilience and anti-shadowing are in place

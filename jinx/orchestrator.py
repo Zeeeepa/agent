@@ -62,6 +62,7 @@ def main() -> None:
         "jedi",          # Python identifier references
         "libcst",        # CST structural patterns
         "astunparse",    # pretty-printing annotations (optional)
+        "numpy",         # embeddings/vector ops, ML orchestrator
     ])
 
     # Defer import until after dependencies are ensured to avoid early import errors

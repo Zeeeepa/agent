@@ -487,6 +487,78 @@ async def shatter(x: str, err: Optional[str] = None) -> None:
             except Exception:
                 pass
         ctx = "\n".join([c for c in [base_ctx, proj_ctx, plan_ctx, cont_block, turns_block, memsel_block] if c])
+        # Integrate resolved resources (from Resource Locator plugin) into context
+        try:
+            import jinx.state as _jx_state
+            resolved = list(getattr(_jx_state, 'resolved_resources_last', []) or [])
+            primary = getattr(_jx_state, 'primary_resource', None)
+        except Exception:
+            resolved = []
+            primary = None
+        resolved_block = ""
+        preview_block = ""
+        if resolved:
+            try:
+                lines = []
+                for r in resolved[:5]:
+                    try:
+                        sc = float(r.get('score') or 0.0)
+                    except Exception:
+                        sc = 0.0
+                    rel = (r.get('rel') or r.get('path') or '').strip()
+                    lines.append(f"{sc:.2f} {rel}")
+                if lines:
+                    resolved_block = "<resolved_files>\n" + "\n".join(lines) + "\n</resolved_files>"
+            except Exception:
+                resolved_block = ""
+        # Optional primary file preview (guarded by env flag, small size)
+        try:
+            _preview_on = str(os.getenv("JINX_FILE_PREVIEW", "1")).lower() not in ("", "0", "false", "off", "no")
+        except Exception:
+            _preview_on = True
+        if _preview_on and primary and isinstance(primary, dict):
+            try:
+                from jinx.micro.runtime.file_reader import read_file_preview as _read_preview
+                path = str(primary.get('path') or '')
+                rel = str(primary.get('rel') or '')
+                if path:
+                    text, _tr = _read_preview(path, max_chars=4000, head_lines=200, tail_lines=80)
+                    if text:
+                        show_path = rel or path
+                        preview_block = f"<file_preview path=\"{show_path}\">\n" + text + "\n</file_preview>"
+            except Exception:
+                preview_block = ""
+        if resolved_block or preview_block:
+            ctx = "\n".join([c for c in [ctx, resolved_block, preview_block] if c])
+
+        # Automated action routing: attempt self-executing code modification
+        auto_block = ""
+        try:
+            from jinx.micro.runtime.action_router import auto_route_and_execute as _auto_route
+            # Use strict RT budget; router will also enforce its own gates
+            auto_report = await _auto_route(x or "", budget_ms=1500)
+            if isinstance(auto_report, dict) and auto_report.get("executed"):
+                # Compact report for LLM/UI context
+                lines = []
+                lines.append(f"task: {auto_report.get('task_type')}")
+                try:
+                    lines.append(f"confidence: {float(auto_report.get('confidence') or 0.0):.2f}")
+                except Exception:
+                    lines.append("confidence: 0.00")
+                if auto_report.get('rel') or auto_report.get('file'):
+                    lines.append(f"file: {auto_report.get('rel') or auto_report.get('file')}")
+                lines.append(f"success: {bool(auto_report.get('patch_success'))}")
+                msg = str(auto_report.get('message') or "").strip()
+                if msg:
+                    # trim long messages
+                    if len(msg) > 400:
+                        msg = msg[:400] + "..."
+                    lines.append(f"message: {msg}")
+                auto_block = "<auto_action_report>\n" + "\n".join(lines) + "\n</auto_action_report>"
+        except Exception:
+            auto_block = ""
+        if auto_block:
+            ctx = "\n".join([c for c in [ctx, auto_block] if c])
         # Optional compaction for orchestrator chains (default ON)
         try:
             _orch_cmp = str(os.getenv("JINX_CTX_COMPACT_ORCH", "1")).lower() not in ("", "0", "false", "off", "no")

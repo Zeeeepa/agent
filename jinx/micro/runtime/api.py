@@ -102,6 +102,36 @@ async def ensure_runtime() -> None:
                     pass
         except Exception:
             pass
+        # API Architect program (env-gated, default ON)
+        try:
+            if str(os.getenv("JINX_API_ARCHITECT_ENABLE", "1")).lower() not in ("", "0", "false", "off", "no"):
+                try:
+                    from jinx.micro.programs.api_architect import spawn_api_architect as _spawn_arch
+                    await _spawn_arch()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        # Mission Planner (env-gated, default ON) — fully autonomous planner without user prompts
+        try:
+            if str(os.getenv("JINX_MISSION_PLANNER_ENABLE", "1")).lower() not in ("", "0", "false", "off", "no"):
+                try:
+                    from jinx.micro.programs.mission_planner import spawn_mission_planner as _spawn_mp
+                    await _spawn_mp()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        # Self-Update Manager (env-gated, default ON)
+        try:
+            if str(os.getenv("JINX_SELF_UPDATE_ENABLE", "1")).lower() not in ("", "0", "false", "off", "no"):
+                try:
+                    from jinx.micro.runtime.self_update_manager import spawn_self_update_manager as _spawn_su
+                    await _spawn_su()
+                except Exception:
+                    pass
+        except Exception:
+            pass
         _selfstudy_started = True
     # Schedule repairs for any missing modules detected by resilience hook (best-effort)
     try:

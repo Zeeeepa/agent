@@ -112,6 +112,15 @@ def apply_auto_defaults(settings: Any | None = None) -> None:
     
     # Dynamic configuration plugin (AI-powered auto-tuning)
     _set_default("JINX_DYNAMIC_CONFIG", "1")
+
+    # Automated actions (self-executing code modifications)
+    _set_default("JINX_AUTO_ACTION", "1")
+
+    # File preview for resolved resources (helps LLM without extra user input)
+    _set_default("JINX_FILE_PREVIEW", "1")
+
+    # Resource locator concurrency (modest default, RT-safe)
+    _set_default("JINX_LOCATOR_CONC", "3")
     
     # Context retrieval timeouts (increased for reliability)
     _set_default("JINX_STAGE_BASECTX_MS", "500")  # Base context: 500ms

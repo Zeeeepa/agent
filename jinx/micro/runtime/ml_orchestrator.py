@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import time
 import numpy as np
-from typing import Optional, Dict, Tuple, Any
+from typing import Optional, Dict, Tuple, Any, List
 
 
 class MLOrchestrator:
@@ -37,6 +37,7 @@ class MLOrchestrator:
         self._user_learner = None
         self._explainer = None
         self._batch_processor = None
+        self._resource_locator = None
     
     async def initialize(self):
         """Initialize all ML components."""
@@ -72,6 +73,10 @@ class MLOrchestrator:
                 # Initialize batch processor
                 from jinx.micro.embeddings.batch_processor import get_batch_processor
                 self._batch_processor = await get_batch_processor()
+                
+                # Initialize resource locator
+                from jinx.micro.runtime.resource_locator import get_resource_locator
+                self._resource_locator = await get_resource_locator()
                 
                 self._initialized = True
             
@@ -115,6 +120,7 @@ class MLOrchestrator:
             # === STEP 1: Try semantic cache ===
             from_cache = False
             embedding = None
+            resolved_resources: List[Dict[str, Any]] = []
             
             if self._cache:
                 cache_result = await self._cache.get(query, source='task_prediction')
@@ -166,6 +172,36 @@ class MLOrchestrator:
                 confidence = 0.5
                 all_scores = {'conversation': 0.5}
                 query_vec = None
+
+            # === STEP 4.5: Resolve resources mentioned in the query ===
+            try:
+                if self._resource_locator:
+                    # Prefer extension if explicitly present in query (e.g., crawler.py)
+                    prefer_ext = None
+                    for tok in (query or '').split():
+                        if '.' in tok:
+                            _, ext = tok.rsplit('.', 1)
+                            if ext:
+                                prefer_ext = f".{ext.lower().strip('.,;:') }"
+                                break
+                    located = await self._resource_locator.locate(
+                        query,
+                        prefer_ext=prefer_ext,
+                        k=5,
+                        budget_ms=120
+                    )
+                    # Convert to plain dicts
+                    resolved_resources = [
+                        {
+                            'path': r.path,
+                            'rel': r.rel,
+                            'score': r.score,
+                            'reason': r.reason,
+                        }
+                        for r in located
+                    ]
+            except Exception:
+                resolved_resources = []
             
             # === STEP 5: Generate explanation ===
             explanation = None
@@ -209,7 +245,9 @@ class MLOrchestrator:
                 'latency_ms': latency_ms,
                 'from_cache': from_cache,
                 'explanation': explanation,
-                'user_adapted': user_adapted
+                'user_adapted': user_adapted,
+                'resolved_resources': resolved_resources,
+                'primary_resource': (resolved_resources[0] if resolved_resources else None),
             }
         
         except Exception as e:
@@ -325,7 +363,8 @@ class MLOrchestrator:
             'monitor_available': self._monitor is not None,
             'user_learner_available': self._user_learner is not None,
             'explainer_available': self._explainer is not None,
-            'batch_processor_available': self._batch_processor is not None
+            'batch_processor_available': self._batch_processor is not None,
+            'resource_locator_available': self._resource_locator is not None,
         }
         
         return health
