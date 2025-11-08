@@ -24,6 +24,7 @@ from .project_chunk_semantic import chunk_text_semantic
 from .digest import make_digest
 from jinx.async_utils.fs import read_text_abs_thread
 from .fingerprint import simhash
+from .api_lens import find_endpoints as _api_eps, find_models as _api_models
 
 
 MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
@@ -132,6 +133,15 @@ async def embed_file(abs_path: str, rel_path: str, *, file_sha: str, prune_old: 
         vec = batch_vecs[idx] if idx < len(batch_vecs) else []
         digest_i = batch_digests[idx] if idx < len(batch_digests) else ""
         fp_i = simhash(ch)
+        # Lightweight API metadata (optional)
+        try:
+            eps = [f"{m} {p} -> {h}()" for (m, p, h) in (_api_eps(ch) or [])][:8]
+        except Exception:
+            eps = []
+        try:
+            mdl = (_api_models(ch) or [])[:12]
+        except Exception:
+            mdl = []
         meta: Dict[str, Any] = {
             "ts": now_ts(),
             "model": MODEL,
@@ -147,6 +157,9 @@ async def embed_file(abs_path: str, rel_path: str, *, file_sha: str, prune_old: 
             "line_end": le,
             "digest": digest_i,
             "fingerprint": fp_i,
+            # Optional API hints to help downstream retrieval/reranking
+            "api_endpoints": eps,
+            "api_models": mdl,
         }
         payload = {"meta": meta, "embedding": vec}
         results.append((csha, payload))

@@ -45,14 +45,14 @@ async def semantic_search(
     
     try:
         from jinx.micro.embeddings.pipeline import embed_text
-        
         # Get query embedding
-        query_emb_obj = await embed_text(query, source='semantic_search')
-        
-        if not query_emb_obj or not hasattr(query_emb_obj, 'embedding'):
+        query_emb_obj = await embed_text(query, source='semantic_search', kind='query')
+        if not isinstance(query_emb_obj, dict):
             return []
-        
-        query_vec = np.array(query_emb_obj.embedding, dtype=np.float32)
+        emb = query_emb_obj.get('embedding')
+        if not emb:
+            return []
+        query_vec = np.array(emb, dtype=np.float32)
         
     except Exception:
         return []

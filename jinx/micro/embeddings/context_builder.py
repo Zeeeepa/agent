@@ -39,6 +39,7 @@ from .snippet_cache import make_snippet_cache_key, get_cached_snippet, put_cache
 from .graph_cache import get_symbol_graph_cached, find_usages_cached
 from .project_py_scope import get_python_symbol_at_line
 from .project_stage_literal import stage_literal_hits
+from .api_lens import extract_api_edges as _api_edges
 from .project_lang import lang_for_file
 from .refs_format import format_usage_ref, format_literal_ref
 from jinx.micro.text.heuristics import is_code_like as _is_code_like
@@ -432,6 +433,21 @@ async def build_project_context_for(query: str, *, k: int | None = None, max_cha
             included_files.add(file_rel)
         if is_full_scope:
             full_scope_used += 1
+        # API lens enrichment (lightweight, env-gated)
+        try:
+            _api_on = os.getenv("EMBED_API_LENS", "1").strip().lower() not in ("", "0", "false", "off", "no")
+        except Exception:
+            _api_on = True
+        if _api_on and file_rel.endswith('.py'):
+            try:
+                ap = _api_edges(file_rel, header, code_block)
+                if ap is not None:
+                    hdr_api, block_api = ap
+                    if hdr_api not in graph_headers_seen:
+                        graph_headers_seen.add(hdr_api)
+                        graph_parts.append(f"{hdr_api}\n{block_api}")
+            except Exception:
+                pass
         # Optional callgraph enrichment for top hits (Python only)
         try:
             if PROJ_CALLGRAPH_ENABLED and file_rel.endswith('.py') and idx < max(0, PROJ_CALLGRAPH_TOP_HITS):

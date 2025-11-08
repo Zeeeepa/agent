@@ -104,10 +104,47 @@ class PatchOrchestrator:
         
         # Store in history
         self._history.append(report)
-        
+
+        # Publish verification event for telemetry/UI
+        try:
+            from jinx.micro.runtime.plugins import publish_event as _publish_event
+            _publish_event("auto.verify.report", {
+                "file": operation.file_path,
+                "success": success,
+                "compilation_ok": (validation_result.compilation_ok if validation_result else None),
+                "imports_ok": (validation_result.imports_ok if validation_result else None),
+                "message": message,
+            })
+        except Exception:
+            pass
+
+        # Minimal smoke (compile/import) for Python files under strict timeout
+        try:
+            import os
+            import asyncio as _asyncio
+            p = (operation.file_path or "").strip()
+            if success and p.endswith('.py'):
+                async def _smoke() -> tuple[bool, str]:
+                    try:
+                        import importlib.util, sys as _sys
+                        spec = importlib.util.spec_from_file_location("jinx_patch_smoke", p)
+                        if spec and spec.loader:
+                            mod = importlib.util.module_from_spec(spec)
+                            spec.loader.exec_module(mod)  # type: ignore[arg-type]
+                        return (True, "import_ok")
+                    except Exception as e:
+                        return (False, f"import_error:{type(e).__name__}")
+                ok_smoke, msg_smoke = await _asyncio.wait_for(_smoke(), timeout=0.35)
+                try:
+                    _publish_event("auto.verify.smoke", {"file": p, "ok": ok_smoke, "message": msg_smoke})
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
         # Log to brain memory
         await self._log_to_memory(report)
-        
+
         return report
     
     async def apply_from_description(

@@ -4,7 +4,6 @@ import os
 from typing import List, Dict, Any
 
 from jinx.async_utils.fs import read_text, write_text
-from jinx.micro.embeddings.pipeline import iter_recent_items
 from jinx.micro.embeddings.pipeline import embed_text
 
 _CACHE_PATH = os.path.join(".jinx", "tmp", "continuity.json")
@@ -29,7 +28,13 @@ async def _save_cache(obj: Dict[str, Any]) -> None:
 def _recent_state_previews(k: int) -> List[str]:
     out: List[str] = []
     try:
-        for obj in iter_recent_items():
+        # Lazy import to avoid circular imports at module import time
+        try:
+            from jinx.micro.embeddings.pipeline import iter_recent_items as _iter_recent
+            it = list(_iter_recent())
+        except Exception:
+            it = []
+        for obj in it:
             meta = obj.get("meta", {})
             if (meta.get("source") or "").strip().lower() != "state":
                 continue

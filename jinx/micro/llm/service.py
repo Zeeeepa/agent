@@ -59,6 +59,13 @@ async def _prepare_request(txt: str, *, prompt_override: str | None = None) -> t
     # Expand dynamic prompt macros in real time (vars/env/anchors/sys/runtime/exports + custom providers)
     try:
         jx = await compose_dynamic_prompt(jx, key=tag)
+        # Auto-inject compact board state macro (JIN-FEN) to replace long history
+        try:
+            board_on = str(os.getenv("JINX_BOARD_PROMPT", "1")).lower() not in ("", "0", "false", "off", "no")
+        except Exception:
+            board_on = True
+        if board_on and ("<$board" not in jx):
+            jx = "<$board fen>\n" + jx
         await _yield0()
         # Inject compact per-group rolling summary (if any)
         try:

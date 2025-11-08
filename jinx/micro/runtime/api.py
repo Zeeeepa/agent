@@ -92,6 +92,36 @@ async def ensure_runtime() -> None:
                     pass
         except Exception:
             pass
+        # Auto-Evolve program (env-gated, default ON) — Wolverine-like self-repair and self-improve
+        try:
+            if str(os.getenv("JINX_AUTO_EVOLVE_ENABLE", "1")).lower() not in ("", "0", "false", "off", "no"):
+                try:
+                    from jinx.micro.runtime.auto_evolve_program import spawn_auto_evolve as _spawn_ae  # local import to avoid cycles
+                    await _spawn_ae()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        # Skill Acquirer (env-gated, default ON) — acquire missing capabilities automatically
+        try:
+            if str(os.getenv("JINX_SKILL_ACQUIRE_ENABLE", "1")).lower() not in ("", "0", "false", "off", "no"):
+                try:
+                    from jinx.micro.runtime.skill_acquirer import spawn_skill_acquirer as _spawn_sa  # local import
+                    await _spawn_sa()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        # State Compiler (env-gated, default ON) — maintains goals/plan/gaps on the board
+        try:
+            if str(os.getenv("JINX_STATE_COMPILER_ENABLE", "1")).lower() not in ("", "0", "false", "off", "no"):
+                try:
+                    from jinx.micro.runtime.state_compiler_program import spawn_state_compiler as _spawn_sc  # local import
+                    await _spawn_sc()
+                except Exception:
+                    pass
+        except Exception:
+            pass
         # Repair program (env-gated, default ON)
         try:
             if str(os.getenv("JINX_REPAIR_ENABLE", "1")).lower() not in ("", "0", "false", "off", "no"):

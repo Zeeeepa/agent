@@ -878,4 +878,158 @@ def register_builtin_plugins() -> None:
         features={"canary"},
     )
 
+    # Memory Board: compressed state snapshot (board.json + board_fen.txt)
+    async def _board_start(ctx) -> None:  # type: ignore[no-redef]
+        import asyncio
+        from jinx.micro.memory.board_state import touch_board as _touch, read_board as _read_board, maybe_embed_board as _embed_board
+        from jinx.micro.runtime.plugins import subscribe_event
+        from jinx.micro.runtime.api import register_prompt_macro as _reg_macro
+
+        # Seed initial snapshot
+        try:
+            await _touch()
+        except Exception:
+            pass
+
+        # Macro provider: <$board fen|json|field:name>
+        async def _macro_board(args, ctxmacro):  # type: ignore[no-redef]
+            try:
+                args = list(args or [])
+                mode = (args[0] if args else "json").strip().lower()
+            except Exception:
+                mode = "json"
+            try:
+                st = await _read_board()
+            except Exception:
+                st = {}
+            if mode == "fen":
+                try:
+                    # Build fen on the fly from dict to avoid reading file again
+                    from jinx.micro.memory.board_state import BoardState
+                    bs = BoardState()
+                    # assign minimal fields
+                    bs.session = str(st.get("session") or "main")
+                    bs.active_turns = int(st.get("active_turns") or 0)
+                    bs.turns_total = int(st.get("turns_total") or 0)
+                    bs.errors_total = int(st.get("errors_total") or 0)
+                    bs.patches_ok = int(st.get("patches_ok") or 0)
+                    bs.patches_fail = int(st.get("patches_fail") or 0)
+                    bs.selfupdate_success = int(st.get("selfupdate_success") or 0)
+                    bs.selfupdate_fail = int(st.get("selfupdate_fail") or 0)
+                    bs.skills = set(st.get("skills") or [])
+                    bs.api_intents = int(st.get("api_intents") or 0)
+                    bs.api_endpoints_seen = set(st.get("api_endpoints_seen") or [])
+                    return bs.fen()
+                except Exception:
+                    pass
+            elif mode.startswith("field:"):
+                key = mode.split(":", 1)[1]
+                try:
+                    val = st.get(key)
+                    return "" if val is None else str(val)
+                except Exception:
+                    return ""
+            else:
+                try:
+                    import json
+                    return json.dumps(st, ensure_ascii=False)
+                except Exception:
+                    return "{}"
+
+        try:
+            await _reg_macro("board", _macro_board)
+        except Exception:
+            pass
+
+        # Event subscriptions to maintain the board
+        async def _on_intake(_topic, payload):
+            try:
+                q = str((payload or {}).get("text") or "")
+                await _touch(last_query=q)
+                await _embed_board("intake")
+            except Exception:
+                pass
+
+        async def _on_turn_finished(_topic, payload):
+            try:
+                await _touch(turns_inc=1)
+                await _embed_board("turn")
+            except Exception:
+                pass
+
+        async def _on_error(_topic, payload):
+            try:
+                err = str((payload or {}).get("error") or "")
+                await _touch(errors_inc=1, last_error=err)
+                await _embed_board("error")
+            except Exception:
+                pass
+
+        async def _on_patch_report(_topic, payload):
+            try:
+                ok = bool((payload or {}).get("success"))
+                msg = str((payload or {}).get("message") or "")
+                if ok:
+                    await _touch(patch_ok=True, patch_msg=msg)
+                else:
+                    await _touch(patch_fail=True, patch_msg=msg)
+                await _embed_board("patch")
+            except Exception:
+                pass
+
+        async def _on_skill(_topic, payload):
+            try:
+                sk = str((payload or {}).get("path") or (payload or {}).get("skill") or "")
+                if sk:
+                    await _touch(skill_add=sk)
+                    await _embed_board("skill")
+            except Exception:
+                pass
+
+        async def _on_arch(_topic, payload):
+            try:
+                await _touch(api_intent=True)
+                await _embed_board("arch")
+            except Exception:
+                pass
+
+        async def _on_su_ok(_t, _p):
+            try:
+                await _touch(selfupdate_ok=True)
+                await _embed_board("su_ok")
+            except Exception:
+                pass
+
+        async def _on_su_fail(_t, _p):
+            try:
+                await _touch(selfupdate_fail=True)
+                await _embed_board("su_fail")
+            except Exception:
+                pass
+
+        subscribe_event("queue.intake", plugin="memory_board", callback=_on_intake)
+        subscribe_event("turn.finished", plugin="memory_board", callback=_on_turn_finished)
+        subscribe_event("turn.error", plugin="memory_board", callback=_on_error)
+        subscribe_event("auto.patch.report", plugin="memory_board", callback=_on_patch_report)
+        subscribe_event("auto.skill_acquired", plugin="memory_board", callback=_on_skill)
+        subscribe_event("auto.arch.requested", plugin="memory_board", callback=_on_arch)
+        subscribe_event("selfupdate.success", plugin="memory_board", callback=_on_su_ok)
+        subscribe_event("selfupdate.preflight_failed", plugin="memory_board", callback=_on_su_fail)
+        subscribe_event("selfupdate.handshake_failed", plugin="memory_board", callback=_on_su_fail)
+        subscribe_event("selfupdate.green_failed", plugin="memory_board", callback=_on_su_fail)
+
+    async def _board_stop(ctx) -> None:  # type: ignore[no-redef]
+        return None
+
+    register_plugin(
+        "memory_board",
+        start=_board_start,
+        stop=_board_stop,
+        enabled=True,
+        priority=11,
+        version="1.0.0",
+        deps=[],
+        features={"memory", "board"},
+    )
+
 __all__ = ["register_builtin_plugins"]

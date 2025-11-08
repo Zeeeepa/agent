@@ -242,6 +242,13 @@ async def frame_shift(q: asyncio.Queue[str]) -> None:
         try:
             tok = current_group.set(gid)
             t0 = time.perf_counter()
+            # Dynamic per-request adaptation (autonomous gating/tuning)
+            try:
+                from jinx.micro.runtime.dynamic_config_plugin import adapt_config_for_request as _adapt_cfg
+                import asyncio as _aio
+                await _aio.wait_for(_adapt_cfg(s, context={"group": gid}), timeout=0.2)
+            except Exception:
+                pass
             if step_ms and step_ms > 0:
                 conv_task = asyncio.create_task(shatter(s))
                 try:
@@ -256,9 +263,13 @@ async def frame_shift(q: asyncio.Queue[str]) -> None:
                 _publish_event("turn.metrics", {"group": gid, "dt": time.perf_counter() - t0})
             except Exception:
                 pass
-        except Exception:
-            # shatter() logs internally; swallow here to keep scheduler alive
-            pass
+        except Exception as e:
+            # Publish error event for self-repair systems; keep scheduler alive
+            try:
+                import traceback as _tb
+                _publish_event("turn.error", {"group": gid, "error": str(e), "tb": _tb.format_exc()})
+            except Exception:
+                pass
         finally:
             try:
                 current_group.reset(tok)  # type: ignore[name-defined]

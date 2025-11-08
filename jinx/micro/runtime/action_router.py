@@ -160,6 +160,28 @@ async def auto_route_and_execute(query: str, *, budget_ms: int = 1500) -> Dict[s
 
     # Decision: only code-modifying tasks with reasonable confidence
     if task_type not in _CODE_MOD_TASKS or confidence < 0.55:
+        # Skill fallback: try to execute a lightweight skill to satisfy the query
+        try:
+            from jinx.micro.runtime.skills import try_execute as _skill_try
+            s_out = await _skill_try(query, budget_ms=max(300, int(os.getenv("JINX_SKILL_RT_MS", "600"))))
+        except Exception:
+            s_out = None
+        if s_out and s_out.strip():
+            try:
+                from jinx.micro.runtime.plugins import publish_event
+                publish_event("skill.executed", {"query": query})
+            except Exception:
+                pass
+            return {
+                "executed": True,
+                "reason": "skill_executed",
+                "task_type": task_type or None,
+                "confidence": confidence,
+                "file": None,
+                "rel": None,
+                "patch_success": None,
+                "message": s_out.strip(),
+            }
         return {
             "executed": False,
             "reason": "non_modifying_or_low_conf",
@@ -191,6 +213,28 @@ async def auto_route_and_execute(query: str, *, budget_ms: int = 1500) -> Dict[s
         file_path = None
 
     if not file_path:
+        # Skill fallback on unresolved file
+        try:
+            from jinx.micro.runtime.skills import try_execute as _skill_try
+            s_out = await _skill_try(query, budget_ms=max(300, int(os.getenv("JINX_SKILL_RT_MS", "600"))))
+        except Exception:
+            s_out = None
+        if s_out and s_out.strip():
+            try:
+                from jinx.micro.runtime.plugins import publish_event
+                publish_event("skill.executed", {"query": query})
+            except Exception:
+                pass
+            return {
+                "executed": True,
+                "reason": "skill_executed",
+                "task_type": task_type or None,
+                "confidence": confidence,
+                "file": None,
+                "rel": None,
+                "patch_success": None,
+                "message": s_out.strip(),
+            }
         return {
             "executed": False,
             "reason": "no_file_resolved",
@@ -201,6 +245,23 @@ async def auto_route_and_execute(query: str, *, budget_ms: int = 1500) -> Dict[s
             "patch_success": None,
             "message": "",
         }
+
+    # Guard: avoid restricted/internal paths
+    try:
+        from jinx.micro.common.internal_paths import is_restricted_path as _is_restricted
+        if _is_restricted(str(rel or "")):
+            return {
+                "executed": False,
+                "reason": "restricted_path",
+                "task_type": task_type or None,
+                "confidence": confidence,
+                "file": file_path,
+                "rel": rel,
+                "patch_success": None,
+                "message": "",
+            }
+    except Exception:
+        pass
 
     # Execute patch with time budget
     try:

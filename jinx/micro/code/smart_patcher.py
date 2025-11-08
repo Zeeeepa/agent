@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import tempfile
+import fnmatch
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -73,6 +74,65 @@ class SmartPatcher:
     ) -> PatchResult:
         """Apply set of patch rules with validation."""
         file_path = Path(file_path)
+        # Guardrails: path allowlist/denylist and file size cap
+        try:
+            from jinx.micro.embeddings.project_config import ROOT as _PROJ_ROOT
+            from jinx.micro.common.internal_paths import is_restricted_path as _is_restricted
+        except Exception:
+            _PROJ_ROOT = os.getcwd()
+            def _is_restricted(x: str) -> bool:  # type: ignore[no-redef]
+                return (".jinx" in x.lower()) or (os.sep + "log" + os.sep in x.lower())
+
+        absp = os.path.abspath(str(file_path))
+        root = os.path.abspath(_PROJ_ROOT or os.getcwd())
+        # Deny if outside project or restricted segments
+        if not absp.startswith(root) or _is_restricted(absp):
+            return PatchResult(
+                status=PatchStatus.FAILED,
+                file_path=str(file_path),
+                applied_rules=[],
+                failed_rules=[rule.description for rule in rules],
+                syntax_valid=False,
+                backup_path=None,
+                errors=["restricted_path"],
+                warnings=[]
+            )
+        # Env allow/deny patterns
+        allow_raw = os.getenv("JINX_EDIT_ALLOW", "*.py")
+        deny_raw = os.getenv("JINX_EDIT_DENY", ".jinx,log,.git,node_modules,venv,.venv,env")
+        rel = os.path.relpath(absp, start=root).replace("\\", "/")
+        allow_ok = any(fnmatch.fnmatch(rel, p.strip()) for p in (allow_raw or "").split(",") if p.strip())
+        deny_hit = any((seg.strip() and (seg.strip() in rel)) for seg in (deny_raw or "").split(","))
+        if deny_hit or not allow_ok:
+            return PatchResult(
+                status=PatchStatus.FAILED,
+                file_path=str(file_path),
+                applied_rules=[],
+                failed_rules=[rule.description for rule in rules],
+                syntax_valid=False,
+                backup_path=None,
+                errors=["denied_by_policy"],
+                warnings=[]
+            )
+        # File size cap
+        try:
+            max_bytes = int(os.getenv("JINX_PATCH_MAX_FILE_BYTES", "200000"))
+        except Exception:
+            max_bytes = 200000
+        try:
+            if os.path.getsize(absp) > max_bytes:
+                return PatchResult(
+                    status=PatchStatus.FAILED,
+                    file_path=str(file_path),
+                    applied_rules=[],
+                    failed_rules=[rule.description for rule in rules],
+                    syntax_valid=False,
+                    backup_path=None,
+                    errors=["file_too_large"],
+                    warnings=[]
+                )
+        except Exception:
+            pass
         
         if not file_path.exists():
             return PatchResult(

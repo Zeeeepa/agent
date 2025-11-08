@@ -274,6 +274,37 @@ async def retrieve_project_top_k(query: str, k: int | None = None, *, max_time_m
         boosted.sort(key=lambda h: float(h[0] or 0.0), reverse=True)
         return boosted
 
+    def _apply_api_boost(hits: List[Tuple[float, str, Dict[str, Any]]]) -> List[Tuple[float, str, Dict[str, Any]]]:
+        """Heuristic boost for API-related files and previews (FastAPI/ASGI routers, schemas, services).
+        Applies tiny multiplicative gains; safe under RT constraints.
+        """
+        if not hits:
+            return hits
+        api_keys = {
+            "api", "router", "routers", "route", "routes", "endpoint", "endpoints",
+            "schema", "schemas", "model", "models", "service", "services",
+            "controller", "controllers", "app.py", "fastapi", "asgi"
+        }
+        pat_app = re.compile(r"@\s*app\.(get|post|put|patch|delete)\(")
+        out: List[Tuple[float, str, Dict[str, Any]]] = []
+        for sc, rel, obj in hits:
+            try:
+                meta = obj.get("meta", {})
+                file_rel = str(meta.get("file_rel") or rel or "").lower()
+                preview = (meta.get("text_preview") or "").lower()
+            except Exception:
+                file_rel = str(rel or "").lower(); preview = ""
+            mult = 1.0
+            # Path hints
+            if any(k in file_rel for k in api_keys):
+                mult *= 1.04
+            # Preview hints: decorators/fastapi symbols
+            if "fastapi" in preview or pat_app.search(preview):
+                mult *= 1.05
+            out.append((float(sc or 0.0) * mult, rel, obj))
+        out.sort(key=lambda h: float(h[0] or 0.0), reverse=True)
+        return out
+
     async def _symbol_hits(qid: str, k_arg: int) -> List[Tuple[float, str, Dict[str, Any]]]:
         """Lightweight symbol-index hits for identifier-like queries.
 
@@ -646,8 +677,9 @@ async def retrieve_project_top_k(query: str, k: int | None = None, *, max_time_m
 
         # Return deduped, score-sorted
         out_hits = sorted(collected, key=lambda h: float(h[0] or 0.0), reverse=True)[:k_eff]
-        # Filename/identifier small boosts
+        # Boosts: filename/identifier and API-aware hints
         out_hits = _apply_filename_boost(out_hits)
+        out_hits = _apply_api_boost(out_hits)
         # Optional cross-encoder reranking of the final shortlist
         try:
             out_hits = await _maybe_ce_rerank(out_hits)
@@ -783,8 +815,9 @@ async def retrieve_project_top_k(query: str, k: int | None = None, *, max_time_m
             pass
         kw = (await _run_sync_stage(stage_keyword_hits, q, k_eff, int(PROJ_STAGE_KEYWORD_MS * _ATT_MUL))) or []
         out_hits = kw[:k_eff]
-        # Filename/identifier boosts
+        # Boosts: filename/identifier and API-aware hints
         out_hits = _apply_filename_boost(out_hits)
+        out_hits = _apply_api_boost(out_hits)
         # Final literal pass
         if not out_hits:
             lit_hits = await _run_sync_stage(stage_literal_hits, (q_core or q), k_eff, int(PROJ_STAGE_LITERAL_MS * _ATT_MUL))

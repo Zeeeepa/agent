@@ -208,10 +208,12 @@ class DynamicConfigPlugin:
         
         while self._enabled:
             try:
-                await asyncio.sleep(30)  # Check every 30 seconds
+                await asyncio.sleep(15)  # Moderate responsiveness without cost
                 
                 # Check if adaptation is needed
                 await self._check_and_adapt()
+                # Autonomously gate subsystems by current state
+                await self._auto_gate_components()
             
             except asyncio.CancelledError:
                 break
@@ -471,6 +473,45 @@ class DynamicConfigPlugin:
                 applied_count += 1
         
         await debug_log(f"Applied {applied_count} parameters for '{profile_name}'", "PLUGIN")
+
+    # === Autonomous gating for components (no user toggles) ===
+    async def _auto_gate_components(self) -> None:
+        """Enable/disable LLM-heavy or optional subsystems based on runtime board state.
+        Rules:
+        - If idle (no last_query, no turn/error deltas, no new skills/api intents), disable StateCompiler LLM.
+        - If activity detected (new last_query or deltas), enable StateCompiler LLM temporarily.
+        """
+        try:
+            from jinx.micro.memory.board_state import read_board as _read_board
+        except Exception:
+            return
+        try:
+            board = await _read_board()
+        except Exception:
+            return
+        try:
+            last_query = (board.get("last_query") or "").strip()
+            turns = int(board.get("turns_total") or 0)
+            errors = int(board.get("errors_total") or 0)
+            skills_n = len(board.get("skills") or [])
+            api_intents = int(board.get("api_intents") or 0)
+        except Exception:
+            return
+        sig = f"{last_query}|{turns}|{errors}|{skills_n}|{api_intents}"
+        prev = getattr(self, "_prev_board_sig", None)
+
+        # Decide gating
+        active = bool(last_query) or (prev is not None and sig != prev)
+        if active:
+            # Enable StateCompiler LLM when there is actual activity
+            os.environ["JINX_STATE_COMPILER_LLM"] = "1"
+            await debug_log("AutoGate: StateCompiler LLM ON (activity detected)", "PLUGIN")
+        else:
+            # Idle: keep LLM off to avoid token usage
+            os.environ["JINX_STATE_COMPILER_LLM"] = "0"
+            await debug_log("AutoGate: StateCompiler LLM OFF (idle)", "PLUGIN")
+
+        setattr(self, "_prev_board_sig", sig)
     
     async def record_result(
         self,

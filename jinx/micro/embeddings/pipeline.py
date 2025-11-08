@@ -4,7 +4,7 @@ import asyncio
 import json
 import os
 from collections import deque
-from typing import Dict, Any, Deque, Iterable
+from typing import Dict, Any, Deque, Iterable, Optional
 
 from .paths import EMBED_ROOT, ensure_dirs
 from .util import sha256_text, now_ts
@@ -14,11 +14,19 @@ from .embed_cache import embed_text_cached
 from .project_terms import extract_terms as _extract_terms
 from .fingerprint import simhash as _simhash
 from jinx.micro.text.heuristics import is_code_like as _is_code_like
+from jinx.micro.runtime.task_ctx import get_current_group as _get_group
 _RECENT_MAX = 200
 _recent: Deque[Dict[str, Any]] = deque(maxlen=_RECENT_MAX)
 
 
-async def embed_text(text: str, *, source: str = "default", persist: bool = True, use_cache: bool = True) -> Optional[Dict[str, Any]]:
+async def embed_text(
+    text: str,
+    *,
+    source: str = "default",
+    kind: str | None = None,
+    persist: bool = True,
+    use_cache: bool = True,
+) -> Optional[Dict[str, Any]]:
     """Create an embedding for text and persist versioned artifact.
 
     Storage layout:
@@ -57,7 +65,7 @@ async def embed_text(text: str, *, source: str = "default", persist: bool = True
             await append_index(source, {
                 "ts": now_ts(),
                 "source": source,
-                "kind": kind,
+                "kind": (kind or "misc"),
                 "content_id": content_id,
                 "dedup": True,
             })
@@ -102,7 +110,7 @@ async def embed_text(text: str, *, source: str = "default", persist: bool = True
         "ts": now_ts(),
         "model": model,
         "source": source,
-        "kind": kind,
+        "kind": (kind or "misc"),
         "content_sha256": content_id,
         "dims": len(vec) if vec is not None else 0,
         "text_preview": text[:256],
@@ -128,7 +136,7 @@ async def embed_text(text: str, *, source: str = "default", persist: bool = True
     await append_index(source, {
         "ts": meta["ts"],
         "source": source,
-        "kind": kind,
+        "kind": (kind or "misc"),
         "content_id": content_id,
     })
 

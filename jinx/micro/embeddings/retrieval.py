@@ -6,7 +6,15 @@ import os
 from typing import List, Tuple, Dict, Any
 import hashlib
 
-from jinx.micro.embeddings.pipeline import iter_recent_items
+def _recent_items_snapshot():
+    try:
+        from jinx.micro.embeddings.pipeline import iter_recent_items as _it
+    except Exception:
+        return []
+    try:
+        return list(_it())
+    except Exception:
+        return []
 import jinx.state as jx_state
 from .paths import EMBED_ROOT
 from .similarity import score_cosine_batch
@@ -130,7 +138,7 @@ async def retrieve_top_k(query: str, k: int | None = None, *, max_time_ms: int |
     _recent_objs: List[Dict[str, Any]] = []
     _recent_vecs: List[List[float]] = []
     _recent_meta: List[Dict[str, Any]] = []
-    for obj in iter_recent_items():
+    for obj in _recent_items_snapshot():
         meta = obj.get("meta", {})
         src_l = (meta.get("source") or "").strip().lower()
         if not (src_l == "dialogue" or src_l.startswith("sandbox/") or src_l == "state"):

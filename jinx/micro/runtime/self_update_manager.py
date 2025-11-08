@@ -20,6 +20,7 @@ from jinx.micro.rt.activity import (
 from jinx.micro.runtime.self_update_journal import append as _jr
 from jinx.micro.runtime.self_update_venv import create_venv, install_requirements
 from jinx.micro.runtime.self_update_sign import verify_stage_signature
+from jinx.micro.runtime.plugins import publish_event as _pub_evt
 
 
 class SelfUpdateManager(MicroProgram):
@@ -74,6 +75,10 @@ class SelfUpdateManager(MicroProgram):
             if not ok:
                 log_warn("selfupdate.preflight_failed", dir=stage_dir)
                 _jr("selfupdate.preflight_failed", stage="preflight", ok=False, dir=stage_dir)
+                try:
+                    _pub_evt("selfupdate.preflight_failed", {"dir": stage_dir})
+                except Exception:
+                    pass
                 # Auto-rollback to LKG if configured
                 if await self._try_rollback_to_lkg(timeout_s=timeout_s):
                     return
@@ -84,11 +89,19 @@ class SelfUpdateManager(MicroProgram):
             if not ok:
                 log_warn("selfupdate.green_failed", dir=stage_dir)
                 _jr("selfupdate.green_failed", stage="green", ok=False, dir=stage_dir)
+                try:
+                    _pub_evt("selfupdate.green_failed", {"dir": stage_dir})
+                except Exception:
+                    pass
                 if await self._try_rollback_to_lkg(timeout_s=timeout_s):
                     return
                 return
             log_info("selfupdate.success", dir=stage_dir)
             _jr("selfupdate.success", stage="switch", ok=True, dir=stage_dir)
+            try:
+                _pub_evt("selfupdate.success", {"dir": stage_dir})
+            except Exception:
+                pass
         finally:
             try:
                 _clear_det(); _clear_act()
@@ -259,12 +272,23 @@ class SelfUpdateManager(MicroProgram):
         env["JINX_SELFUPDATE_SHADOW_DIR"] = shadow_dir
         proc = None
         try:
+            import subprocess as _sp
+            creationflags = 0
+            try:
+                if os.name == "nt":
+                    # Lower green priority during stabilization
+                    if str(os.getenv("JINX_SELFUPDATE_GREEN_LOWPRIO", "1")).lower() not in ("", "0", "false", "off", "no"):
+                        for flag in (getattr(_sp, "BELOW_NORMAL_PRIORITY_CLASS", 0), getattr(_sp, "CREATE_NEW_PROCESS_GROUP", 0)):
+                            creationflags |= int(flag or 0)
+            except Exception:
+                creationflags = 0
             proc = await asyncio.create_subprocess_exec(
                 py, "jinx.py",
                 cwd=stage_dir,
                 env=env,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
+                creationflags=creationflags if creationflags else 0,
             )
         except Exception:
             return False
@@ -291,6 +315,10 @@ class SelfUpdateManager(MicroProgram):
             except Exception:
                 pass
             _jr("selfupdate.handshake_failed", stage="green", ok=False)
+            try:
+                _pub_evt("selfupdate.handshake_failed", {"dir": stage_dir})
+            except Exception:
+                pass
             return False
         _jr("selfupdate.handshake_ok", stage="green", ok=True)
         # Optional shadow canary
