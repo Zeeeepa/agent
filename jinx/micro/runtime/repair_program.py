@@ -143,13 +143,12 @@ class RepairProgram(MicroProgram):
             from jinx.micro.llm.service import spark_openai as _spark
         except Exception:
             return
-        prompt = (
-            "Generate a minimal, SAFE Python module implementation for the given fully-qualified module name.\n"
-            "It may be imported by other modules.\n"
-            "Constraints: no external dependencies; avoid heavy logic; provide minimal classes/functions used commonly.\n"
-            "Never raise on import. Export dummies if necessary.\n"
-            f"Module: {mod}\n"
-        )
+        try:
+            from jinx.prompts import get_prompt as _get_prompt
+            _tmpl = _get_prompt("repair_stub")
+            prompt = _tmpl.format(module=mod)
+        except Exception:
+            prompt = f"Generate a minimal, SAFE Python module implementation for '{mod}'."
         try:
             out, _ = await _spark(prompt)
             # naive extract code block: keep whole output as code

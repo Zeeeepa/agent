@@ -160,11 +160,10 @@ class RepairEngine:
             # Call LLM for repair suggestion
             from jinx.micro.llm.service import spark_openai
             
-            response = await spark_openai(
-                prompt,
-                temperature=0.1,  # Low temperature for deterministic fixes
-                max_tokens=2000
-            )
+            # spark_openai returns (output_text, code_tag_id) and does not accept
+            # temperature/max_tokens kwargs. Use default validated path and extract text.
+            out_text, _ = await spark_openai(prompt)
+            response = out_text
             
             # Parse repair from response
             repair = self._parse_repair_response(response, pattern, context)
@@ -180,42 +179,40 @@ class RepairEngine:
         pattern: ErrorPattern,
         context: Dict[str, Any]
     ) -> str:
-        """Build LLM prompt for repair generation."""
-        
-        prompt = f"""Analyze and fix this Python error:
-
-ERROR: {pattern.error_type}: {pattern.error_message}
-
-FILE: {context.get('file_path', 'unknown')}
-LINE: {context.get('line_number', 0)}
-
-ERROR LINE:
-{context.get('error_line', '')}
-
-CONTEXT BEFORE:
-{''.join(context.get('context_before', [])[-5:])}
-
-CONTEXT AFTER:
-{''.join(context.get('context_after', [])[:5])}
-
-CONTAINING SCOPE: {context.get('containing_scope', 'unknown')}
-
-Provide:
-1. Root cause analysis
-2. Minimal fix (only change what's necessary)
-3. Confidence level (0.0-1.0)
-4. Estimated impact (low/medium/high/critical)
-
-Format response as:
-<analysis>...</analysis>
-<fix>
-[fixed code here]
-</fix>
-<confidence>0.X</confidence>
-<impact>level</impact>
-"""
-        
-        return prompt
+        """Build LLM prompt for repair generation using prompts/repair_suggest template."""
+        try:
+            from jinx.prompts import render_prompt as _render_prompt
+        except Exception:
+            _render_prompt = None  # type: ignore
+        before_text = ''.join((context.get('context_before') or [])[-5:]) if isinstance(context.get('context_before'), list) else str(context.get('context_before') or '')
+        after_text = ''.join((context.get('context_after') or [])[:5]) if isinstance(context.get('context_after'), list) else str(context.get('context_after') or '')
+        if _render_prompt is not None:
+            try:
+                return _render_prompt(
+                    "repair_suggest",
+                    error_type=pattern.error_type,
+                    error_message=pattern.error_message,
+                    file_path=context.get('file_path', 'unknown'),
+                    line_number=context.get('line_number', 0),
+                    error_line=context.get('error_line', ''),
+                    context_before_text=before_text,
+                    context_after_text=after_text,
+                    containing_scope=context.get('containing_scope', 'unknown'),
+                )
+            except Exception:
+                pass
+        # Fallback minimal payload if template unavailable
+        import json as _json
+        return _json.dumps({
+            "error_type": pattern.error_type,
+            "error_message": pattern.error_message,
+            "file_path": context.get('file_path', 'unknown'),
+            "line_number": context.get('line_number', 0),
+            "error_line": context.get('error_line', ''),
+            "context_before": before_text,
+            "context_after": after_text,
+            "scope": context.get('containing_scope', 'unknown'),
+        }, ensure_ascii=False)
     
     def _parse_repair_response(
         self,
@@ -346,31 +343,45 @@ Format response as:
             with open(backup_path, 'w', encoding='utf-8') as f:
                 f.write(original_content)
             
-            # Apply patch
-            if action.original_code and action.fixed_code:
-                patched_content = original_content.replace(
-                    action.original_code,
-                    action.fixed_code,
-                    1  # Replace only first occurrence
+            # Try safe context-based autopatch first
+            auto_ok = False
+            try:
+                from jinx.micro.runtime.patch.autopatch import autopatch as _autopatch, AutoPatchArgs as _Args
+                args = _Args(
+                    path=action.target_file,
+                    context_before=(action.original_code or ""),
+                    code=(action.fixed_code or ""),
+                    preview=False,
                 )
-            else:
-                patched_content = action.fixed_code or ""
-            
-            # Validate patched code
-            valid, error = self._analyzer.validate_syntax(patched_content)
-            
-            if not valid:
-                return RepairResult(
-                    success=False,
-                    action=action,
-                    validation_passed=False,
-                    error_cleared=False,
-                    side_effects=[f'Syntax validation failed: {error}']
-                )
-            
-            # Write patched version
-            with open(action.target_file, 'w', encoding='utf-8') as f:
-                f.write(patched_content)
+                # timebox autopatch to keep RT guarantees
+                ok, strat, detail = await asyncio.wait_for(_autopatch(args), timeout=1.2)
+                auto_ok = bool(ok)
+            except Exception:
+                auto_ok = False
+
+            if not auto_ok:
+                # Fallback: apply minimal replace
+                if action.original_code and action.fixed_code:
+                    patched_content = original_content.replace(
+                        action.original_code,
+                        action.fixed_code,
+                        1  # Replace only first occurrence
+                    )
+                else:
+                    patched_content = action.fixed_code or ""
+                # Validate patched code
+                valid, error = self._analyzer.validate_syntax(patched_content)
+                if not valid:
+                    return RepairResult(
+                        success=False,
+                        action=action,
+                        validation_passed=False,
+                        error_cleared=False,
+                        side_effects=[f'Syntax validation failed: {error}']
+                    )
+                # Write patched version
+                with open(action.target_file, 'w', encoding='utf-8') as f:
+                    f.write(patched_content)
             
             # Wait for system to stabilize
             await asyncio.sleep(0.5)

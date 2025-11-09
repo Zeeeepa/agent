@@ -14,6 +14,12 @@ import jinx.state as jx_state
 from jinx.micro.runtime.task_ctx import current_group
 from jinx.micro.rt.backpressure import clear_throttle_if_ttl
 from jinx.micro.runtime.plugins import publish_event as _publish_event
+try:
+    from jinx.rt.wcet import update as _wcet_update, estimate_deadline_ms as _wcet_est
+except Exception:
+    _wcet_update = None  # type: ignore
+    def _wcet_est(_op: str, base_ms: int) -> int:  # type: ignore
+        return int(base_ms)
 
 
 @lru_cache(maxsize=2048)
@@ -260,7 +266,10 @@ async def frame_shift(q: asyncio.Queue[str]) -> None:
             else:
                 await shatter(s)
             try:
-                _publish_event("turn.metrics", {"group": gid, "dt": time.perf_counter() - t0})
+                dt = time.perf_counter() - t0
+                _publish_event("turn.metrics", {"group": gid, "dt": dt})
+                if _wcet_update is not None:
+                    _wcet_update("turn", dt * 1000.0)
             except Exception:
                 pass
         except Exception as e:
@@ -408,10 +417,21 @@ async def frame_shift(q: asyncio.Queue[str]) -> None:
                             continue
                         msg = _strip_group_tag(raw)
                         await _ensure_spinner()
-                        t = asyncio.create_task(_run_one(msg, gid))
+                        # Deadline-aware scheduling (EDF skeleton): prefer schedule_turn
+                        try:
+                            from jinx.rt.scheduler import schedule_turn as _schedule_turn  # local import to avoid cycles
+                            # Use step_ms deadline if set, else fallback to env or 15000 ms
+                            try:
+                                _fallback_dl = int(os.getenv("JINX_FRAME_DEADLINE_MS", "15000"))
+                            except Exception:
+                                _fallback_dl = 15000
+                            base_dl = int(step_ms) if int(step_ms or 0) > 0 else _fallback_dl
+                            _dl = _wcet_est("turn", base_dl)
+                            t = _schedule_turn(lambda: _run_one(msg, gid), deadline_ms=_dl, name=f"turn:{gid}")
+                        except Exception:
+                            t = asyncio.create_task(_run_one(msg, gid))
                         active.add(t)
                         task_group[t] = gid
-                        group_active_count[gid] = int(group_active_count.get(gid, 0)) + 1
                         try:
                             _publish_event("turn.scheduled", {"group": gid, "text": msg})
                         except Exception:

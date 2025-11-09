@@ -99,16 +99,17 @@ class StateCompilerProgram(MicroProgram):
                 )
             )
             if should_llm:
-                prompt = (
-                    "You are a systems planner. Given compact runtime board, last_query, and memory, "
-                    "produce STRICT JSON ONLY with keys: goals (array of short strings), plan (array of 3-6 short steps), "
-                    "capability_gaps (array), next_action (string), mem_pointers (array of short pointers).\n"
-                    "Rules: minimal, actionable, avoid redundancy, ASCII only, no code fences.\n\n"
-                    f"BOARD_JSON:\n{json.dumps(ctx['board'], ensure_ascii=False)}\n\n"
-                    f"LAST_QUERY:\n{ctx['last_query']}\n\n"
-                    f"MEMORY_SNIPPETS:\n{ctx['memory']}\n\n"
-                    f"EVERGREEN:\n{ctx['evergreen']}\n"
-                )
+                try:
+                    from jinx.prompts import get_prompt as _get_prompt
+                    _tmpl = _get_prompt("state_compiler")
+                    prompt = _tmpl.format(
+                        board_json=json.dumps(ctx['board'], ensure_ascii=False),
+                        last_query=ctx['last_query'],
+                        memory_snippets=ctx['memory'],
+                        evergreen=ctx['evergreen'],
+                    )
+                except Exception:
+                    prompt = json.dumps(ctx, ensure_ascii=False)
                 from jinx.micro.llm.service import spark_openai as _spark
                 raw, _ = await asyncio.wait_for(_spark(prompt), timeout=max(0.2, time_left_ms()) / 1000.0)
                 if raw:

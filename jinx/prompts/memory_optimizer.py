@@ -59,6 +59,7 @@ def _load() -> str:
         "- Inside blocks: plain lines only. No list markers ('-', '*', '•'), numbering, or headings. Parenthetical notes like '(omitted)'/'(repeated N times)' are allowed.\n"
         "- Preserve indentation and line breaks for code/commands/errors you keep. Do not rewrap.\n"
         "- Do NOT emit other tags (<machine_*>, <python_*>, backticks, etc.).\n"
+        "- ASCII only; no code fences; avoid markdown formatting.\n"
         "- No commentary outside tags. Do not reference these instructions.\n"
         "- Maintain language continuity: keep user lines in their original language; Jinx lines should match the surrounding language.\n"
         "- Determinism over creativity.\n"

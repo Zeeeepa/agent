@@ -6,6 +6,7 @@ import time
 from typing import Dict, Tuple, List
 
 _BANDIT_PATH = os.path.join(".jinx", "brain", "patch_bandit.json")
+_METRICS_PATH = os.path.join(".jinx", "stats", "patch_metrics.json")
 _OS_MAKEDIRS = os.makedirs
 
 
@@ -29,6 +30,17 @@ def _load() -> Dict[str, Dict[str, Dict[str, float]]]:
             obj = json.load(f)
             if isinstance(obj, dict):
                 return obj  # type: ignore[return-value]
+    except Exception:
+        pass
+    return {}
+
+
+def _load_metrics() -> Dict:
+    try:
+        with open(_METRICS_PATH, "r", encoding="utf-8") as f:
+            obj = json.load(f)
+            if isinstance(obj, dict):
+                return obj
     except Exception:
         pass
     return {}
@@ -59,6 +71,7 @@ def bandit_order_for_context(ctx: str, strategies: List[str]) -> List[str]:
     Keeps exploration by giving unseen strategies a modest prior.
     """
     data = _load()
+    metrics = _load_metrics()
     sdata = data.get(ctx) or {}
     now = _now()
     try:
@@ -80,7 +93,50 @@ def bandit_order_for_context(ctx: str, strategies: List[str]) -> List[str]:
         # UCB-like exploration bonus
         import math
         bonus = math.sqrt(max(0.0, math.log(total_trials) / trials))
-        score = rate + 0.4 * bonus
+        # Metrics penalty: prefer strategies with lower fail rate and smaller diffs in this context
+        pen = 0.0
+        try:
+            c = (metrics.get("contexts") or {}).get(ctx or "") or {}
+            sroot = (c.get("strategies") or {})
+            sm = sroot.get(s) or {}
+            scount = int(sm.get("count", 0))
+            sfail = int(sm.get("fail", 0))
+            sdiff = float(sm.get("avg_diff", 0.0) or 0.0)
+            fail_rate = (sfail / max(1, scount)) if scount > 0 else 0.0
+            diff_norm = min(1.0, sdiff / 200.0)
+            pen = 0.4 * fail_rate + 0.2 * diff_norm
+            # light penalty for riskier families
+            base = s
+            for key in ("_wide", "_0.64", "_0.55"):
+                base = base.replace(key, "")
+            if base in ("write", "search_line"):
+                pen += 0.1
+        except Exception:
+            pen = 0.0
+        # Family priors (tiny nudges toward safer/more precise strategies)
+        base = s
+        # normalize prefixes
+        base = base.replace("search_semantic", "semantic")
+        base = base.replace("cg_window_search_", "cg_window_")
+        for key in ("_wide", "_0.64", "_0.55"):
+            base = base.replace(key, "")
+        priors = {
+            "cg_scope": 0.12,
+            "symbol": 0.10,
+            "cg_window_def": 0.08,
+            "cg_window_caller": 0.06,
+            "cg_window_callee_def": 0.06,
+            "semantic": 0.05,
+            "context": 0.03,
+            "anchor": 0.02,
+            "ts_line": 0.01,
+        }
+        prior = 0.0
+        for fam, w in priors.items():
+            if base.startswith(fam):
+                prior = w
+                break
+        score = rate + 0.4 * bonus + prior - pen
         out.append((score, s))
     out.sort(key=lambda t: t[0], reverse=True)
     return [s for _sc, s in out]

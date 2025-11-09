@@ -83,11 +83,16 @@ async def run_sandbox(code: str, callback: Callable[[str | None], Awaitable[None
                 raise Exception(f"Payload mutation error: {e}")
 
         try:
+            try:
+                from jinx.observability.otel import span as _span
+            except Exception:
+                from contextlib import nullcontext as _span  # type: ignore
             # Track execution
             _sandbox_metrics.total_runs += 1
             
             # No retries/no delay to avoid any extra waiting for sandbox runs
-            await detonate_payload(async_sandbox_task, retries=1, delay=0)
+            with _span("sandbox.run"):
+                await detonate_payload(async_sandbox_task, retries=1, delay=0)
             
             # Update timing metrics
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
@@ -121,8 +126,18 @@ async def run_sandbox(code: str, callback: Callable[[str | None], Awaitable[None
                 if "Timeout" in str(err):
                     _sandbox_metrics.timeout_runs += 1
                 _sandbox_metrics.failed_runs += 1
+                try:
+                    with _span("sandbox.result.error"):
+                        pass
+                except Exception:
+                    pass
             else:
                 _sandbox_metrics.successful_runs += 1
+                try:
+                    with _span("sandbox.result.ok"):
+                        pass
+                except Exception:
+                    pass
             
             if log_path:
                 # Rename log file to Jinx-styled status name before announcing path (non-blocking)

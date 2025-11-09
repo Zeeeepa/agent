@@ -115,17 +115,12 @@ class SkillAcquirerProgram(MicroProgram):
 
     async def _llm_spec(self, query: str, target_name: str) -> Dict[str, Any]:
         """Ask LLM for JSON {path, code}. Returns dict."""
-        prompt = (
-            "You are a senior Jinx systems engineer. Create a minimal Python skill module to help answer the user query.\n"
-            "Return STRICT JSON ONLY with keys: path (string), code (string). No code fences. ASCII only.\n"
-            "Constraints:\n"
-            "- Micro-modular, async-friendly, no blocking IO in top-level.\n"
-            "- Prefer a function 'async def handle(query: str) -> str' that returns a textual result.\n"
-            "- Keep external deps to standard library only.\n"
-            "- Keep code small and safe.\n"
-            f"User query: {query}\n"
-            f"Suggested path (under jinx/skills): jinx/skills/{target_name}\n"
-        )
+        try:
+            from jinx.prompts import get_prompt as _get_prompt
+            _tmpl = _get_prompt("skill_acquire_spec")
+            prompt = _tmpl.format(query=query, suggested_path=f"jinx/skills/{target_name}")
+        except Exception:
+            prompt = f"{{\"path\": \"jinx/skills/{target_name}\", \"code\": \"\"}}"
         try:
             from jinx.micro.llm.service import spark_openai as _spark
         except Exception:

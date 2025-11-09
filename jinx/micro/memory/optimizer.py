@@ -113,7 +113,11 @@ async def _optimize_memory_impl(snapshot: str | None) -> None:
             await bomb_log("MEMORY optimize: done (local)")
             return
 
-        instructions = get_prompt("memory_optimizer")
+        try:
+            from jinx.prompts import render_prompt as _render_prompt
+            instructions = _render_prompt("memory_optimizer")
+        except Exception:
+            instructions = get_prompt("memory_optimizer")
         model = os.getenv("OPENAI_MODEL", "gpt-5")
         timeout_sec = float(os.getenv("MEMORY_TIMEOUT_SEC", "60"))
 

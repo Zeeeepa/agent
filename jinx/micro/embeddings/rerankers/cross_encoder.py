@@ -37,12 +37,12 @@ async def _score_openai(query: str, docs: List[str], *, timeout_ms: int, conc: i
     async def _score_one(i: int, text: str) -> None:
         if not text:
             return
-        prompt = (
-            "You are a reranker. Rate how relevant the candidate is to the query for code/doc search. "
-            "Return ONLY a floating point number between 0.0 and 1.0 with no words.\n"
-            f"Query: {query[:512]}\n"
-            f"Candidate: {text[:1200]}\n"
-        )
+        try:
+            from jinx.prompts import get_prompt as _get_prompt
+            _tmpl = _get_prompt("cross_rerank")
+            prompt = _tmpl.format(query=query[:512], candidate=text[:1200])
+        except Exception:
+            prompt = f"Query: {query[:512]}\nCandidate: {text[:1200]}\n"
         try:
             async with sem:
                 if timeout_ms > 0:

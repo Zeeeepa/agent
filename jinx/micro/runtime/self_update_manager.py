@@ -245,7 +245,36 @@ class SelfUpdateManager(MicroProgram):
                 return False
             ok = bool(proc2.returncode == 0 and b"SMOKE_OK" in (out2 or b""))
             _jr("selfupdate.smoke_ok" if ok else "selfupdate.smoke_failed", stage="preflight", ok=ok)
-            return ok
+            if not ok:
+                return False
+            # Phase 3: prompt render smoke to detect placeholder/ASCII issues
+            code3 = (
+                "import json;"
+                "from jinx.prompts import render_prompt;"
+                "shape='{\\n  \"name\": \"string\",\\n  \"resources\": [\\n    {\\n      \"name\": \"string\",\\n      \"fields\": {\"id\": \"int|str|float|bool\", ...},\\n      \"endpoints\": [\"list\", \"get\", \"create\", \"update\", \"delete\"]\\n    }\\n  ]\\n}';"
+                "txt=render_prompt('architect_api', shape=shape, project_name='preflight', candidate_resources_json=json.dumps(['thing']), request='check');"
+                "assert isinstance(txt,str) and txt.encode('ascii','ignore').decode('ascii')==txt;"
+                "print('PROMPT_OK')"
+            )
+            proc3 = await asyncio.create_subprocess_exec(
+                py, "-c", code3,
+                cwd=stage_dir,
+                env=env,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                out3, err3 = await asyncio.wait_for(proc3.communicate(), timeout=2.0)
+            except asyncio.TimeoutError:
+                try:
+                    proc3.kill()
+                except Exception:
+                    pass
+                _jr("selfupdate.prompt_smoke_timeout", stage="preflight", ok=False)
+                return False
+            ok3 = bool(proc3.returncode == 0 and b"PROMPT_OK" in (out3 or b""))
+            _jr("selfupdate.prompt_smoke_ok" if ok3 else "selfupdate.prompt_smoke_failed", stage="preflight", ok=ok3)
+            return ok3
         except Exception:
             _jr("selfupdate.preflight_exception", stage="preflight", ok=False)
             return False

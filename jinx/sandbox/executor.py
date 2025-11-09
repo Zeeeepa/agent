@@ -8,6 +8,12 @@ import multiprocessing  # needed for type annotations resolution
 from multiprocessing.managers import DictProxy as MPDictProxy
 from typing import Any, Optional, TextIO, cast
 from jinx.text_service import slice_fuse
+try:
+    # Best-effort: apply per-run resource limits (POSIX only)
+    from jinx.sandbox.policy import select_limits, apply_limits  # type: ignore
+except Exception:  # pragma: no cover - import-safe
+    select_limits = None  # type: ignore
+    apply_limits = None  # type: ignore
 
 
 def blast_zone(
@@ -22,6 +28,15 @@ def blast_zone(
     long-running programs record progress incrementally. A short slice of the
     final output is still returned via ``shrap['output']`` for summary.
     """
+    # Apply resource limits at the beginning of the child process (no-op on Windows)
+    try:
+        if apply_limits and select_limits:
+            # Kind can be controlled via env JINX_SANDBOX_POLICY
+            lim = select_limits(os.getenv("JINX_SANDBOX_POLICY", None))  # type: ignore[call-arg]
+            apply_limits(lim)  # type: ignore[misc]
+    except Exception:
+        pass
+
     if log_path:
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
         with open(log_path, "a", encoding="utf-8", buffering=1) as f:

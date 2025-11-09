@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re as _re
 from typing import Any
 
 from jinx.logging_service import bomb_log
@@ -11,6 +12,118 @@ from .llm_cache import call_openai_cached, call_openai_multi_validated
 from jinx.micro.text.heuristics import is_code_like as _is_code_like
 import asyncio as _asyncio
 import queue as _queue
+
+
+def _normalize_prompt_payload(instructions: str, input_text: str) -> tuple[str, str]:
+    """Deduplicate and clip prompt pieces to reduce token waste.
+
+    - Removes duplicate large paragraphs (first occurrence kept) across instructions and input.
+    - Collapses excessive blank lines and consecutive duplicate long lines.
+    - Clips by env budgets. Env gates allow turning off if needed.
+    """
+    # Gate
+    try:
+        on = (os.getenv("JINX_PROMPT_DEDUP", "1").strip().lower() not in ("", "0", "false", "off", "no"))
+    except Exception:
+        on = True
+    if not on:
+        return instructions, input_text
+    # Budgets / thresholds
+    try:
+        max_ins = int(os.getenv("JINX_PROMPT_MAX_INST_CHARS", "12000"))
+    except Exception:
+        max_ins = 12000
+    try:
+        max_inp = int(os.getenv("JINX_PROMPT_MAX_INPUT_CHARS", "12000"))
+    except Exception:
+        max_inp = 12000
+    try:
+        min_para = int(os.getenv("JINX_PROMPT_MIN_PARA_CHARS", "200"))
+    except Exception:
+        min_para = 200
+    try:
+        min_line = int(os.getenv("JINX_PROMPT_MIN_LINE_CHARS", "80"))
+    except Exception:
+        min_line = 80
+
+    try:
+        sh_sz = int(os.getenv("JINX_PROMPT_SHINGLE_CHARS", "80"))
+    except Exception:
+        sh_sz = 80
+    try:
+        sh_step = int(os.getenv("JINX_PROMPT_SHINGLE_STEP", "20"))
+    except Exception:
+        sh_step = 20
+    try:
+        dup_overlap = float(os.getenv("JINX_PROMPT_DUP_OVERLAP", "0.9"))
+    except Exception:
+        dup_overlap = 0.9
+
+    def _shingles(s: str) -> set[str]:
+        t = s
+        L = len(t)
+        if L <= sh_sz:
+            return {t} if t else set()
+        out: set[str] = set()
+        i = 0
+        while i + sh_sz <= L:
+            out.add(t[i : i + sh_sz])
+            i += max(1, sh_step)
+        return out
+
+    def _is_near_dup(p: str, seen_sh: set[str]) -> bool:
+        if not p:
+            return False
+        sh = _shingles(p)
+        if not sh:
+            return False
+        inter = len([x for x in sh if x in seen_sh])
+        ratio = inter / max(1, len(sh))
+        return ratio >= dup_overlap
+
+    def _norm_one(s: str, seen: set[str], seen_sh: set[str]) -> str:
+        if not s:
+            return ""
+        t = s.replace("\r\n", "\n").replace("\r", "\n")
+        # Collapse excessive blank lines
+        t = _re.sub(r"\n{3,}", "\n\n", t)
+        # Deduplicate paragraphs (double-newline separated) if sufficiently large
+        parts = t.split("\n\n")
+        out_parts: list[str] = []
+        for p in parts:
+            key = p.strip()
+            if len(key) >= min_para:
+                # exact dup
+                if key in seen:
+                    continue
+                # near-dup via shingle overlap
+                if _is_near_dup(key, seen_sh):
+                    continue
+                seen.add(key)
+                for x in _shingles(key):
+                    seen_sh.add(x)
+            out_parts.append(p)
+        t = "\n\n".join(out_parts)
+        # Remove consecutive duplicate long lines
+        lines = t.splitlines()
+        out_lines: list[str] = []
+        prev = None
+        for ln in lines:
+            if prev is not None and ln == prev and len(ln) >= min_line:
+                # skip duplicate
+                continue
+            out_lines.append(ln)
+            prev = ln
+        return "\n".join(out_lines)
+
+    seen: set[str] = set()
+    seen_sh: set[str] = set()
+    ins = _norm_one(instructions or "", seen, seen_sh)
+    inp = _norm_one(input_text or "", seen, seen_sh)
+    # Clip to budgets
+    ins = ins[:max_ins]
+    inp = inp[:max_inp]
+    return ins, inp
 
 
 async def call_openai(instructions: str, model: str, input_text: str) -> str:
@@ -28,6 +141,8 @@ async def call_openai(instructions: str, model: str, input_text: str) -> str:
                 "No OpenAI API key configured. Set OPENAI_API_KEY in .env to enable model calls.\n"
                 "</llm_disabled>"
             )
+        # Normalize to prevent duplicated large chunks from reaching the API
+        instructions, input_text = _normalize_prompt_payload(instructions, input_text)
         # Heuristic: enable File Search tools only for code-like queries unless gated off
         try:
             fs_gate_on = (os.getenv("JINX_FILESEARCH_GATE", "1").strip().lower() not in ("", "0", "false", "off", "no"))
@@ -60,6 +175,21 @@ async def call_openai_validated(instructions: str, model: str, input_text: str, 
         multi_on = (os.getenv("JINX_LLM_MULTI_ENABLE", "1").strip().lower() not in ("", "0", "false", "off", "no"))
     except Exception:
         multi_on = True
+    # Normalize first
+    instructions, input_text = _normalize_prompt_payload(instructions, input_text)
+    # Hard clamp for streaming payloads (env-configurable)
+    try:
+        smax_i = int(os.getenv("JINX_STREAM_INST_MAX_CHARS", "16000"))
+    except Exception:
+        smax_i = 16000
+    try:
+        smax_t = int(os.getenv("JINX_STREAM_INPUT_MAX_CHARS", "12000"))
+    except Exception:
+        smax_t = 12000
+    if len(instructions) > smax_i:
+        instructions = instructions[:smax_i]
+    if len(input_text) > smax_t:
+        input_text = input_text[:smax_t]
     # Heuristic: enable File Search tools only for code-like queries unless gated off
     try:
         fs_gate_on = (os.getenv("JINX_FILESEARCH_GATE", "1").strip().lower() not in ("", "0", "false", "off", "no"))
@@ -98,6 +228,8 @@ async def call_openai_stream_first_block(
 
     Fallback to validated non-stream call on any streaming error.
     """
+    # Normalize first
+    instructions, input_text = _normalize_prompt_payload(instructions, input_text)
     # File Search gating
     try:
         fs_gate_on = (os.getenv("JINX_FILESEARCH_GATE", "1").strip().lower() not in ("", "0", "false", "off", "no"))

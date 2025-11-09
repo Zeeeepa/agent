@@ -24,6 +24,7 @@ class PriorityMetrics:
     avg_queue_time_ms: float = 0.0
     max_queue_time_ms: float = 0.0
     classification_hits: Dict[int, int] = field(default_factory=dict)
+    denied_admissions: int = 0
 
 
 @dataclass(frozen=True)
@@ -159,6 +160,10 @@ def classify_priority(msg: str) -> int:
 def start_priority_dispatcher_task(src: "asyncio.Queue[str]", dst: "asyncio.Queue[str]", settings: Settings) -> "asyncio.Task[None]":
     async def _run() -> None:
         # Advanced priority dispatcher with metrics and starvation prevention
+        try:
+            from jinx.observability.otel import span as _span
+        except Exception:
+            from contextlib import nullcontext as _span  # type: ignore
         loop = asyncio.get_running_loop()
         budget = max(1, settings.runtime.hard_rt_budget_ms) / 1000.0
         next_yield = loop.time() + budget
@@ -166,6 +171,8 @@ def start_priority_dispatcher_task(src: "asyncio.Queue[str]", dst: "asyncio.Queu
         heap: List[Tuple[int, int, float, str]] = []  # (priority, seq, enqueue_time, msg)
         seq = 0
         metrics = PriorityMetrics()
+        capacity = max(1, int(settings.runtime.queue_maxsize))
+        policy = (settings.runtime.queue_policy or "drop_oldest").strip().lower()
         
         # Starvation prevention: track time since last low-priority dispatch
         last_low_priority_dispatch: Dict[int, float] = defaultdict(lambda: loop.time())
@@ -196,8 +203,9 @@ def start_priority_dispatcher_task(src: "asyncio.Queue[str]", dst: "asyncio.Queu
                         continue
 
                     # Priority mode: race new item vs flush tick
-                    get_task = asyncio.create_task(_awaitable_src_get())
-                    flush_task = asyncio.create_task(asyncio.sleep(0.001))
+                    with _span("priority.await_or_flush"):
+                        get_task = asyncio.create_task(_awaitable_src_get())
+                        flush_task = asyncio.create_task(asyncio.sleep(0.001))
                     
                     try:
                         done, _ = await asyncio.wait({get_task, flush_task}, return_when=asyncio.FIRST_COMPLETED)
@@ -224,10 +232,78 @@ def start_priority_dispatcher_task(src: "asyncio.Queue[str]", dst: "asyncio.Queu
                         msg = get_task.result()
                     except asyncio.CancelledError:
                         continue
-                    pr = classify_priority(msg)
+                    with _span("priority.classify"):
+                        pr = classify_priority(msg)
                     enqueue_time = loop.time()
-                    heapq.heappush(heap, (pr, seq, enqueue_time, msg))
-                    seq += 1
+                    # Admission control
+                    admitted = True
+                    if len(heap) >= capacity:
+                        if pr <= 1:
+                            # Try to evict one low-priority item to admit critical/high
+                            evicted = False
+                            if heap:
+                                # Find an index of a low-priority item (pr>=2), prefer oldest by seq
+                                idx = -1
+                                best_s = 10**12
+                                for i, (p0, s0, t0, m0) in enumerate(heap):
+                                    if p0 >= 2 and s0 < best_s:
+                                        best_s = s0
+                                        idx = i
+                                if idx >= 0:
+                                    heap[idx] = heap[-1]
+                                    heap.pop()
+                                    heapq.heapify(heap)
+                                    evicted = True
+                            if not evicted:
+                                # No eviction candidate; apply policy
+                                if policy == "drop_newest":
+                                    admitted = False
+                                elif policy == "drop_oldest":
+                                    # Drop oldest overall (by seq)
+                                    if heap:
+                                        idx = 0
+                                        best_s = heap[0][1]
+                                        for i in range(1, len(heap)):
+                                            if heap[i][1] < best_s:
+                                                best_s = heap[i][1]
+                                                idx = i
+                                        heap[idx] = heap[-1]
+                                        heap.pop()
+                                        heapq.heapify(heap)
+                                    else:
+                                        admitted = False
+                                else:  # block
+                                    try:
+                                        await asyncio.sleep(0.001)
+                                    except Exception:
+                                        pass
+                        else:
+                            # Non-critical item; apply policy directly
+                            if policy == "drop_newest":
+                                admitted = False
+                            elif policy == "drop_oldest":
+                                if heap:
+                                    idx = 0
+                                    best_s = heap[0][1]
+                                    for i in range(1, len(heap)):
+                                        if heap[i][1] < best_s:
+                                            best_s = heap[i][1]
+                                            idx = i
+                                    heap[idx] = heap[-1]
+                                    heap.pop()
+                                    heapq.heapify(heap)
+                                else:
+                                    admitted = False
+                            else:  # block
+                                try:
+                                    await asyncio.sleep(0.001)
+                                except Exception:
+                                    pass
+                    if admitted:
+                        heapq.heappush(heap, (pr, seq, enqueue_time, msg))
+                        seq += 1
+                    else:
+                        metrics.denied_admissions += 1
                 
                     # Update metrics
                     if pr == 0:
@@ -268,8 +344,9 @@ def start_priority_dispatcher_task(src: "asyncio.Queue[str]", dst: "asyncio.Queu
                         heapq.heapify(heap)
                     
                     # Dispatch highest priority item
-                    pr, s, enq_t, item = heapq.heappop(heap)
-                    await dst.put(item)
+                    with _span("priority.dispatch_one"):
+                        pr, s, enq_t, item = heapq.heappop(heap)
+                        await dst.put(item)
                     
                     # Update metrics
                     queue_time_ms = (current_time - enq_t) * 1000.0
@@ -292,7 +369,8 @@ def start_priority_dispatcher_task(src: "asyncio.Queue[str]", dst: "asyncio.Queu
                             await bomb_log(
                                 f"Priority queue metrics: processed={metrics.total_processed}, "
                                 f"avg_wait={metrics.avg_queue_time_ms:.1f}ms, "
-                                f"max_wait={metrics.max_queue_time_ms:.1f}ms"
+                                f"max_wait={metrics.max_queue_time_ms:.1f}ms, "
+                                f"denied={metrics.denied_admissions}"
                             )
                         except Exception:
                             pass

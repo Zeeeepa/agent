@@ -149,6 +149,9 @@ async def _call_single(model: str, text: str) -> List[float]:
             if not vec:
                 return await asyncio.to_thread(_offline_embed, model, text)
             return vec
+        except asyncio.CancelledError:
+            # Treat cancellation as signal to return fast offline vector
+            return await asyncio.to_thread(_offline_embed, model, text)
         except Exception as e:
             await _dump_line(f"single error: {type(e).__name__}")
             return await asyncio.to_thread(_offline_embed, model, text)
@@ -180,6 +183,9 @@ async def _call_batch(model: str, texts: List[str]) -> List[List[float]]:
                     vec = _offline_embed(model, texts[i])
                 out.append(vec)
             return out
+        except asyncio.CancelledError:
+            # Return offline embeddings for all
+            return await asyncio.gather(*[asyncio.to_thread(_offline_embed, model, t) for t in texts])
         except Exception as e:
             await _dump_line(f"batch error: {type(e).__name__}")
             return await asyncio.gather(*[asyncio.to_thread(_offline_embed, model, t) for t in texts])
@@ -200,7 +206,11 @@ async def embed_text_cached(text: str, *, model: str) -> List[float]:
         try:
             res = await fut
             return list(res or [])
-        except Exception:
+        except asyncio.CancelledError:
+            # Upstream cancellation of coalesced future: ignore and compute fresh
+            pass
+        except BaseException:
+            # Treat any other fatal condition as cache miss and continue
             pass
     loop = asyncio.get_running_loop()
     fut = loop.create_future()
@@ -251,7 +261,9 @@ async def embed_texts_cached(texts: List[str], *, model: str) -> List[List[float
         try:
             res = await fut
             out[i] = list(res or [])
-        except Exception:
+        except asyncio.CancelledError:
+            out[i] = []
+        except BaseException:
             out[i] = []
 
     # Batch call for remaining missing

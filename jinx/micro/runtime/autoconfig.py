@@ -355,6 +355,82 @@ def apply_auto_defaults(settings: Any | None = None) -> None:
     # RT budgets
     _set_default("EMBED_SLICE_MS", "12")
     _set_default("JINX_LOCATOR_VEC_MS", "120")
+
+    # ================================
+    # ADVANCED LLM CONSENSUS / CONTEXT
+    # ================================
+    _set_default("JINX_LLM_CONSENSUS", "1")
+    _set_default("JINX_LLM_CONSENSUS_MS", "500")
+    _set_default("JINX_LLM_CONSENSUS_K", "3")
+    _set_default("JINX_LLM_CONSENSUS_JUDGE", "1")
+    _set_default("JINX_LLM_CONSENSUS_JUDGE_MS", "450")
+    _set_default("JINX_CODEGRAPH_CTX", "1")
+
+    # ================================
+    # AUTOPATCH (RT-friendly budgets)
+    # ================================
+    _set_default("JINX_AUTOPATCH_MAX_MS", "900")
+    _set_default("JINX_AUTOPATCH_PREVIEW_CONC", "4")
+    _set_default("JINX_AUTOPATCH_SEARCH_TOPK", "4")
+    # Respect budgets by default under RT constraints
+    _set_default("JINX_AUTOPATCH_NO_BUDGETS", "0")
+    _set_default("JINX_PATCH_CONTEXT_TOL", "0.72")
+    _set_default("JINX_AUTOPATCH_BANDIT_HALF_SEC", "1800")
+
+    # ================================
+    # BRAIN EXPANSION FOR SEARCH
+    # ================================
+    _set_default("EMBED_BRAIN_ENABLE", "1")
+    _set_default("EMBED_BRAIN_TOP_K", "10")
+    _set_default("EMBED_BRAIN_EXPAND_MAX_TOKENS", "6")
+
+    # ================================
+    # CENTRAL CPU POOL & ADMISSION CAPS
+    # ================================
+    # 0 => auto based on cpu_count()
+    _set_default("JINX_CPU_WORKERS", "0")
+    # Admission control caps (can be overridden by env)
+    _set_default("JINX_ADM_GRAPH_CONC", "1")
+    _set_default("JINX_ADM_PATCH_CONC", "2")
+    _set_default("JINX_ADM_LLM_CONC", "2")
+    _set_default("JINX_ADM_TURN_CONC", "4")
+
+    # ================================
+    # SELF-REPROGRAM PLANNER (embeddings integration)
+    # ================================
+    _set_default("JINX_PLAN_TOPK", "8")
+    _set_default("JINX_PLAN_EMBED_MS", "600")
+    _set_default("JINX_PLAN_REFINE_MS", "500")
+
+    # ================================
+    # CODEMODS (enable rope if available)
+    # ================================
+    try:
+        import importlib as _il
+        have_rope = True
+        try:
+            _il.import_module("rope.base.project")
+        except Exception:
+            have_rope = False
+        _set_default("JINX_CODEMOD_ROPE", "1" if have_rope else "0")
+    except Exception:
+        _set_default("JINX_CODEMOD_ROPE", "0")
+
+    # ================================
+    # SELF-REPROGRAM TESTS
+    # ================================
+    _set_default("JINX_REPROGRAM_TESTS", "1")
+
+    # ================================
+    # OBSERVABILITY (enable if installed)
+    # ================================
+    try:
+        import importlib as _il
+        _il.import_module("opentelemetry")
+        _set_default("JINX_OTEL_SETUP", "1")
+        _set_default("JINX_OTEL_EXPORTER", "console")
+    except Exception:
+        _set_default("JINX_OTEL_SETUP", "0")
     
     # =================================================================
     # INTELLIGENT PATCHER - All features enabled

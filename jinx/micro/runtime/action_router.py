@@ -39,13 +39,24 @@ async def _synth_arch_spec(query: str, *, budget_ms: int = 900) -> Optional[Dict
         from jinx.micro.llm.service import spark_openai as _spark
     except Exception:
         return None
-    prompt = (
-        "You are an expert API architect. Given a request, produce a minimal JSON spec for a REST API.\n"
-        "The JSON MUST follow this shape exactly and contain only ASCII without code fences:\n"
-        "{\n  \"name\": \"string\",\n  \"resources\": [\n    {\n      \"name\": \"string\",\n      \"fields\": {\"id\": \"int|str|float|bool\", ...},\n      \"endpoints\": [\"list\", \"get\", \"create\", \"update\", \"delete\"]\n    }\n  ]\n}\n\n"
-        "Keep at most 4 resources and 6 fields per resource.\n"
-        f"Request: {query}\n"
-    )
+    try:
+        from jinx.prompts import render_prompt as _render_prompt
+        shape = (
+            '{\n  "name": "string",\n  "resources": [\n    {\n      "name": "string",\n      "fields": {"id": "int|str|float|bool", ...},\n      "endpoints": ["list", "get", "create", "update", "delete"]\n    }\n  ]\n}'
+        )
+        # Minimal project context
+        from jinx.micro.llm.prompting import derive_basic_context as _derive
+        pname, resources = _derive()
+        import json as _json
+        prompt = _render_prompt(
+            "architect_api",
+            shape=shape,
+            project_name=pname,
+            candidate_resources_json=_json.dumps(resources),
+            request=query,
+        )
+    except Exception:
+        prompt = f"Request: {query}"
     try:
         out, _ = await asyncio.wait_for(_spark(prompt), timeout=max(0.3, budget_ms) / 1000.0)
     except Exception:

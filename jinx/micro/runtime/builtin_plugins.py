@@ -812,6 +812,51 @@ def register_builtin_plugins() -> None:
         features={"metrics"},
     )
 
+    # Reprogram intake: convert "/reprogram <goal>" or natural-language triggers into a self-reprogram request
+    async def _reprog_start(ctx) -> None:  # type: ignore[no-redef]
+        from typing import Any
+        import re as _re
+
+        async def _on_intake(_topic: str, payload: Any) -> None:
+            try:
+                text = str((payload or {}).get("text") or "").strip()
+            except Exception:
+                text = ""
+            if not text:
+                return
+            low = text.lower()
+            goal: str | None = None
+            if low.startswith("/reprogram "):
+                goal = text.split(" ", 1)[1].strip()
+            else:
+                # Natural-language triggers (RU/EN)
+                if ("перепрограммируй" in low) or ("self-reprogram" in low) or (low.startswith("reprogram jinx")) or ("modify yourself" in low):
+                    # Extract goal after trigger if possible, else use whole text
+                    m = _re.search(r"(?:/reprogram|перепрограммируй|self-reprogram|reprogram jinx|modify yourself)[:\s]+(.+)", low)
+                    goal = (m.group(1).strip() if m else text)
+            if goal:
+                try:
+                    from jinx.micro.runtime.api import submit_task as _submit
+                    await _submit("reprogram.request", goal=goal)
+                except Exception:
+                    pass
+
+        subscribe_event("queue.intake", plugin="reprogram", callback=_on_intake)
+
+    async def _reprog_stop(ctx) -> None:  # type: ignore[no-redef]
+        return None
+
+    register_plugin(
+        "reprogram",
+        start=_reprog_start,
+        stop=_reprog_stop,
+        enabled=True,
+        priority=12,
+        version="1.0.0",
+        deps=[],
+        features={"reprogram"},
+    )
+
     # Shadow canary: in green mode, ack *.in files with *.ok in JINX_SELFUPDATE_SHADOW_DIR
     async def _shadow_start(ctx) -> None:  # type: ignore[no-redef]
         import os

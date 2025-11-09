@@ -51,23 +51,23 @@ def build_api_spec_prompt(
     project_name: str,
     candidate_resources: List[str],
 ) -> str:
-    """Construct a strict prompt for API spec synthesis.
-    Returns a compact instruction that enforces a JSON-only response.
-    """
+    """Construct a strict prompt for API spec synthesis using prompt templates."""
     req = (request or "Generate a pragmatic REST API for this repository.").strip()
-    shape = (
-        '{\n  "name": "string",\n  "resources": [\n    {\n      "name": "string",\n      "fields": {"id": "int|str|float|bool", "...": "..."},\n      "endpoints": ["list", "get", "create", "update", "delete"]\n    }\n  ]\n}'
-    )
-    prompt = (
-        "You are an autonomous system planner. Produce ONLY a JSON object for a REST API spec.\n"
-        "Respond with ASCII only, no code fences, no commentary. Use this exact shape:\n"
-        f"{shape}\n\n"
-        "Constraints: max 4 resources, max 6 fields per resource. Prefer pragmatic defaults.\n"
-        f"Project name: {project_name}\n"
-        f"Candidate resources: {json.dumps(candidate_resources)}\n"
-        f"Request: {req}\n"
-    )
-    return prompt
+    try:
+        from jinx.prompts import render_prompt as _render_prompt
+        shape = (
+            '{\n  "name": "string",\n  "resources": [\n    {\n      "name": "string",\n      "fields": {"id": "int|str|float|bool", ...},\n      "endpoints": ["list", "get", "create", "update", "delete"]\n    }\n  ]\n}'
+        )
+        prompt = _render_prompt(
+            "architect_api",
+            shape=shape,
+            project_name=project_name,
+            candidate_resources_json=json.dumps(candidate_resources),
+            request=req,
+        )
+        return prompt
+    except Exception:
+        return req
 
 
 __all__ = [

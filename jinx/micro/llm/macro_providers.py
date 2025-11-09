@@ -658,6 +658,28 @@ async def _code_handler(args: List[str], ctx: MacroContext) -> str:
     return await memoized_call(key, pttl, _scan)
 
 
+# ---------------------------- Policy rails macro ----------------------------
+
+async def _policy_handler(args: List[str], ctx: MacroContext) -> str:
+    """Policy provider: {{m:policy:jinx_rails}}
+
+    Returns a small ASCII-only instruction tail to reinforce Jinx rails uniformly.
+    """
+    variant = (args[0] if args else "").strip().lower()
+    if variant != "jinx_rails":
+        return ""
+    lines = [
+        "- ASCII-only; no code fences; avoid angle brackets in values.",
+        "- Respect Risk Policies; avoid denied paths and globs.",
+        "- Atomic diffs; tiny patches; preserve existing style and naming.",
+        "- Async-first; never block the event loop; offload CPU via asyncio.to_thread.",
+        "- Avoid non-stdlib deps unless already present; prefer internal runtime APIs.",
+        "- No triple quotes; do NOT use try/except.",
+        "- Deterministic outputs; JSON-only where required; keep outputs concise.",
+    ]
+    return "\n" + "\n".join(lines) + "\n"
+
+
 def _pins_enabled() -> bool:
     try:
         return str(os.getenv("JINX_MEM_PINS_ENABLE", "1")).lower() not in ("", "0", "false", "off", "no")
@@ -835,4 +857,5 @@ async def register_builtin_macros() -> None:
     await register_macro("codegraph", _codegraph_handler)
     await register_macro("testgen", _testgen_handler)
     await register_macro("test", _testrun_handler)
+    await register_macro("policy", _policy_handler)
     _registered = True

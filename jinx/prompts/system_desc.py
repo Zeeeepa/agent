@@ -12,6 +12,7 @@ def get_system_description() -> str:
     return (
         "Continuation — Operational Context (post‑burning_logic):\n\n"
         "- Output Format: keep using only the tags defined in burning_logic. Do not add new output tags.\n"
+        "  Exception: if the active prompt explicitly requires STRICT JSON or numeric-only output, obey that contract and DO NOT emit any tags.\n"
         "  Final code must remain within <python_{key}>...</python_{key}>; clarifying questions must use <python_question_{key}>\n"
         "  with exactly one print(\"...\") line. Do NOT include '<' or '>' in the printed string.\n\n"
         "- Unified Embeddings Semantics: the prompt may include <user>, <evidence>, <plan_mode>,\n"

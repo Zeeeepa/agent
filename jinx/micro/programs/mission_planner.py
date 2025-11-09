@@ -167,23 +167,27 @@ class MissionPlannerProgram(MicroProgram):
                 "endpoints": ["list", "get", "create", "update", "delete"],
             })
         return res
-
     async def _try_llm_spec(self, name: str, resources: list[dict[str, Any]]) -> Optional[Dict[str, Any]]:
         try:
             from jinx.micro.llm.service import spark_openai as _spark
         except Exception:
             return None
-        prompt = (
-            "You are an autonomous system planner. Produce ONLY a JSON object for a REST API spec.\n"
-            "Shape: {\"name\": str, \"resources\": [{\"name\": str, \"fields\": {k: type}, \"endpoints\": [list,get,create,update,delete]}]}\n"
-            "Use ascii only, no code fences. Max 4 resources, max 6 fields each.\n\n"
-            f"Project name: {name}\n"
-            f"Candidate resources: {json.dumps([r['name'] for r in resources])}\n"
-        )
+        try:
+            from jinx.micro.llm.prompting import build_api_spec_prompt as _build_prompt
+            prompt = _build_prompt(
+                request=None,
+                project_name=name,
+                candidate_resources=[r['name'] for r in resources],
+            )
+        except Exception:
+            return None
         try:
             out, _ = await asyncio.wait_for(_spark(prompt), timeout=1.2)
-            if not out or not isinstance(out, str):
-                return None
+        except Exception:
+            return None
+        if not out or not isinstance(out, str):
+            return None
+        try:
             import re as _re
             m = _re.search(r"\{[\s\S]*\}", out)
             s = m.group(0) if m else out.strip()

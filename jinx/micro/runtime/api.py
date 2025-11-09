@@ -142,6 +142,16 @@ async def ensure_runtime() -> None:
                     pass
         except Exception:
             pass
+        # Quality Scanner (env-gated, default ON) — OpenAI-driven code audit + static checks
+        try:
+            if str(os.getenv("JINX_QUALITY_ENABLE", "1")).lower() not in ("", "0", "false", "off", "no"):
+                try:
+                    from jinx.micro.programs.quality_scanner import spawn_quality_scanner as _spawn_qs
+                    await _spawn_qs()
+                except Exception:
+                    pass
+        except Exception:
+            pass
         # Mission Planner (env-gated, default ON) — fully autonomous planner without user prompts
         try:
             if str(os.getenv("JINX_MISSION_PLANNER_ENABLE", "1")).lower() not in ("", "0", "false", "off", "no"):
@@ -158,6 +168,16 @@ async def ensure_runtime() -> None:
                 try:
                     from jinx.micro.runtime.self_update_manager import spawn_self_update_manager as _spawn_su
                     await _spawn_su()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        # Self-Reprogrammer (env-gated, default ON) — prepares staged code and triggers blue-green swap
+        try:
+            if str(os.getenv("JINX_SELF_REPROGRAM_ENABLE", "1")).lower() not in ("", "0", "false", "off", "no"):
+                try:
+                    from jinx.micro.runtime.self_reprogrammer import spawn_self_reprogrammer as _spawn_sr  # local import
+                    await _spawn_sr()
                 except Exception:
                     pass
         except Exception:

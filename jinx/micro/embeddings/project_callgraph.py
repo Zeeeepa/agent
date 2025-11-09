@@ -217,3 +217,79 @@ def build_symbol_graph(
                     block = f"```{lang}\n{snip}\n```" if lang else f"```\n{snip}\n```"
                     out_pairs.append((hdr, block))
     return out_pairs
+
+
+def windows_for_symbol(
+    symbol: str,
+    *,
+    prefer_rel: Optional[str] = None,
+    callers_limit: int = 4,
+    callees_limit: int = 4,
+    around: int = 10,
+    scan_cap_files: int = 200,
+    time_budget_ms: Optional[int] = 600,
+) -> List[Tuple[str, int, int, str]]:
+    """Return list of (file_rel, line_start, line_end, kind) windows for a symbol.
+
+    Kinds: "DEF", "CALLER", "CALLEE_DEF".
+    Only Python files are considered.
+    """
+    out: List[Tuple[str, int, int, str]] = []
+    if not symbol:
+        return out
+    # 1) If we know preferred file, include its DEF scope
+    def _append_def_scope(rel: str) -> None:
+        abs_p = os.path.join(ROOT, rel)
+        text = _read_text(abs_p)
+        if not text:
+            return
+        tree = _parse_ast_safe(text)
+        if not tree:
+            return
+        dn = _find_def_node(tree, symbol)
+        if not dn:
+            return
+        a, b = _def_node_span(dn)
+        out.append((rel, a, b, "DEF"))
+
+    if prefer_rel:
+        _append_def_scope(prefer_rel)
+
+    # 2) Callers across project
+    callers = _find_callers_ast(
+        symbol,
+        exclude_rel=prefer_rel or "",
+        around=around,
+        scan_cap_files=scan_cap_files,
+        time_budget_ms=time_budget_ms,
+    )
+    for rel, a, b, _snip, _lang in callers[: max(0, callers_limit)]:
+        out.append((rel, a, b, "CALLER"))
+
+    # 3) Callee definitions if we have a DEF scope to inspect
+    base_rel = prefer_rel
+    if not base_rel:
+        # Try to discover one DEF quickly
+        defs = _find_defs_by_name(symbol, scan_cap_files=scan_cap_files, time_budget_ms=time_budget_ms)
+        if defs:
+            base_rel = defs[0][0]
+            out.append((defs[0][0], defs[0][1], defs[0][2], "DEF"))
+
+    if base_rel:
+        abs_p = os.path.join(ROOT, base_rel)
+        text = _read_text(abs_p)
+        tree = _parse_ast_safe(text)
+        if tree:
+            dn = _find_def_node(tree, symbol)
+            if dn:
+                callees = _find_callees_in_def(dn)
+                seen_keys: set[Tuple[str, int, int]] = set()
+                for nm in callees[: max(0, callees_limit)]:
+                    defs = _find_defs_by_name(nm, scan_cap_files=scan_cap_files, time_budget_ms=time_budget_ms)
+                    for rel, a, b, _snip, _lang in defs:
+                        key = (rel, a, b)
+                        if key in seen_keys:
+                            continue
+                        seen_keys.add(key)
+                        out.append((rel, a, b, "CALLEE_DEF"))
+    return out

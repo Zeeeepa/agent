@@ -29,6 +29,7 @@ from jinx.micro.llm.enrichers.exports import (
 )
 from jinx.micro.memory.turn_summaries import read_group_summary as _read_group_summary
 from jinx.micro.runtime.task_ctx import get_current_group as _get_group
+from jinx.micro.llm.prompt_brain import compose_policy_tail, record_prompt_outcome
 
 
 async def code_primer(prompt_override: str | None = None) -> tuple[str, str]:
@@ -42,6 +43,8 @@ async def code_primer(prompt_override: str | None = None) -> tuple[str, str]:
 async def _prepare_request(txt: str, *, prompt_override: str | None = None) -> tuple[str, str, str, str, str]:
     """Compose instructions with brain systems integration and ML enhancement."""
     jx, tag = await code_primer(prompt_override)
+    # Precompute sanitized input for optional enrichers that need it earlier
+    stxt = sanitize_prompt_for_external_api(txt or "")
     
     # Cooperative yield - always enabled for RT constraints
     async def _yield0() -> None:
@@ -114,6 +117,19 @@ async def _prepare_request(txt: str, *, prompt_override: str | None = None) -> t
             if clines:
                 jx = jx + "\n" + "\n".join(clines) + "\n"
         await _yield0()
+        # Optional CodeGraph snippets enrichment
+        try:
+            if str(os.getenv("JINX_CODEGRAPH_CTX", "1")).lower() not in ("", "0", "false", "off", "no"):
+                from jinx.codegraph.service import snippets_for_text as _cg_snips
+                pairs = await _cg_snips(stxt, max_tokens=8, max_snippets=4)
+                if pairs:
+                    cg = []
+                    for hdr, block in pairs:
+                        cg.append(hdr)
+                        cg.append(block)
+                    jx = jx + "\n" + "\n".join(cg) + "\n"
+        except Exception:
+            pass
         # Optionally include recent patch previews/commits from runtime exports
         try:
             include_patch = str(os.getenv("JINX_AUTOMACRO_PATCH_EXPORTS", "1")).lower() not in ("", "0", "false", "off", "no")
@@ -216,6 +232,13 @@ async def _prepare_request(txt: str, *, prompt_override: str | None = None) -> t
         else:
             await debug_log(f"No expansion occurred (size unchanged: {jx_before_len} chars)", "MACROS")
         await _yield0()
+        # Append policy tail (prompt brain) to bias outputs based on past outcomes
+        try:
+            tail = await compose_policy_tail(tag, stxt, have_unified_ctx=have_unified_ctx)
+            if tail:
+                jx = jx + tail
+        except Exception:
+            pass
         # Best-effort token hint (chars/4 heuristic) for dynamic memory budgets
         try:
             est_tokens = max(0, (len(jx) + len(txt or "")) // 4)
@@ -227,7 +250,6 @@ async def _prepare_request(txt: str, *, prompt_override: str | None = None) -> t
     model = os.getenv("OPENAI_MODEL", "gpt-4.1")
     # Sanitize prompts to avoid leaking internal .jinx paths/content
     sx = sanitize_prompt_for_external_api(jx)
-    stxt = sanitize_prompt_for_external_api(txt or "")
     return jx, tag, model, sx, stxt
 
 
@@ -251,12 +273,18 @@ async def spark_openai(txt: str, *, prompt_override: str | None = None) -> tuple
         ))
         # Preferred: validated multi-sample path
         try:
+            from jinx.observability.otel import span as _span
+        except Exception:
+            from contextlib import nullcontext as _span  # type: ignore
+        try:
             async with timing_section("llm.call"):
-                out = await call_openai_validated(sx, model, stxt, code_id=tag)
+                with _span("llm.call"):
+                    out = await call_openai_validated(sx, model, stxt, code_id=tag)
         except Exception:
             # Fallback to legacy single-sample on error
             async with timing_section("llm.call_legacy"):
-                out = await call_openai(sx, model, stxt)
+                with _span("llm.call_legacy"):
+                    out = await call_openai(sx, model, stxt)
         # If still empty (e.g., provider forbidden region soft-path), fallback to legacy path
         if not (out or "").strip():
             try:
@@ -264,6 +292,12 @@ async def spark_openai(txt: str, *, prompt_override: str | None = None) -> tuple
                     out = await call_openai(sx, model, stxt)
             except Exception:
                 out = out or ""
+        # Tiny consensus refinement (budgeted)
+        try:
+            from .consensus import refine_output as _refine
+            out = await _refine(sx, model, stxt, out)
+        except Exception:
+            pass
         # Get dump path (await, then append in background)
         try:
             req_path = await dump_task
@@ -271,6 +305,11 @@ async def spark_openai(txt: str, *, prompt_override: str | None = None) -> tuple
             req_path = ""
         try:
             _asyncio.create_task(write_openai_response_append(req_path, "GENERAL", out))
+        except Exception:
+            pass
+        # Record outcome in prompt brain (best-effort)
+        try:
+            await record_prompt_outcome(tag, out)
         except Exception:
             pass
         return (out, tag)
@@ -298,11 +337,17 @@ async def spark_openai_streaming(txt: str, *, prompt_override: str | None = None
             model=model,
         ))
         try:
+            from jinx.observability.otel import span as _span
+        except Exception:
+            from contextlib import nullcontext as _span  # type: ignore
+        try:
             async with timing_section("llm.stream"):
-                out = await call_openai_stream_first_block(sx, model, stxt, code_id=tag, on_first_block=on_first_block)
+                with _span("llm.stream"):
+                    out = await call_openai_stream_first_block(sx, model, stxt, code_id=tag, on_first_block=on_first_block)
         except Exception:
             async with timing_section("llm.call_fallback"):
-                out = await call_openai_validated(sx, model, stxt, code_id=tag)
+                with _span("llm.call_fallback"):
+                    out = await call_openai_validated(sx, model, stxt, code_id=tag)
         # Empty output guard: fallback to validated, then legacy single-sample as last resort
         if not (out or "").strip():
             try:
@@ -316,12 +361,23 @@ async def spark_openai_streaming(txt: str, *, prompt_override: str | None = None
                         out = await call_openai(sx, model, stxt)
                 except Exception:
                     out = out or ""
+        # Tiny consensus refinement (budgeted)
+        try:
+            from .consensus import refine_output as _refine
+            out = await _refine(sx, model, stxt, out)
+        except Exception:
+            pass
         try:
             req_path = await dump_task
         except Exception:
             req_path = ""
         try:
             _asyncio.create_task(write_openai_response_append(req_path, "GENERAL", out))
+        except Exception:
+            pass
+        # Record outcome in prompt brain (best-effort)
+        try:
+            await record_prompt_outcome(tag, out)
         except Exception:
             pass
         return (out, tag)

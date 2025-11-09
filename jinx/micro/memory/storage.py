@@ -7,6 +7,7 @@ from jinx.async_utils.fs import read_text_raw, write_text
 from jinx.log_paths import INK_SMEARED_DIARY, EVERGREEN_MEMORY
 from jinx.micro.embeddings.project_config import ROOT as PROJECT_ROOT
 import asyncio
+from jinx.state import shard_lock
 
 
 def _memory_dir() -> str:

@@ -40,5 +40,11 @@ def boot() -> None:
         _prewarm()
     except Exception:
         pass
+    # 5) Optional OTEL setup (no-op if not installed or disabled)
+    try:
+        from jinx.observability.setup import setup_otel as _setup_otel
+        _setup_otel()
+    except Exception:
+        pass
 
 __all__ = ["boot"]

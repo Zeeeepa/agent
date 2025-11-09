@@ -63,6 +63,13 @@ async def pulse_core(settings: Settings | None = None) -> None:
     # Resolve settings and apply compatibility state
     cfg = settings or Settings.from_env()
     cfg.apply_to_state()
+    # Start reproducibility recorder (best-effort)
+    _run_id = None
+    try:
+        from jinx.observability.recorder import start_run_record
+        _run_id = start_run_record({"settings": cfg.to_dict()})
+    except Exception:
+        _run_id = None
     # Minimal startup summary to stdout (no CLI required)
     try:
         print(
@@ -287,3 +294,10 @@ async def pulse_core(settings: Settings | None = None) -> None:
             # Ensure ProcessPoolExecutor is torn down to avoid atexit join hang
             with contextlib.suppress(Exception):
                 _retr_pool_shutdown()
+            # Finalize run recorder
+            try:
+                if _run_id:
+                    from jinx.observability.recorder import finalize_run_record
+                    finalize_run_record(_run_id, extra={"status": "shutdown"})
+            except Exception:
+                pass
