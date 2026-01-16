@@ -344,11 +344,11 @@ const policies: ExportedPolicyDataDto = {
 };
 
 const mockProduct: ProductJson = {
-	nameLong: 'Code - OSS',
-	darwinBundleIdentifier: 'com.visualstudio.code.oss',
-	darwinProfilePayloadUUID: 'CF808BE7-53F3-46C6-A7E2-7EDB98A5E959',
-	darwinProfileUUID: '47827DD9-4734-49A0-AF80-7E19B11495CC',
-	win32RegValueName: 'CodeOSS'
+	nameLong: 'machineGPT Agent Studio Code',
+	darwinBundleIdentifier: 'com.machinegpt.code.agent',
+	darwinProfilePayloadUUID: 'D3E8C4A9-1B6F-4E52-8A7C-9F2B6D5A41E8',
+	darwinProfileUUID: 'A7D9F5B1-8C2E-4F6A-9E3A-7F4C91D8A6B2',
+	win32RegValueName: 'CodeAgent'
 };
 
 const frenchTranslations = [

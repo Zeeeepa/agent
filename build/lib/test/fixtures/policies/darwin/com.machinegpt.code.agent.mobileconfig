@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+	<dict>
+		<key>PayloadContent</key>
+		<array>
+			<dict>
+				<key>PayloadDisplayName</key>
+				<string>machineGPT Agent Studio Code</string>
+				<key>PayloadIdentifier</key>
+				<string>com.machinegpt.code.agent.A7D9F5B1-8C2E-4F6A-9E3A-7F4C91D8A6B2</string>
+				<key>PayloadType</key>
+				<string>com.machinegpt.code.agent</string>
+				<key>PayloadUUID</key>
+				<string>A7D9F5B1-8C2E-4F6A-9E3A-7F4C91D8A6B2</string>
+				<key>PayloadVersion</key>
+				<integer>1</integer>
+				<key>ChatAgentExtensionTools</key>
+				<false/>
+				<key>ChatAgentMode</key>
+				<false/>
+				<key>ChatMCP</key>
+				<string>none</string>
+				<key>ChatPromptFiles</key>
+				<false/>
+				<key>ChatToolsAutoApprove</key>
+				<false/>
+				<key>McpGalleryServiceUrl</key>
+				<string></string>
+				<key>AllowedExtensions</key>
+				<string></string>
+				<key>ExtensionGalleryServiceUrl</key>
+				<string></string>
+				<key>ChatToolsTerminalEnableAutoApprove</key>
+				<false/>
+				<key>EnableFeedback</key>
+				<false/>
+				<key>TelemetryLevel</key>
+				<string>all</string>
+				<key>UpdateMode</key>
+				<string>none</string>
+			</dict>
+		</array>
+		<key>PayloadDescription</key>
+		<string>This profile manages machineGPT Agent Studio Code. For more information see https://code.visualstudio.com/docs/setup/enterprise</string>
+		<key>PayloadDisplayName</key>
+		<string>machineGPT Agent Studio Code</string>
+		<key>PayloadIdentifier</key>
+		<string>com.machinegpt.code.agent</string>
+		<key>PayloadOrganization</key>
+		<string>Microsoft</string>
+		<key>PayloadType</key>
+		<string>Configuration</string>
+		<key>PayloadUUID</key>
+		<string>D3E8C4A9-1B6F-4E52-8A7C-9F2B6D5A41E8</string>
+		<key>PayloadVersion</key>
+		<integer>1</integer>
+		<key>TargetDeviceType</key>
+		<integer>5</integer>
+	</dict>
+</plist>
